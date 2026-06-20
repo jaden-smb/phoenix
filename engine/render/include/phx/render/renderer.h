@@ -1,0 +1,121 @@
+// phx/render/renderer.h — ONE 2D-intent API, multiple backends (software / GL / GU / PPU).
+// Abstracted at the highest level honestly common to all four machines: sprites,
+// tilemaps, parallax, palettes. The PPU's 128-sprite ceiling is an honest API limit,
+// not an afterthought. See docs/03-rendering.md.
+#ifndef PHX_RENDER_RENDERER_H
+#define PHX_RENDER_RENDERER_H
+
+#include "phx/core/types.h"
+#include "phx/core/math.h"
+#include "phx/core/caps.h"
+#include "phx/core/pixel.h"
+#include "phx/memory/allocators.h"
+
+struct phx_gfx; // opaque platform graphics device
+
+namespace phx {
+
+using TextureId = uint16_t;
+using TilemapId = uint16_t;
+constexpr TextureId kNoTexture = 0xFFFF;
+constexpr TilemapId kNoTilemap = 0xFFFF;
+
+enum SpriteFlags : uint16_t {
+    kFlipX = 1 << 0,
+    kFlipY = 1 << 1,
+    kBlend = 1 << 2,         // additive/alpha (limited modes on GBA)
+};
+
+// Rgba / rgba() / PixelFormat now live in phx/core/pixel.h (shared with resource).
+
+// POD draw record, batched per frame. Same struct on every backend.
+struct DrawSprite {
+    TextureId tex;
+    int16_t   sx, sy, sw, sh;   // source rect in the texture/atlas (texels)
+    vec2      pos;              // world position (top-left)
+    uint16_t  flags = 0;        // SpriteFlags
+    uint8_t   layer = 0;        // coarse ordering (background..foreground)
+    uint8_t   z     = 0;        // intra-layer sort key
+    int16_t   dw    = 0;        // dest size; 0 => use sw/sh (no scaling). UI bars/panels scale.
+    int16_t   dh    = 0;
+    Rgba      tint  = rgba(255, 255, 255);   // per-channel multiply; white = unchanged
+};
+
+struct Camera2D {
+    vec2    pos   {};
+    scalar  zoom  = s_from_int(1);   // reserved; software path renders 1:1 for now
+    int16_t shake = 0;
+};
+
+// A texture is a decoded pixel rectangle. For RGBA8 the renderer points at `pixels`
+// directly (zero-copy). The resource loader fills these from a baked blob header; tests
+// supply them inline.
+struct TextureDesc {
+    const void* pixels = nullptr;
+    uint32_t    size   = 0;
+    uint16_t    width  = 0;
+    uint16_t    height = 0;
+    PixelFormat format = PixelFormat::RGBA8;
+};
+
+// A tilemap references a tileset texture and holds uint16 tile indices (0 = empty),
+// laid out [layer][y*width + x]. Tiles are tile_w x tile_h; the tileset atlas packs them
+// left-to-right, top-to-bottom.
+struct TilemapDesc {
+    const uint16_t* indices = nullptr;   // width*height*layers entries
+    uint16_t    width  = 0;              // in tiles
+    uint16_t    height = 0;
+    uint8_t     layers = 1;             // <= 4 honored on GBA
+    uint8_t     tile_w = 8;
+    uint8_t     tile_h = 8;
+    TextureId   tileset = kNoTexture;
+};
+
+struct RenderStats {
+    uint32_t sprites_submitted = 0;
+    uint32_t sprites_dropped   = 0;     // > caps.max_sprites (the honest PPU ceiling)
+    uint32_t tiles_drawn       = 0;
+    uint32_t batches           = 0;
+};
+
+struct IRenderBackend;   // internal (engine/render/src/backend.h)
+
+class Renderer {
+public:
+    static Result<Renderer*> create(phx_gfx*, ArenaAllocator&, const Caps&);
+
+    void begin_frame(const Camera2D&);
+
+    // Tilemaps: retained handle uploaded once; scrolling is cheap (free on GBA).
+    TilemapId upload_tilemap(const TilemapDesc&);
+    void      set_tilemap_scroll(TilemapId, vec2 px);
+    void      draw_tilemap(TilemapId, uint8_t layer);
+
+    // Sprites: recorded, then sorted by (layer, z, tex) and drawn on top at end_frame.
+    void      draw_sprite(const DrawSprite&);
+
+    void      end_frame();            // sort -> backend submit -> present
+
+    TextureId load_texture(const TextureDesc&);
+    // Release a texture slot (the backend frees the GPU resource and recycles the id). Used
+    // by the budget-bounded TextureCache to evict; safe to call with kNoTexture.
+    void      unload_texture(TextureId);
+    uint16_t  live_textures() const { return live_tex_; }   // outstanding uploaded textures
+    const RenderStats& stats() const { return stats_; }
+
+private:
+    Renderer() = default;
+    friend class ArenaAllocator;   // so arena.make<Renderer>() can construct it
+
+    IRenderBackend* be_      = nullptr;
+    ArenaAllocator* arena_   = nullptr;
+    Camera2D        cam_     {};
+    DrawSprite*     sprites_ = nullptr;     // per-frame list (fixed, sized to caps.max_sprites)
+    uint32_t        count_   = 0;
+    uint32_t        cap_     = 0;
+    uint16_t        live_tex_ = 0;          // count of outstanding textures (load - unload)
+    RenderStats     stats_   {};
+};
+
+} // namespace phx
+#endif // PHX_RENDER_RENDERER_H

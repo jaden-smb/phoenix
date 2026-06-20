@@ -1,0 +1,97 @@
+# CMake build directories
+build/
+cmake-build-debug/
+cmake-build-release/
+cmake-build-relwithdebinfo/
+cmake-build-minsizerel/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile.cmake
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+
+# Compiled object files and libraries
+*.obj
+*.lib
+*.res
+
+# Dependency files
+*.d
+depend.mk
+
+# Generated files
+*.phxp
+*.ppm
+*.sav
+
+# IDE and editor files
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+.DS_Store
+*.user
+*.VC.db
+*.VC.VC.opendb
+
+# CLion
+.cmake/
+
+# Clang-format and other tool outputs
+.clang-format
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Platform-specific build outputs
+gba/*.gba
+gba/*.sav
+psp/EBOOT.PBP
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Node/npm
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Compiled Python
+*.egg-info/
+dist/
+build-py/
+
+# Misc
+*.log
+.cache/
+.ccache/
+tags
+TAGS
+cscope.*
+
+# Documentation build outputs
+docs/_build/
+site/
+
+# Debugging
+*.dSYM/
+*.su
+*.gch
+*.pch

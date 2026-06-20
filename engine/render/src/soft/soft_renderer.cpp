@@ -1,0 +1,168 @@
+// engine/render/src/soft/soft_renderer.cpp — CPU rasterizer (render tier: software).
+// Draws sprites and tilemaps into the platform's RGBA8 framebuffer (phx_gfx_soft_lock).
+// This is the reference backend: it has no GPU dependency, runs headless, and produces
+// the golden images the GL/GU/GBA backends are validated against (docs/03 §8).
+#include "backend.h"
+#include "phx/platform/gfx_soft.h"
+
+namespace phx {
+namespace {
+
+constexpr uint16_t kMaxTextures = 256;
+constexpr uint16_t kMaxTilemaps = 32;
+
+struct Tex { const uint32_t* px; int32_t w, h; };
+struct Map {
+    const uint16_t* idx;
+    int32_t  w, h;
+    uint8_t  layers, tw, th;
+    TextureId tileset;
+    int32_t  scroll_x, scroll_y;   // pixels
+};
+
+class SoftBackend final : public IRenderBackend {
+public:
+    void init(phx_gfx* gfx, ArenaAllocator& a, const Caps&) {
+        gfx_  = gfx;
+        tex_  = a.alloc_array<Tex>(kMaxTextures);
+        free_ = a.alloc_array<TextureId>(kMaxTextures);
+        maps_ = a.alloc_array<Map>(kMaxTilemaps);
+    }
+
+    TextureId upload_tex(const TextureDesc& d) override {
+        if (d.format != PixelFormat::RGBA8) return kNoTexture;
+        TextureId id;
+        if (free_n_ > 0)              id = free_[--free_n_];   // reuse a recycled slot
+        else if (tex_count_ < kMaxTextures) id = tex_count_++; // grow the high-water mark
+        else return kNoTexture;                                // genuinely full
+        tex_[id] = Tex{ static_cast<const uint32_t*>(d.pixels), int32_t(d.width), int32_t(d.height) };
+        return id;
+    }
+
+    void free_tex(TextureId id) override {
+        if (id >= tex_count_ || tex_[id].px == nullptr) return;  // out of range / double free
+        tex_[id].px = nullptr;                                   // mark slot empty
+        free_[free_n_++] = id;                                   // recycle the id
+    }
+
+    TilemapId upload_map(const TilemapDesc& d) override {
+        if (map_count_ >= kMaxTilemaps) return kNoTilemap;
+        TilemapId id = map_count_++;
+        maps_[id] = Map{ d.indices, int32_t(d.width), int32_t(d.height),
+                         d.layers, d.tile_w, d.tile_h, d.tileset, 0, 0 };
+        return id;
+    }
+
+    void set_scroll(TilemapId id, vec2 px) override {
+        if (id >= map_count_) return;
+        maps_[id].scroll_x = s_to_int(px.x);
+        maps_[id].scroll_y = s_to_int(px.y);
+    }
+
+    void begin(const Camera2D& cam) override {
+        fb_     = phx_gfx_soft_lock(gfx_);
+        cam_x_  = s_to_int(cam.pos.x);
+        cam_y_  = s_to_int(cam.pos.y);
+        stats_  = RenderStats{};
+        clear(rgba(30, 30, 46));                       // a calm slate background
+    }
+
+    void draw_tilemap(TilemapId id, uint8_t layer) override {
+        if (id >= map_count_ || layer >= maps_[id].layers) return;
+        const Map& m = maps_[id];
+        if (m.tileset >= tex_count_) return;
+        const Tex& ts = tex_[m.tileset];
+        if (!ts.px) return;                            // tileset texture was freed
+        const int cols = ts.w / m.tw;                  // tiles per atlas row
+        if (cols <= 0) return;
+        const uint16_t* layer_idx = m.idx + size_t(layer) * size_t(m.w) * size_t(m.h);
+
+        for (int ty = 0; ty < m.h; ++ty) {
+            for (int tx = 0; tx < m.w; ++tx) {
+                uint16_t cell = layer_idx[ty * m.w + tx];
+                if (cell == 0) continue;               // 0 = empty
+                int t = cell - 1;
+                int sx = (t % cols) * m.tw;
+                int sy = (t / cols) * m.th;
+                int dx = tx * m.tw - m.scroll_x - cam_x_;
+                int dy = ty * m.th - m.scroll_y - cam_y_;
+                blit(dx, dy, ts, sx, sy, m.tw, m.th, m.tw, m.th, false, false, rgba(255, 255, 255));
+                ++stats_.tiles_drawn;
+            }
+        }
+    }
+
+    void submit_sprites(const DrawSprite* s, uint32_t n) override {
+        for (uint32_t i = 0; i < n; ++i) {
+            const DrawSprite& d = s[i];
+            if (d.tex >= tex_count_ || tex_[d.tex].px == nullptr) continue;
+            int dx = s_to_int(d.pos.x) - cam_x_;
+            int dy = s_to_int(d.pos.y) - cam_y_;
+            blit(dx, dy, tex_[d.tex], d.sx, d.sy, d.sw, d.sh,
+                 d.dw > 0 ? d.dw : d.sw, d.dh > 0 ? d.dh : d.sh,
+                 (d.flags & kFlipX) != 0, (d.flags & kFlipY) != 0, d.tint);
+        }
+        ++stats_.batches;
+    }
+
+    void end() override { /* present handled by platform; nothing to unlock for null/CPU */ }
+
+    RenderStats& stats() override { return stats_; }
+
+private:
+    void clear(Rgba c) {
+        const int total = fb_.w * fb_.h;
+        for (int i = 0; i < total; ++i) fb_.pixels[i] = c;
+    }
+
+    // Nearest-sample blit of a source rect into a dest rect (dw x dh), with optional flip,
+    // per-channel tint, alpha test, and clipping. dest==source size is the common 1:1 path.
+    void blit(int dx, int dy, const Tex& t, int sx, int sy, int sw, int sh,
+              int dw, int dh, bool fx, bool fy, Rgba tint) {
+        if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
+        const bool mod = (tint != rgba(255, 255, 255));
+        for (int y = 0; y < dh; ++y) {
+            int py = dy + y;
+            if (py < 0 || py >= fb_.h) continue;
+            int soy = (dh == sh) ? y : (y * sh / dh);     // nearest source row
+            int srcY = fy ? (sy + sh - 1 - soy) : (sy + soy);
+            if (srcY < 0 || srcY >= t.h) continue;
+            for (int x = 0; x < dw; ++x) {
+                int px = dx + x;
+                if (px < 0 || px >= fb_.w) continue;
+                int sox = (dw == sw) ? x : (x * sw / dw); // nearest source col
+                int srcX = fx ? (sx + sw - 1 - sox) : (sx + sox);
+                if (srcX < 0 || srcX >= t.w) continue;
+                uint32_t texel = t.px[srcY * t.w + srcX];
+                if ((texel >> 24) == 0) continue;          // fully transparent -> skip
+                if (mod) {
+                    uint32_t r = uint32_t(rgba_r(texel)) * rgba_r(tint) / 255;
+                    uint32_t g = uint32_t(rgba_g(texel)) * rgba_g(tint) / 255;
+                    uint32_t b = uint32_t(rgba_b(texel)) * rgba_b(tint) / 255;
+                    texel = rgba(uint8_t(r), uint8_t(g), uint8_t(b), rgba_a(texel));
+                }
+                fb_.pixels[py * fb_.w + px] = texel;
+            }
+        }
+    }
+
+    phx_gfx*    gfx_ = nullptr;
+    phx_soft_fb fb_  { nullptr, 0, 0 };
+    int32_t     cam_x_ = 0, cam_y_ = 0;
+
+    Tex*       tex_  = nullptr;  uint16_t tex_count_ = 0;   // high-water mark of slots ever used
+    TextureId* free_ = nullptr;  uint16_t free_n_   = 0;    // recycled-slot stack
+    Map*       maps_ = nullptr;  uint16_t map_count_ = 0;
+    RenderStats stats_ {};
+};
+
+} // namespace
+
+IRenderBackend* phx_make_render_backend(phx_gfx* gfx, ArenaAllocator& arena, const Caps& caps) {
+    SoftBackend* be = arena.make<SoftBackend>();
+    if (!be) return nullptr;
+    be->init(gfx, arena, caps);
+    return be;
+}
+
+} // namespace phx
