@@ -101,6 +101,8 @@ public:
     void begin(const Camera2D& cam) override {
         cam_x_ = s_to_int(cam.pos.x);
         cam_y_ = s_to_int(cam.pos.y);
+        zq_    = s_to_q16(cam.zoom);
+        if (zq_ <= 0) zq_ = 1 << 16;
         stats_ = RenderStats{};
 
         glViewport(0, 0, draw_w_, draw_h_);
@@ -129,9 +131,11 @@ public:
                 if (cell == 0) continue;
                 int t = cell - 1;
                 int sx = (t % cols) * m.tw, sy = (t / cols) * m.th;
-                int dx = tx * m.tw - m.scroll_x - cam_x_;
-                int dy = ty * m.th - m.scroll_y - cam_y_;
-                quad(ts, sx, sy, m.tw, m.th, dx, dy, m.tw, m.th, false, false, rgba(255,255,255));
+                int wx = tx * m.tw - m.scroll_x - cam_x_;
+                int wy = ty * m.th - m.scroll_y - cam_y_;
+                int dx = zsc(wx), dy = zsc(wy);
+                quad(ts, sx, sy, m.tw, m.th, dx, dy, zsc(wx + m.tw) - dx, zsc(wy + m.th) - dy,
+                     false, false, rgba(255,255,255));
                 ++stats_.tiles_drawn;
             }
     }
@@ -140,10 +144,12 @@ public:
         for (uint32_t i = 0; i < n; ++i) {
             const DrawSprite& d = s[i];
             if (d.tex >= tex_count_ || tex_[d.tex].id == 0) continue;
-            int dx = s_to_int(d.pos.x) - cam_x_;
-            int dy = s_to_int(d.pos.y) - cam_y_;
+            int wx = s_to_int(d.pos.x) - cam_x_;
+            int wy = s_to_int(d.pos.y) - cam_y_;
+            int ww = d.dw > 0 ? d.dw : d.sw, wh = d.dh > 0 ? d.dh : d.sh;
+            int dx = zsc(wx), dy = zsc(wy);
             quad(tex_[d.tex], d.sx, d.sy, d.sw, d.sh, dx, dy,
-                 d.dw > 0 ? d.dw : d.sw, d.dh > 0 ? d.dh : d.sh,
+                 zsc(wx + ww) - dx, zsc(wy + wh) - dy,
                  (d.flags & kFlipX) != 0, (d.flags & kFlipY) != 0, d.tint);
         }
         ++stats_.batches;
@@ -154,6 +160,10 @@ public:
     RenderStats& stats() override { return stats_; }
 
 private:
+    // Camera-relative pixel -> zoomed screen pixel (Q16.16), same math as soft/GU so the GPU
+    // fills the identical integer dest rects (the software backend stays the golden reference).
+    int zsc(int v) const { return int((int64_t(v) * zq_) >> 16); }
+
     void quad(const Tex& t, int sx, int sy, int sw, int sh,
               int dx, int dy, int dw, int dh, bool fx, bool fy, Rgba tint) {
         if (t.w <= 0 || t.h <= 0) return;
@@ -177,6 +187,7 @@ private:
     phx_gfx* gfx_ = nullptr;
     int32_t  log_w_ = 0, log_h_ = 0, draw_w_ = 0, draw_h_ = 0;
     int32_t  cam_x_ = 0, cam_y_ = 0;
+    int32_t  zq_    = 1 << 16;     // camera zoom as Q16.16 (matches soft/GU dest rects)
     Tex*       tex_  = nullptr;  uint16_t tex_count_ = 0;
     TextureId* free_ = nullptr;  uint16_t free_n_   = 0;    // recycled-slot stack
     Map*     maps_ = nullptr;  uint16_t map_count_ = 0;

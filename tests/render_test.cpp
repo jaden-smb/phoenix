@@ -109,6 +109,37 @@ int main() {
 
     save_ppm(fb, "build/render_out.ppm");
 
+    // --- camera zoom: re-render the SAME scene at 2x and assert it scaled about the origin ---
+    // tile(0,0) blue now spans screen 0..15, tile(1,0) yellow 16..31, the red sprite (world
+    // 20,20 size 8) spans screen 40..55. Edge-difference scaling => no seams, exact at 2x.
+    r->begin_frame(Camera2D{ vec2{}, s_from_int(2), 0 });
+    r->draw_tilemap(map, 0);
+    r->draw_sprite(spr);
+    r->end_frame();
+    fb = phx_gfx_soft_lock(plat->gfx());
+    expect_px(fb, 3,  3,  kBlue,   "zoom2 tile(0,0) blue grown");
+    expect_px(fb, 20, 3,  kYellow, "zoom2 tile(1,0) yellow at 2x offset");
+    expect_px(fb, 3,  20, kYellow, "zoom2 tile(0,1) yellow at 2x offset");
+    expect_px(fb, 44, 44, kRed,    "zoom2 sprite scaled to 16px");
+    expect_px(fb, 23, 23, kBlue,   "zoom2: old sprite spot is now a background tile");
+
+    // --- camera shake: a fresh renderer (frame 0 -> deterministic +8px X jitter) shifts the
+    // scene left by 8, so the yellow tile(1,0) (world x 8..15) lands at the origin. shake is
+    // a front-end camera offset, so this exercises the same path every backend sees. ---
+    auto rr2 = Renderer::create(plat->gfx(), arena, caps());
+    if (rr2.ok()) {
+        Renderer* r2 = rr2.unwrap();
+        TextureId ts2 = r2->load_texture(tsd);
+        TilemapDesc md2 = md; md2.tileset = ts2;
+        TilemapId map2 = r2->upload_tilemap(md2);
+        Camera2D sc{}; sc.shake = 8;
+        r2->begin_frame(sc);
+        r2->draw_tilemap(map2, 0);
+        r2->end_frame();
+        fb = phx_gfx_soft_lock(plat->gfx());
+        expect_px(fb, 3, 3, kYellow, "shake +8x: tile(1,0) yellow shifted to the origin");
+    } else { ++g_fail; std::printf("    FAIL second renderer for shake\n"); }
+
     plat->shutdown();
 
     std::printf("\nrender_test: %d checks, %d failures\n", g_checks, g_fail);

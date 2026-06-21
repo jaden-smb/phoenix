@@ -43,8 +43,11 @@ struct DrawSprite {
 
 struct Camera2D {
     vec2    pos   {};
-    scalar  zoom  = s_from_int(1);   // reserved; software path renders 1:1 for now
-    int16_t shake = 0;
+    scalar  zoom  = s_from_int(1);   // view scale about the camera origin (1 = 1:1). Honoured by
+                                     // soft/GL/GU; the GBA PPU renders 1:1 (free zoom needs the
+                                     // opt-in affine path, docs/03 §4) and ignores it.
+    int16_t shake = 0;               // screen-shake magnitude in pixels (deterministic jitter,
+                                     // applied by the renderer front end; 0 = none).
 };
 
 // A texture is a decoded pixel rectangle. For RGBA8 the renderer points at `pixels`
@@ -114,6 +117,7 @@ private:
     uint32_t        count_   = 0;
     uint32_t        cap_     = 0;
     uint16_t        live_tex_ = 0;          // count of outstanding textures (load - unload)
+    uint32_t        frame_   = 0;           // frame counter (drives deterministic camera shake)
     RenderStats     stats_   {};
 };
 

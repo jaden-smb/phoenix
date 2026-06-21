@@ -14,6 +14,9 @@
 #include "phx/platform/gfx_soft.h"
 
 #include <SDL.h>
+#if defined(PHX_HAVE_GL)
+#include <SDL_opengl.h>      // glReadPixels for the verification readback (GL render tier)
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -72,7 +75,7 @@ int sdl_init(const phx_platform_desc* desc) {
                              w * kScale, h * kScale, SDL_WINDOW_SHOWN);
     if (!g.win) { std::fprintf(stderr, "[phx.sdl] CreateWindow: %s\n", SDL_GetError()); return 1; }
 
-    Uint32 rflags = SDL_RENDERER_ACCELERATED | (desc->vsync ? SDL_RENDERER_PRESENTVSYNC : 0u);
+    Uint32 rflags = SDL_RENDERER_ACCELERATED | (desc->vsync ? Uint32(SDL_RENDERER_PRESENTVSYNC) : 0u);
     g.ren = SDL_CreateRenderer(g.win, -1, rflags);
     if (!g.ren) { std::fprintf(stderr, "[phx.sdl] CreateRenderer: %s\n", SDL_GetError()); return 1; }
     SDL_RenderSetLogicalSize(g.ren, w, h);    // crisp integer upscale of the framebuffer
@@ -230,6 +233,58 @@ extern "C" const phx_platform* phx_platform_get(void) { return &g_sdl_platform; 
 // Software-tier graphics contract: hand the render backend our CPU framebuffer.
 extern "C" phx_soft_fb phx_gfx_soft_lock(phx_gfx* gfx) {
     return reinterpret_cast<SdlState*>(gfx)->fb;
+}
+
+// --- verification readback ----------------------------------------------------------------
+// Read the *actually presented* frame back as logical-resolution phx Rgba (R|G<<8|B<<16|A<<24),
+// so a headless harness can pixel-diff the real window/GPU output against the software golden
+// reference (the same way the PPU/GU backends are verified). Call right after the renderer's
+// end_frame(), before present(). Returns 0 on success. The window is kScale× the logical size,
+// so we read the drawable and sample each logical pixel's block centre.
+extern "C" int phx_sdl_readback(uint32_t* out, int lw, int lh) {
+    if (!out || lw <= 0 || lh <= 0) return 1;
+#if defined(PHX_HAVE_GL)
+    int ow = 0, oh = 0;
+    SDL_GL_GetDrawableSize(g.win, &ow, &oh);
+    if (ow <= 0 || oh <= 0) return 1;
+    uint32_t* tmp = static_cast<uint32_t*>(std::malloc(size_t(ow) * size_t(oh) * 4));
+    if (!tmp) return 1;
+    glReadPixels(0, 0, ow, oh, GL_RGBA, GL_UNSIGNED_BYTE, tmp);  // bytes R,G,B,A == phx Rgba
+    for (int y = 0; y < lh; ++y)
+        for (int x = 0; x < lw; ++x) {
+            int wx = x * ow / lw + ow / (2 * lw);
+            int wy = y * oh / lh + oh / (2 * lh);
+            int gy = oh - 1 - wy;                                // glReadPixels origin = bottom-left
+            if (wx >= ow) wx = ow - 1;
+            if (gy < 0) gy = 0;
+            out[y * lw + x] = tmp[gy * ow + wx];
+        }
+    std::free(tmp);
+    return 0;
+#else
+    int ow = 0, oh = 0;
+    SDL_GetRendererOutputSize(g.ren, &ow, &oh);
+    if (ow <= 0 || oh <= 0) return 1;
+    // Compose the current soft framebuffer into the backbuffer exactly as present() does.
+    SDL_UpdateTexture(g.tex, nullptr, g.fb.pixels, g.fb.w * int(sizeof(uint32_t)));
+    SDL_RenderClear(g.ren);
+    SDL_RenderCopy(g.ren, g.tex, nullptr, nullptr);
+    uint32_t* tmp = static_cast<uint32_t*>(std::malloc(size_t(ow) * size_t(oh) * 4));
+    if (!tmp) return 1;
+    if (SDL_RenderReadPixels(g.ren, nullptr, SDL_PIXELFORMAT_ABGR8888, tmp, ow * 4) != 0) {
+        std::free(tmp); return 1;
+    }
+    for (int y = 0; y < lh; ++y)
+        for (int x = 0; x < lw; ++x) {
+            int sx = x * ow / lw + ow / (2 * lw);
+            int sy = y * oh / lh + oh / (2 * lh);                // SDL origin = top-left
+            if (sx >= ow) sx = ow - 1;
+            if (sy >= oh) sy = oh - 1;
+            out[y * lw + x] = tmp[sy * ow + sx];
+        }
+    std::free(tmp);
+    return 0;
+#endif
 }
 
 // Open a stereo S16 device at `rate` and run `fill` on the audio thread (interleaved L,R).

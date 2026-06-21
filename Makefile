@@ -262,7 +262,7 @@ GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/
             $(patsubst tests/render_test.cpp,tests/gu_test.cpp,$(RENDER_SRC)))
 GU_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(GU_SRC))
 
-.PHONY: test smoke render ppu gu playable physics anim scene ui platformer sdl gl gba gba-ppu gba-platformer gba-platformer-ppu psp psp-gu audio texcache png sprite tiled resource phxpack check build clean depcheck
+.PHONY: test smoke render ppu gu playable physics anim scene ui platformer sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu psp psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack check build clean depcheck
 
 # Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstone + audio + resource + dep gate.
 check: test smoke render ppu gu playable physics anim scene ui platformer audio texcache png sprite tiled resource phxpack depcheck
@@ -316,6 +316,43 @@ gl:
 	  $(PLATGL_SRC) `sdl2-config --libs` -lGL -o $(BUILD)/platformer_gl
 	@echo "built $(BUILD)/platformer_gl  —  GPU-rendered window (the software backend stays the golden ref)"
 
+# Pixel-verify the desktop backends on a REAL window/GPU against the software golden reference
+# (the on-hardware analogue of `make ppu`/`make gu`). Each renders the render_test scene through
+# the actual SDL/OpenGL backend, reads the presented frame back, and diffs the golden pixels.
+# Needs SDL2 (+ libGL for gl-verify) and a display ($DISPLAY).
+SDLVER_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
+              engine/memory/src/memory_root.cpp engine/render/src/renderer.cpp \
+              engine/render/src/soft/soft_renderer.cpp \
+              engine/platform/src/sdl/sdl_platform.cpp tests/window_verify.cpp
+GLVER_SRC  := $(filter-out engine/render/src/soft/soft_renderer.cpp,$(SDLVER_SRC)) \
+              engine/render/src/gl/gl_backend.cpp
+
+sdl-verify:
+	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found)."; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
+	  $(SDLVER_SRC) `sdl2-config --libs` -o $(BUILD)/window_verify_sdl
+	@./$(BUILD)/window_verify_sdl
+
+gl-verify:
+	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 + libGL (sdl2-config not found)."; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL -DPHX_HAVE_GL $(INCLUDES) `sdl2-config --cflags` \
+	  $(GLVER_SRC) `sdl2-config --libs` -lGL -o $(BUILD)/window_verify_gl
+	@./$(BUILD)/window_verify_gl
+
+# Verify the SDL audio DEVICE glue live: open a real output device, drive the mixer + command
+# queue from the audio thread, confirm the callback fires and produces non-silent SFX output.
+AUDIOVER_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
+                engine/memory/src/memory_root.cpp engine/audio/src/mixer.cpp \
+                engine/platform/src/sdl/sdl_platform.cpp tests/audio_device_verify.cpp
+audio-verify:
+	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found)."; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
+	  $(AUDIOVER_SRC) `sdl2-config --libs` -o $(BUILD)/audio_device_verify
+	@./$(BUILD)/audio_device_verify
+
 # --- GBA cross build (devkitARM) ------------------------------------------------------------
 # Cross-compiles the portable engine + the GBA platform backend into a real .gba ROM. Needs
 # devkitPro/devkitARM. Not part of `check` (it targets ARM7TDMI). Proves the portability thesis
@@ -349,6 +386,13 @@ GBA_PPU_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/
                engine/platform/src/gba/gba_platform.cpp examples/gba_ppu/main.cpp
 GBA_PPU_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GBA_PPU_SRC))
 
+# The GBA DirectSound device smoke: the portable AudioMixer + command queue driven through the
+# platform's real DMA1/Timer0/FIFO-A path (no renderer). Verdict published in GDB-readable globals.
+GBA_AUDIO_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
+                 engine/audio/src/mixer.cpp engine/platform/src/gba/gba_platform.cpp \
+                 examples/gba_audio/main.cpp
+GBA_AUDIO_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GBA_AUDIO_SRC))
+
 # The full example platformer as a GBA ROM: the portable engine + gameplay systems + the GBA
 # platform backend, with the .phxp bundle baked offline (host) and linked into ROM via bin2s.
 BIN2S        := $(DEVKITPRO)/tools/bin/bin2s
@@ -376,6 +420,10 @@ gba: $(BUILD)/gba/phx-smoke.gba
 # The PPU-native render backend on real GBA hardware (Mode 0 tiles + OBJ, scanned by the silicon).
 gba-ppu: $(BUILD)/gba/phx-ppu.gba
 	@echo "built $<  —  PPU hardware backend (Mode 0 tiles + OBJ); load in mGBA (d-pad moves the sprite)"
+
+# The GBA DirectSound output device (DMA1 + Timer0 -> FIFO A).
+gba-audio: $(BUILD)/gba/phx-audio.gba
+	@echo "built $<  —  GBA DirectSound device; verify with the mGBA GDB stub (phx_gba_audio_verdict==1)"
 
 # Bake the bundle on the host, embed it in ROM, and build the playable platformer ROM.
 gba-platformer: $(BUILD)/gba/phx-platformer.gba
@@ -427,6 +475,11 @@ $(BUILD)/gba/phx-ppu.gba: $(GBA_PPU_OBJ)
 	$(GBA_OBJCOPY) -O binary $(BUILD)/gba/ppu.elf $@
 	$(GBA_FIX) $@ >/dev/null
 	@echo "ROM: $@ ($$(stat -c%s $@) bytes, header fixed)"
+
+$(BUILD)/gba/phx-audio.gba: $(GBA_AUDIO_OBJ)
+	$(GBA_CXX) $(GBA_FLAGS) -specs=gba.specs $(GBA_AUDIO_OBJ) -o $(BUILD)/gba/audio.elf
+	$(GBA_OBJCOPY) -O binary $(BUILD)/gba/audio.elf $@
+	$(GBA_FIX) $@ >/dev/null
 	@echo "ROM: $@ ($$(stat -c%s $@) bytes, header fixed)"
 
 # --- PSP cross build (pspsdk) ---------------------------------------------------------------
@@ -445,10 +498,11 @@ PSP_PRXGEN := $(PSPDEV)/bin/psp-prxgen
 PSP_FLAGS  := -std=c++17 -O2 -fno-rtti -fno-exceptions -fno-threadsafe-statics -fno-tree-loop-distribute-patterns -Wall -Wextra -G0 -DPHX_TARGET_PSP=1 \
               -I$(PSPSDK)/include
 PSP_INC    := -Iengine/core/include -Iengine/memory/include -Iengine/render/include \
-              -Iengine/render/src -Iengine/input/include -Iengine/platform/include
+              -Iengine/render/src -Iengine/input/include -Iengine/platform/include \
+              -Iengine/audio/include
 # The PRX link flow: keep relocations (-Wl,-q) + the prx specs/linkfile so psp-prxgen works.
 PSP_LDFLAGS:= -L$(PSPSDK)/lib -specs=$(PSPSDK)/lib/prxspecs -Wl,-q,-T$(PSPSDK)/lib/linkfile.prx
-PSP_LIBS   := -lpspdisplay -lpspge -lpspctrl -lpspgu -lpsputility -lpspuser -lpspkernel
+PSP_LIBS   := -lpspaudio -lpspdisplay -lpspge -lpspctrl -lpspgu -lpsputility -lpspuser -lpspkernel
 PSP_SRC    := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
               engine/render/src/renderer.cpp engine/render/src/soft/soft_renderer.cpp \
               engine/platform/src/psp/psp_platform.cpp examples/psp_smoke/main.cpp
@@ -460,11 +514,21 @@ PSP_GU_SRC := $(filter-out engine/render/src/soft/soft_renderer.cpp examples/psp
               engine/render/src/gu/gu_backend.cpp examples/psp_gu/main.cpp
 PSP_GU_OBJ := $(patsubst %.cpp,$(BUILD)/psp/%.o,$(PSP_GU_SRC))
 
+# The PSP sceAudio output device: the portable AudioMixer + lock-free command queue driven through
+# the platform's real sceAudio channel + audio thread (no renderer; verifies the device on-PSP).
+PSP_AUDIO_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
+                 engine/audio/src/mixer.cpp engine/platform/src/psp/psp_platform.cpp \
+                 examples/psp_audio/main.cpp
+PSP_AUDIO_OBJ := $(patsubst %.cpp,$(BUILD)/psp/%.o,$(PSP_AUDIO_SRC))
+
 psp: $(BUILD)/psp/EBOOT.PBP
 	@echo "built $<  —  run in PPSSPP / on a PSP"
 
 psp-gu: $(BUILD)/psp/gu/EBOOT.PBP
 	@echo "built $<  —  PSP GU hardware backend (sceGu display list); run in PPSSPP"
+
+psp-audio: $(BUILD)/psp/audio/EBOOT.PBP
+	@echo "built $<  —  PSP sceAudio output device; run in PPSSPP, grep log for AUDIO_DEVICE_PASS"
 
 $(BUILD)/psp/%.o: %.cpp
 	@command -v $(PSP_CXX) >/dev/null 2>&1 || { echo "PSP build needs pspsdk ($(PSP_CXX) not found)."; exit 1; }
@@ -486,6 +550,15 @@ $(BUILD)/psp/gu/EBOOT.PBP: $(PSP_GU_OBJ)
 	$(PSP_PRXGEN) $(BUILD)/psp/gu/gu.elf $(BUILD)/psp/gu/gu.prx
 	$(PSP_MKSFO) "Phoenix PSP GU" $(BUILD)/psp/gu/PARAM.SFO
 	$(PSP_PACK) $@ $(BUILD)/psp/gu/PARAM.SFO NULL NULL NULL NULL NULL $(BUILD)/psp/gu/gu.prx NULL
+	@echo "EBOOT: $@ ($$(stat -c%s $@) bytes)"
+
+$(BUILD)/psp/audio/EBOOT.PBP: $(PSP_AUDIO_OBJ)
+	@mkdir -p $(BUILD)/psp/audio
+	$(PSP_CXX) $(PSP_FLAGS) $(PSP_AUDIO_OBJ) $(PSP_LDFLAGS) $(PSP_LIBS) -o $(BUILD)/psp/audio/audio.elf
+	$(PSP_FIXUP) $(BUILD)/psp/audio/audio.elf
+	$(PSP_PRXGEN) $(BUILD)/psp/audio/audio.elf $(BUILD)/psp/audio/audio.prx
+	$(PSP_MKSFO) "Phoenix PSP Audio" $(BUILD)/psp/audio/PARAM.SFO
+	$(PSP_PACK) $@ $(BUILD)/psp/audio/PARAM.SFO NULL NULL NULL NULL NULL $(BUILD)/psp/audio/audio.prx NULL
 	@echo "EBOOT: $@ ($$(stat -c%s $@) bytes)"
 
 resource: $(RESOURCE)

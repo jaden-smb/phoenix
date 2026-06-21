@@ -144,6 +144,10 @@ public:
     }
 
     void begin(const Camera2D& cam) override {
+        // Camera pan maps to free BG/OBJ scroll (the GBA's superpower). Camera ZOOM is
+        // deliberately NOT applied: a text-BG + plain OBJ can't scale, so zoom would need the
+        // affine BG/OBJ path (Mode-1/2 + REG_BGxPA.., a per-scanline matrix) — the opt-in 2.5D
+        // route in docs/03 §4, out of the MVP. The PPU renders 1:1; cam.zoom is ignored here.
         cam_x_  = s_to_int(cam.pos.x);
         cam_y_  = s_to_int(cam.pos.y);
         obj_n_  = 0;

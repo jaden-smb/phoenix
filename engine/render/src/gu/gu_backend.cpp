@@ -90,9 +90,15 @@ public:
     void begin(const Camera2D& cam) override {
         cam_x_   = s_to_int(cam.pos.x);
         cam_y_   = s_to_int(cam.pos.y);
+        zq_      = s_to_q16(cam.zoom);
+        if (zq_ <= 0) zq_ = 1 << 16;
         quad_n_  = 0;
         stats_   = RenderStats{};
     }
+
+    // Camera-relative pixel -> zoomed screen pixel (Q16.16). Identical math to the software
+    // backend so the built quads' dest rects match exactly and gu_compose stays bit-identical.
+    int zsc(int v) const { return int((int64_t(v) * zq_) >> 16); }
 
     // A tilemap layer -> one textured quad per non-empty cell (background, painter order).
     void draw_tilemap(TilemapId id, uint8_t layer) override {
@@ -115,9 +121,12 @@ public:
                 q.sx  = int16_t((t % cols) * m.tw);
                 q.sy  = int16_t((t / cols) * m.th);
                 q.sw  = m.tw; q.sh = m.th;
-                q.dx  = int16_t(tx * m.tw - m.scroll_x - cam_x_);
-                q.dy  = int16_t(ty * m.th - m.scroll_y - cam_y_);
-                q.dw  = 0; q.dh = 0;                 // 1:1
+                int wx = tx * m.tw - m.scroll_x - cam_x_;
+                int wy = ty * m.th - m.scroll_y - cam_y_;
+                q.dx  = int16_t(zsc(wx));
+                q.dy  = int16_t(zsc(wy));
+                q.dw  = int16_t(zsc(wx + m.tw) - zsc(wx));   // zoomed size (edge diff); == tw at 1:1
+                q.dh  = int16_t(zsc(wy + m.th) - zsc(wy));
                 q.flip = 0;
                 q.tint = rgba(255, 255, 255);
                 ++stats_.tiles_drawn;
@@ -135,9 +144,14 @@ public:
             GuQuad& q = quads_[quad_n_++];
             q.tex = d.tex;
             q.sx  = d.sx; q.sy = d.sy; q.sw = d.sw; q.sh = d.sh;
-            q.dx  = int16_t(s_to_int(d.pos.x) - cam_x_);
-            q.dy  = int16_t(s_to_int(d.pos.y) - cam_y_);
-            q.dw  = d.dw; q.dh = d.dh;
+            int wx = s_to_int(d.pos.x) - cam_x_;
+            int wy = s_to_int(d.pos.y) - cam_y_;
+            int ww = d.dw > 0 ? d.dw : d.sw;            // world dest size (UI scaling), pre-zoom
+            int wh = d.dh > 0 ? d.dh : d.sh;
+            q.dx  = int16_t(zsc(wx));
+            q.dy  = int16_t(zsc(wy));
+            q.dw  = int16_t(zsc(wx + ww) - zsc(wx));     // == ww at 1:1 (gu_compose treats >0 as dest)
+            q.dh  = int16_t(zsc(wy + wh) - zsc(wy));
             q.flip = uint8_t(((d.flags & kFlipX) ? 1 : 0) | ((d.flags & kFlipY) ? 2 : 0));
             q.tint = d.tint;
         }
@@ -232,6 +246,7 @@ private:
     Map*       maps_ = nullptr;  uint16_t map_count_ = 0;
     GuQuad*    quads_ = nullptr; uint32_t quad_n_   = 0;
     int32_t    cam_x_ = 0, cam_y_ = 0;
+    int32_t    zq_    = 1 << 16;     // camera zoom as Q16.16 (matches the software backend)
     RenderStats stats_{};
 };
 

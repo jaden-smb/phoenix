@@ -15,12 +15,17 @@ inline scalar s_sqrt(scalar v) { return __builtin_sqrtf(v); }
 inline scalar s_from_int(int v) { return scalar(v); }
 inline int    s_to_int(scalar v) { return int(v); }
 inline scalar s_half(scalar v) { return v * 0.5f; }
+// A scalar as a Q16.16 fixed-point integer. Used by the renderer for tier-EXACT zoom math:
+// for integer (or any dyadic) zoom values this yields the SAME int32 on the float and fixed
+// tiers, so the software/GU rasterizers produce bit-identical pixels regardless of `scalar`.
+inline int32_t s_to_q16(scalar v) { return int32_t(v * 65536.0f + (v >= 0 ? 0.5f : -0.5f)); }
 #else
 using scalar = fixed16;
 inline scalar s_sqrt(scalar v) { return fx_sqrt(v); }
 inline scalar s_from_int(int v) { return fixed16::from_int(v); }
 inline int    s_to_int(scalar v) { return v.to_int(); }
 inline scalar s_half(scalar v) { return fixed16::from_raw(v.raw >> 1); }
+inline int32_t s_to_q16(scalar v) { return v.raw; }   // fixed16 is already Q16.16
 #endif
 
 template <class T>

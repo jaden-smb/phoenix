@@ -14,6 +14,8 @@
 #include <pspdisplay.h>
 #include <pspctrl.h>
 #include <pspge.h>
+#include <pspaudio.h>
+#include <pspthreadman.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -114,7 +116,41 @@ void psp_present(void) {
 }
 
 phx_gfx*   psp_gfx(void)   { return reinterpret_cast<phx_gfx*>(&g_gfx); }
-phx_audio* psp_audio(void) { return nullptr; }   // sceAudio backend is future work
+phx_audio* psp_audio(void) { return nullptr; }   // the device is driven via phx_psp_audio_start (below)
+
+// --- sceAudio output device ----------------------------------------------------------------
+// The platform owns the hardware channel + the audio thread but NOT the mixer (layering: platform
+// must not depend on audio). The game registers a fill callback (same contract as the SDL backend)
+// that drains its lock-free AudioCommandQueue then calls AudioMixer::mix(); a dedicated, high-
+// priority PSP thread calls it and pushes the result to a reserved sceAudio channel with
+// sceAudioOutputBlocking — so the mixer is touched single-threaded, exactly like on desktop.
+// The PSP's standard channels run at 44.1 kHz stereo S16, matching the mixer's default output.
+typedef void (*phx_audio_fill)(void* user, int16_t* out, int frames);
+
+constexpr int kAudioSamples = 1024;              // frames per output block (multiple of 64)
+
+struct PspAudio {
+    int            ch      = -1;
+    SceUID         thid    = -1;
+    volatile int   running = 0;
+    phx_audio_fill fill    = nullptr;
+    void*          user    = nullptr;
+};
+PspAudio g_audio;
+// Double-buffered output so the next block is filled while sceAudio consumes the current one.
+int16_t g_audio_buf[2][kAudioSamples * 2] __attribute__((aligned(64)));
+
+int psp_audio_thread(SceSize, void*) {
+    int bi = 0;
+    while (g_audio.running) {
+        int16_t* buf = g_audio_buf[bi];
+        if (g_audio.fill) g_audio.fill(g_audio.user, buf, kAudioSamples);
+        else              memset(buf, 0, sizeof(g_audio_buf[0]));
+        sceAudioOutputBlocking(g_audio.ch, PSP_AUDIO_VOLUME_MAX, buf);
+        bi ^= 1;
+    }
+    return 0;
+}
 
 void psp_poll_input(phx_input_raw* out) {
     memset(out, 0, sizeof(*out));
@@ -168,5 +204,28 @@ extern "C" void phx_psp_set_bundle(const void* data, size_t size) { g_bundle = d
 // Hook (not part of the seam): a hardware render backend calls this before boot to take over the
 // display, so psp_init skips sceDisplay setup and psp_present skips the software blit.
 extern "C" void phx_psp_set_direct(int on) { g_direct = on != 0; }
+
+// Open a 44.1 kHz stereo S16 sceAudio channel and run `fill` on a dedicated thread (interleaved
+// L,R). Returns 0 on success. The game's fill drains its command queue then mixes — same contract
+// as phx_sdl_audio_start. Stop with phx_psp_audio_stop().
+extern "C" int phx_psp_audio_start(int /*rate*/, phx_audio_fill fill, void* user) {
+    g_audio.ch = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, kAudioSamples, PSP_AUDIO_FORMAT_STEREO);
+    if (g_audio.ch < 0) return 1;
+    g_audio.fill = fill; g_audio.user = user; g_audio.running = 1;
+    g_audio.thid = sceKernelCreateThread("phx_audio", psp_audio_thread, 0x12, 0x10000, 0, nullptr);
+    if (g_audio.thid < 0) { sceAudioChRelease(g_audio.ch); g_audio.ch = -1; g_audio.running = 0; return 1; }
+    sceKernelStartThread(g_audio.thid, 0, nullptr);
+    return 0;
+}
+extern "C" void phx_psp_audio_stop(void) {
+    if (!g_audio.running) return;
+    g_audio.running = 0;                          // the thread exits after its current block
+    if (g_audio.thid >= 0) {
+        sceKernelWaitThreadEnd(g_audio.thid, nullptr);
+        sceKernelDeleteThread(g_audio.thid);
+        g_audio.thid = -1;
+    }
+    if (g_audio.ch >= 0) { sceAudioChRelease(g_audio.ch); g_audio.ch = -1; }
+}
 
 #endif // PHX_TARGET_PSP

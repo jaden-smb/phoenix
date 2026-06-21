@@ -131,6 +131,25 @@ int main() {
         expect_px(fb, 36, 40, kRed,   "Hflip: right half now red");
     }
 
+    // === frame 3: camera zoom — must match the soft backend's zoomed output exactly =====
+    // Same scene + 2x zoom as render_test's zoom check; the GU backend computes dest rects with
+    // the identical edge-difference math, so gu_compose reproduces the soft golden pixels.
+    r->begin_frame(Camera2D{ vec2{}, s_from_int(2), 0 });
+    r->draw_tilemap(map, 0);
+    {
+        DrawSprite s{}; s.tex = red_tex; s.sx = 0; s.sy = 0; s.sw = 8; s.sh = 8;
+        s.pos = vec2{ s_from_int(20), s_from_int(20) }; s.layer = 1;
+        r->draw_sprite(s);
+    }
+    r->end_frame();
+    {
+        phx_soft_fb fb = phx_gfx_soft_lock(plat->gfx());
+        expect_px(fb, 3,  3,  kBlue,   "zoom2 tile(0,0) blue grown");
+        expect_px(fb, 20, 3,  kYellow, "zoom2 tile(1,0) yellow at 2x offset");
+        expect_px(fb, 44, 44, kRed,    "zoom2 sprite scaled to 16px");
+        expect_px(fb, 23, 23, kBlue,   "zoom2: old sprite spot is now a background tile");
+    }
+
     // === direct gu_compose unit check ==================================================
     {
         static uint32_t tpx[2 * 2] = { kRed, kRed, kRed, kRed };

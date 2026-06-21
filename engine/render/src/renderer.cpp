@@ -38,10 +38,22 @@ Result<Renderer*> Renderer::create(phx_gfx* gfx, ArenaAllocator& arena, const Ca
 
 void Renderer::begin_frame(const Camera2D& cam) {
     cam_   = cam;
+    // Screen shake: a deterministic per-frame camera jitter of magnitude cam.shake (pixels),
+    // applied here in the front end so every backend (which already honours camera pos) shakes
+    // identically. shake==0 is an exact no-op; the offset cycles a fixed pattern keyed by an
+    // internal frame counter, so runs are reproducible (no RNG, no nondeterminism across tiers).
+    if (cam.shake > 0) {
+        static const int8_t ox[8] = { 1, -1,  0,  1, -1,  1,  0, -1 };
+        static const int8_t oy[8] = { 0,  1, -1, -1,  1,  0,  1, -1 };
+        const int s = cam.shake, k = int(frame_ & 7);
+        cam_.pos.x += s_from_int(ox[k] * s);
+        cam_.pos.y += s_from_int(oy[k] * s);
+    }
+    ++frame_;
     count_ = 0;
     stats_ = RenderStats{};
     be_->stats() = RenderStats{};
-    be_->begin(cam);
+    be_->begin(cam_);                 // the (possibly shaken) camera the backends actually use
 }
 
 TextureId Renderer::load_texture(const TextureDesc& d) {

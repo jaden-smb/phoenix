@@ -63,9 +63,16 @@ public:
         fb_     = phx_gfx_soft_lock(gfx_);
         cam_x_  = s_to_int(cam.pos.x);
         cam_y_  = s_to_int(cam.pos.y);
+        zq_     = s_to_q16(cam.zoom);
+        if (zq_ <= 0) zq_ = 1 << 16;                   // zoom <= 0 is meaningless -> 1:1
         stats_  = RenderStats{};
         clear(rgba(30, 30, 46));                       // a calm slate background
     }
+
+    // Scale a camera-relative pixel coordinate by the Q16.16 zoom. zoom==1 (zq_==1<<16) is an
+    // EXACT identity for any int. Dest rects are taken as the difference of two scaled edges
+    // (zsc(x0+w) - zsc(x0)) so adjacent tiles share an exact edge — no seams when zoomed.
+    int zsc(int v) const { return int((int64_t(v) * zq_) >> 16); }
 
     void draw_tilemap(TilemapId id, uint8_t layer) override {
         if (id >= map_count_ || layer >= maps_[id].layers) return;
@@ -84,9 +91,11 @@ public:
                 int t = cell - 1;
                 int sx = (t % cols) * m.tw;
                 int sy = (t / cols) * m.th;
-                int dx = tx * m.tw - m.scroll_x - cam_x_;
-                int dy = ty * m.th - m.scroll_y - cam_y_;
-                blit(dx, dy, ts, sx, sy, m.tw, m.th, m.tw, m.th, false, false, rgba(255, 255, 255));
+                int wx = tx * m.tw - m.scroll_x - cam_x_;   // camera-relative world pixels
+                int wy = ty * m.th - m.scroll_y - cam_y_;
+                int dx = zsc(wx),          dy = zsc(wy);     // zoomed screen position
+                int dw = zsc(wx + m.tw) - dx, dh = zsc(wy + m.th) - dy;   // zoomed size (edge diff)
+                blit(dx, dy, ts, sx, sy, m.tw, m.th, dw, dh, false, false, rgba(255, 255, 255));
                 ++stats_.tiles_drawn;
             }
         }
@@ -96,10 +105,13 @@ public:
         for (uint32_t i = 0; i < n; ++i) {
             const DrawSprite& d = s[i];
             if (d.tex >= tex_count_ || tex_[d.tex].px == nullptr) continue;
-            int dx = s_to_int(d.pos.x) - cam_x_;
-            int dy = s_to_int(d.pos.y) - cam_y_;
-            blit(dx, dy, tex_[d.tex], d.sx, d.sy, d.sw, d.sh,
-                 d.dw > 0 ? d.dw : d.sw, d.dh > 0 ? d.dh : d.sh,
+            int wx = s_to_int(d.pos.x) - cam_x_;
+            int wy = s_to_int(d.pos.y) - cam_y_;
+            int ww = d.dw > 0 ? d.dw : d.sw;            // world dest size (UI scaling), pre-zoom
+            int wh = d.dh > 0 ? d.dh : d.sh;
+            int dx = zsc(wx),         dy = zsc(wy);
+            int dw = zsc(wx + ww) - dx, dh = zsc(wy + wh) - dy;
+            blit(dx, dy, tex_[d.tex], d.sx, d.sy, d.sw, d.sh, dw, dh,
                  (d.flags & kFlipX) != 0, (d.flags & kFlipY) != 0, d.tint);
         }
         ++stats_.batches;
@@ -149,6 +161,7 @@ private:
     phx_gfx*    gfx_ = nullptr;
     phx_soft_fb fb_  { nullptr, 0, 0 };
     int32_t     cam_x_ = 0, cam_y_ = 0;
+    int32_t     zq_    = 1 << 16;     // camera zoom as Q16.16 (1<<16 == 1.0 == 1:1)
 
     Tex*       tex_  = nullptr;  uint16_t tex_count_ = 0;   // high-water mark of slots ever used
     TextureId* free_ = nullptr;  uint16_t free_n_   = 0;    // recycled-slot stack

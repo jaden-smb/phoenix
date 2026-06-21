@@ -4,8 +4,19 @@
 #include "phx/core/log.h"
 #include "phx/platform/platform.h"
 
+#include <cstdlib>   // getenv — optional bounded-run cap for headless/CI verification
+
 namespace phx {
 namespace {
+// Optional frame cap: if PHX_MAX_FRAMES is set (>0), the loop quits after that many frames.
+// Lets a windowed backend be smoke-run unattended (a bounded run that still shuts down cleanly,
+// printing the frame count) without a synthetic quit event. 0/unset = run until the user quits.
+uint64_t env_frame_cap() {
+    const char* s = std::getenv("PHX_MAX_FRAMES");
+    if (!s || !*s) return 0;
+    unsigned long long v = std::strtoull(s, nullptr, 10);
+    return uint64_t(v);
+}
 // Adapter so the engine's LogSink (LogLevel) can drive the platform's C log (phx_log_level)
 // without an unsafe function-pointer cast.
 const phx_platform* g_log_plat = nullptr;
@@ -67,9 +78,11 @@ int App::run(Game* game) {
     game->on_start(*this);
 
     // 7. the loop: fixed-step sim, interpolated render, O(1) transient reclaim
+    const uint64_t frame_cap = env_frame_cap();
     phx_input_raw raw{};
     uint64_t prev = plat_->clock_ns();
     while (!quit_) {
+        if (frame_cap && frame_ >= frame_cap) { quit_ = true; break; }
         if (plat_->pump_events() == 0) { quit_ = true; break; }
 
         uint64_t now = plat_->clock_ns();

@@ -26,6 +26,20 @@ namespace {
 #define REG_KEYINPUT (*(volatile uint16_t*)0x04000130)
 static volatile uint16_t* const kVRAM = (volatile uint16_t*)0x06000000;
 
+// DirectSound (Mode A): DMA1 streams 8-bit signed PCM into FIFO A, clocked by Timer0 overflow.
+#define REG_SOUNDCNT_H (*(volatile uint16_t*)0x04000082)
+#define REG_SOUNDCNT_X (*(volatile uint16_t*)0x04000084)
+#define REG_TM0CNT_L   (*(volatile uint16_t*)0x04000100)
+#define REG_TM0CNT_H   (*(volatile uint16_t*)0x04000102)
+#define REG_DMA1SAD    (*(volatile uint32_t*)0x040000BC)
+#define REG_DMA1DAD    (*(volatile uint32_t*)0x040000C0)
+#define REG_DMA1CNT_H  (*(volatile uint16_t*)0x040000C6)
+constexpr uint32_t kFIFO_A_ADDR = 0x040000A0;
+// DMA1 control: enable | special(sound-FIFO) timing | 32-bit | repeat | dest fixed.
+constexpr uint16_t kDmaSoundCnt = 0x8000 | 0x3000 | 0x0400 | 0x0200 | 0x0040; // 0xB640
+// SOUNDCNT_H: DSA volume 100% | DSA -> Right | DSA -> Left | DSA timer = Timer0 | reset FIFO A.
+constexpr uint16_t kSndCntH_DSA = 0x0004 | 0x0100 | 0x0200 | 0x0800;          // 0x0B04
+
 constexpr uint16_t kMode3   = 0x0003;
 constexpr uint16_t kBg2On   = 0x0400;
 constexpr int      kScreenW = 240;
@@ -51,6 +65,56 @@ size_t      g_bundle_size = 0;
 // BGR555 blit (that would clobber the tile data living at 0x06000000 in Mode 0). The backend
 // flips this on at init via phx_gba_set_direct(); the default (software tier) path is unchanged.
 bool g_direct_present = false;
+
+// ---- DirectSound device --------------------------------------------------------------------
+// The GBA has no threads, so (unlike SDL/PSP) the audio "callback" is pumped synchronously once
+// per frame at VBlank from present(): a classic double buffer — DMA1 plays one 8-bit buffer while
+// the game fills the other. The game supplies the SAME fill contract as the other backends; the
+// platform downmixes its stereo S16 to mono S8 for the FIFO. The platform owns the DMA/timer/FIFO
+// but not the mixer (the game's fill does the mixing). Started via phx_gba_audio_start().
+typedef void (*phx_audio_fill)(void* user, int16_t* out, int frames);
+
+constexpr int kAudioBufCap = 320;          // samples per buffer (>= one frame at the chosen rate)
+
+struct GbaAudio {
+    phx_audio_fill fill = nullptr;
+    void*          user = nullptr;
+    int            spf  = 0;               // samples per frame = rate/60
+    int            cur  = 0;               // buffer currently handed to DMA
+    bool           running = false;
+};
+GbaAudio g_audio;
+int8_t   g_audio_buf[2][kAudioBufCap];     // the two DMA source buffers (8-bit signed PCM)
+int16_t  g_audio_scratch[kAudioBufCap * 2];// stereo S16 the mixer fills, before downmix
+
+// Fill one S8 buffer from the game's mixer: produce spf stereo S16 frames, downmix to mono S8.
+void gba_audio_render(int8_t* dst) {
+    if (!g_audio.fill) { for (int i = 0; i < g_audio.spf; ++i) dst[i] = 0; return; }
+    g_audio.fill(g_audio.user, g_audio_scratch, g_audio.spf);
+    for (int i = 0; i < g_audio.spf; ++i) {
+        int v = (int(g_audio_scratch[2 * i]) + int(g_audio_scratch[2 * i + 1])) >> 1; // L+R average
+        v >>= 8;                                                                       // S16 -> S8
+        if (v >  127) v =  127;
+        if (v < -128) v = -128;
+        dst[i] = int8_t(v);
+    }
+}
+
+// Point DMA1 at a freshly filled buffer (restart resets its internal source pointer).
+inline void gba_audio_kick(int8_t* buf) {
+    REG_DMA1CNT_H = 0;                      // disable so re-enable re-latches SAD
+    REG_DMA1SAD   = reinterpret_cast<uint32_t>(buf);
+    REG_DMA1DAD   = kFIFO_A_ADDR;
+    REG_DMA1CNT_H = kDmaSoundCnt;
+}
+
+// Called at VBlank from present(): play the buffer filled last frame, refill the other.
+void gba_audio_pump(void) {
+    if (!g_audio.running) return;
+    g_audio.cur ^= 1;                       // the other buffer was filled on the previous pump
+    gba_audio_kick(g_audio_buf[g_audio.cur]);
+    gba_audio_render(g_audio_buf[g_audio.cur ^ 1]);   // refill the one just finished
+}
 
 inline void vblank_wait() {
     while (REG_VCOUNT >= kScreenH) {}    // wait until we're out of any current vblank
@@ -90,6 +154,7 @@ int  gba_pump_events(void) { return 1; }          // a console runs until power-
 // Convert the RGBA8 backbuffer to BGR555 and blit to Mode 3 VRAM, integer-scaled + centered.
 void gba_present(void) {
     vblank_wait();
+    gba_audio_pump();                        // swap/refill DirectSound buffers (no-op if audio off)
     if (g_direct_present) return;            // PPU backend already scanned the frame from VRAM/OAM
     const int w = g_gfx.fb.w, h = g_gfx.fb.h;
     if (!g_gfx.fb.pixels || w <= 0 || h <= 0) return;
@@ -166,5 +231,35 @@ extern "C" void phx_gba_set_bundle(const void* data, size_t size) { g_bundle = d
 // Hook (not part of the seam): a hardware render backend calls this to take over the display,
 // so present() skips the Mode-3 software blit. See g_direct_present above.
 extern "C" void phx_gba_set_direct(int on) { g_direct_present = on != 0; }
+
+// Start DirectSound: configure SOUNDCNT, Timer0 at `rate`, and DMA1 -> FIFO A, then prime both
+// buffers from the game's fill. Pumped each frame by present(). Same contract as the other
+// backends' audio_start. Returns 0 on success. The GBA runs ~16.78 MHz, so Timer0's reload sets
+// the sample rate: reload = 65536 - (16777216 / rate).
+extern "C" int phx_gba_audio_start(int rate, phx_audio_fill fill, void* user) {
+    if (rate <= 0) rate = 16384;
+    g_audio.spf = rate / 60;
+    if (g_audio.spf > kAudioBufCap) g_audio.spf = kAudioBufCap;
+    g_audio.fill = fill; g_audio.user = user; g_audio.cur = 0; g_audio.running = true;
+
+    gba_audio_render(g_audio_buf[0]);        // prime both buffers before the DMA starts
+    gba_audio_render(g_audio_buf[1]);
+
+    REG_SOUNDCNT_X = 0x0080;                  // master sound enable
+    REG_SOUNDCNT_H = kSndCntH_DSA;           // DSA 100% to L+R, Timer0, FIFO A reset
+
+    gba_audio_kick(g_audio_buf[0]);          // DMA1 streams buffer 0 into FIFO A
+
+    const uint16_t reload = uint16_t(65536 - (16777216 / rate));
+    REG_TM0CNT_L = reload;
+    REG_TM0CNT_H = 0x0080;                    // Timer0 enable, 1:1 prescaler -> overflow at `rate`
+    return 0;
+}
+extern "C" void phx_gba_audio_stop(void) {
+    g_audio.running = false;
+    REG_TM0CNT_H  = 0;                        // stop the sample clock
+    REG_DMA1CNT_H = 0;                        // stop the FIFO DMA
+    REG_SOUNDCNT_X = 0;                       // master sound off
+}
 
 #endif // PHX_TARGET_GBA

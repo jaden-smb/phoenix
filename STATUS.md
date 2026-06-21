@@ -8,14 +8,15 @@ plus the immediate next steps. Updated as development proceeds (see the README's
 
 ---
 
-## Current milestone: **M2 — reached real hardware. One C++17 codebase now cross-compiles to a Game Boy Advance ROM and a PSP EBOOT, in addition to the host; full asset pipeline + the example running off it; SDL window/GL/audio backends authored.**
+## Current milestone: **M2 — reached real hardware, on every backend. One C++17 codebase cross-compiles to a Game Boy Advance ROM and a PSP EBOOT (and runs on mGBA/PPSSPP), plus a real desktop window with SDL software-present, an OpenGL GPU path, and a live SDL audio device — all pixel/output-verified against the software golden reference. Full asset pipeline + the example running off all of it.**
 ### (M1 COMPLETE — a full headless platformer runs on every engine system)
 > The portability thesis is proven on metal: the **same** portable engine that passes the host
 > suite cross-compiles with **devkitARM** → a real `.gba` ROM and **pspsdk** → a real `EBOOT.PBP`
-> (3 architectures: x86, ARM7TDMI, MIPS Allegrex). The SDL audio device + a lock-free command
-> queue complete the audio-output glue. What's left is *running* on emulators/hardware (needs a
-> display/PPSSPP, absent here) and hardware-accelerated render backends (GBA PPU / PSP GU) for
-> speed — the software renderer drives both today.
+> (3 architectures: x86, ARM7TDMI, MIPS Allegrex) **and runs on all of them** — verified on mGBA,
+> PPSSPP, and (desktop) a real window + GPU + audio device. Every platform seam — render (software,
+> GBA PPU, PSP GU, desktop OpenGL) AND audio output (SDL device, PSP sceAudio, GBA Direct Sound) — is
+> implemented and verified on its real/emulated target. No backend stub or "future work" remains;
+> remaining work is new scope, not bring-up.
 
 The engine runs a **complete headless playable slice** (boot → spawn → input → fixed-step
 sim → render → verify by framebuffer), a **full asset pipeline** (bake a `.phxp`
@@ -107,8 +108,8 @@ module edges); `runtime` is the composition root at the top of the layering.
 | **core/config** | ✅ | immutable boot config; `from_defaults()` fills budgets from caps; `validate()` |
 | **core/time** | ✅ | `StepAccumulator` (step count, spiral clamp, alpha); `fixed_dt` — tier-agnostic |
 | **runtime/app (loop)** | ✅ | boots MemoryRoot+platform, **owns World+Renderer+InputState**, fixed-step loop, Game hooks via `App&` accessors; runs headless deterministically |
-| **platform** | ✅ | C seam + **`null`** (headless fb + scripted input + file I/O), **`sdl`** (real window: soft-fb→texture or GL context, keyboard→buttons, monotonic clock, **+ audio device w/ a fill callback**) behind `PHX_HAVE_SDL`, **`gba`** (Mode 3 fb + RGBA8→BGR555 blit + keypad + VBlank, `PHX_TARGET_GBA`), and **`psp`** (480×272 8888 fb + sceCtrl + VBlank, `PHX_TARGET_PSP`). The GBA/PSP backends cross-compile into a real ROM / EBOOT |
-| **render** | 🟡 | unified API + front end (record/sort/dispatch) + **software backend** (sprites & tilemaps, per-channel tint + dest scaling, texture load/**unload** w/ slot recycling) — the golden reference — **a desktop GL backend** (GL 1.1 immediate-mode port of the same geometry, behind `PHX_HAVE_GL`), **and a GBA-native PPU backend** (`src/gba/gba_ppu.cpp`): quantizes RGBA8 atlases into 4bpp paletted 8×8 tiles + a 16-colour BGR555 palette, tilemaps→text-BG screen entries, sprites→OAM, then `ppu_model.h`'s pure `ppu_compose` rasterizes the exact frame the silicon would scan out — enforcing the real GBA limits (≤16 colours, 8px tile alignment, the 128-OBJ ceiling). Verified headlessly through the same `Renderer` (`make ppu`) and cross-compiles for ARM7TDMI. **And a PSP-native GU backend** (`src/gu/gu_backend.cpp` + `gu_model.h`): records the frame as GU sprite quads (textured, nearest-sampled, alpha-tested, vertex-colour modulated) and `gu_compose` rasterizes them — full-colour, so its output is **bit-identical to the software reference** (verified by `make gu` rendering the render_test scene + cross-compiles for MIPS Allegrex). Adds a **budget-bounded LRU `TextureCache`** (keyed by an opaque id; evicts least-recently-used to a byte budget, recycling renderer slots) — kept in `render` so `resource` stays render-free per the dependency law. All four backends (soft/GL/GBA-PPU/PSP-GU) share the one front end. The **GBA PPU now has its real hardware submission path** (`submit_hardware()` under `PHX_TARGET_GBA`: 4bpp tiles→VRAM, palette→PALRAM, map→screenblock, OBJ→OAM, Mode-0 DISPCNT; shipped as `make gba-ppu`, every byte verified against the model via the mGBA GDB stub — see #29). The **PSP GU likewise has its real sceGu display-list path** (`submit_gu()`: `sceGuDrawArray(GU_SPRITES,…)`, `make psp-gu`, pixel-verified on PPSSPP by an on-PSP eDRAM readback vs `gu_compose` — see #32). **All four backends now run on their native targets**; no GPU-submission work remains |
+| **platform** | ✅ | C seam + **`null`** (headless fb + scripted input + file I/O), **`sdl`** (real window: soft-fb→texture or GL context, keyboard→buttons, monotonic clock, **+ audio device w/ a fill callback**) behind `PHX_HAVE_SDL`, **`gba`** (Mode 3 fb + RGBA8→BGR555 blit + keypad + VBlank **+ Direct Sound: DMA1+Timer0→FIFO A, S16→S8 downmix, VBlank-pumped**, `PHX_TARGET_GBA`), and **`psp`** (480×272 8888 fb + sceCtrl + VBlank **+ sceAudio: reserved channel + audio thread**, `PHX_TARGET_PSP`). The GBA/PSP backends cross-compile into a real ROM / EBOOT and **run on mGBA/PPSSPP**. **All four backends now implement the full seam incl. an audio output device — all verified on real/emulated hardware** (SDL #33; PSP/GBA audio #34) |
+| **render** | ✅ | unified API + front end (record/sort/dispatch) + **software backend** (sprites & tilemaps, per-channel tint + dest scaling, texture load/**unload** w/ slot recycling) — the golden reference — **a desktop GL backend** (GL 1.1 immediate-mode port of the same geometry, behind `PHX_HAVE_GL`), **and a GBA-native PPU backend** (`src/gba/gba_ppu.cpp`): quantizes RGBA8 atlases into 4bpp paletted 8×8 tiles + a 16-colour BGR555 palette, tilemaps→text-BG screen entries, sprites→OAM, then `ppu_model.h`'s pure `ppu_compose` rasterizes the exact frame the silicon would scan out — enforcing the real GBA limits (≤16 colours, 8px tile alignment, the 128-OBJ ceiling). Verified headlessly through the same `Renderer` (`make ppu`) and cross-compiles for ARM7TDMI. **And a PSP-native GU backend** (`src/gu/gu_backend.cpp` + `gu_model.h`): records the frame as GU sprite quads (textured, nearest-sampled, alpha-tested, vertex-colour modulated) and `gu_compose` rasterizes them — full-colour, so its output is **bit-identical to the software reference** (verified by `make gu` rendering the render_test scene + cross-compiles for MIPS Allegrex). Adds a **budget-bounded LRU `TextureCache`** (keyed by an opaque id; evicts least-recently-used to a byte budget, recycling renderer slots) — kept in `render` so `resource` stays render-free per the dependency law. All four backends (soft/GL/GBA-PPU/PSP-GU) share the one front end. The **GBA PPU now has its real hardware submission path** (`submit_hardware()` under `PHX_TARGET_GBA`: 4bpp tiles→VRAM, palette→PALRAM, map→screenblock, OBJ→OAM, Mode-0 DISPCNT; shipped as `make gba-ppu`, every byte verified against the model via the mGBA GDB stub — see #29). The **PSP GU likewise has its real sceGu display-list path** (`submit_gu()`: `sceGuDrawArray(GU_SPRITES,…)`, `make psp-gu`, pixel-verified on PPSSPP by an on-PSP eDRAM readback vs `gu_compose` — see #32). **All four backends now run on their native targets**; no GPU-submission work remains. **Camera `zoom` + `shake` are now implemented too** (#35): zoom via tier-EXACT Q16.16 edge-difference scaling shared by soft/GL/GU (so `gu_compose` stays bit-identical and there are no seams), shake as a deterministic front-end camera jitter (uniform across backends); verified on soft+GU (both tiers) and GL (real GPU). The GBA PPU renders 1:1 (free zoom needs the opt-in affine path, docs/03 §4). The whole designed render API surface is now built |
 | **input** | ✅ | `phx_input_raw` → semantic `Button`/held/pressed/released edges + axis normalize; tier-agnostic |
 | **physics** | ✅ | `Transform`/`Body`/`AABBColl` components; `PhysicsWorld`: axis-separated swept AABB-vs-tilemap (gravity/land/wall/bonk) + n² overlap pass + point query. No alloc; depends only on core+ecs |
 | **anim** | ✅ | `AnimClip`/`SpriteSheet`/`Animator` components + `AnimStateMachine` (data-driven edges); `AnimationSystem::tick` advances frames (loop/clamp) and writes the source rect. Scalar timing; depends only on core+ecs |
@@ -458,6 +459,89 @@ exercised by an end-to-end CLI bake (both raw and `--compress`). All green on bo
     **All four render backends now run on their native targets** (soft everywhere, GBA PPU on
     ARM7TDMI silicon, PSP GU on Allegrec) — render next-step #6 is complete.
 
+33. **The desktop backends (SDL window, OpenGL render, SDL audio device) now RUN and are verified
+    live — the last "authored but unrunnable here" items are closed.** SDL2 (2.32.10) + libGL +
+    a real display (`:0`) became available, so the three backends that were previously only
+    syntax-checked against faithful stubs are now built against the real libraries and exercised
+    on hardware:
+    - **GL render backend — pixel-verified on a real GPU.** `make gl-verify` renders the exact
+      `render_test` scene (blue/yellow checker tilemap + red sprite) through the **OpenGL backend**
+      into a real window, reads the presented frame back with `glReadPixels` (new `phx_sdl_readback`
+      hook, the only SDL/GL-touching code), downsamples the 3× window to logical resolution, and
+      diffs the golden pixels — **WINDOW PASS, 5/5**, the GPU output matches the software golden
+      reference exactly (the on-hardware analogue of `make ppu`/`make gu`). This is the first time
+      the GL geometry port is proven *correct*, not just *compiling*.
+    - **SDL software-present path — verified.** `make sdl-verify` does the same through the SDL
+      streaming-texture present path (`SDL_RenderReadPixels`) — **WINDOW PASS, 5/5**.
+    - **SDL audio device — verified live.** `make audio-verify` opens a real output device via
+      `phx_sdl_audio_start` (PulseAudio/pipewire), and on the SDL audio thread drains the lock-free
+      `AudioCommandQueue` into the `AudioMixer` and mixes a pushed 440 Hz SFX into the device buffer
+      — confirming the callback fired (16384 frames pulled) and produced the expected non-silent
+      output (peak |sample| = 9000): **AUDIO DEVICE PASS, 3/3**. The exact game/audio-thread
+      single-writer discipline the engine prescribes, now exercised on a real device.
+    - **The full windowed game runs.** `make sdl` and `make gl` build the whole platformer into a
+      real window; a new **`PHX_MAX_FRAMES`** loop cap (env var, for unattended bounded runs) let
+      both be smoke-run — each boots and runs 120 frames then shuts down cleanly (`shutdown after
+      120 frames`), software-present and GPU paths alike. One warning surfaced building against real
+      SDL2 (an enum/0 ternary) was fixed; both build zero-warning. Host suite unchanged (`make
+      check`, 120336 checks; depcheck 28 edges — the verify harnesses are tests, outside the engine
+      graph). **Every backend the engine has — null, SDL(sw), OpenGL, SDL-audio, GBA soft, GBA PPU,
+      PSP soft, PSP GU — now runs and is verified on a real target.** Nothing remains "authored but
+      unrun."
+
+34. **Console audio output devices (PSP `sceAudio`, GBA Direct Sound) — implemented + verified on
+    emulated hardware. The last stubbed platform seam is now closed.** The portable `AudioMixer` +
+    lock-free `AudioCommandQueue` and the desktop SDL device were already done; both console backends
+    still returned `nullptr` from `*_audio()` ("future work"). Now both drive real audio hardware
+    through the **same `(rate, fill, user)` contract** as the SDL device (the game's `fill` drains
+    its command queue then mixes — so the mixer stays single-writer everywhere):
+    - **PSP `sceAudio` — verified live on PPSSPP.** `phx_psp_audio_start()` reserves a 44.1 kHz
+      stereo channel (`sceAudioChReserve`) and spawns a dedicated high-priority PSP thread that
+      double-buffers the mixer output to `sceAudioOutputBlocking`. `make psp-audio` →
+      `examples/psp_audio` pushes a 440 Hz SFX through the real `AudioMixer`+queue; on PPSSPP the
+      `phx_audio` thread drove 20 `sceAudioOutputBlocking(ch 7, …)` calls with the mixed tone, then
+      a clean stop (`sceKernelWaitThreadEnd`→`DeleteThread`→`sceAudioChRelease(7)`), **0 faults**,
+      and reported **`AUDIO_DEVICE_PASS`** (frames>0 ∧ peak==9000) via the thread-name verdict.
+    - **GBA Direct Sound — verified via the mGBA GDB stub.** The GBA has no threads, so (idiomatically)
+      `phx_gba_audio_start()` programs SOUNDCNT + Timer0 + DMA1→FIFO A, and the device is *pumped*
+      once per frame at VBlank from `present()`: a classic double buffer (DMA1 plays one 8-bit buffer
+      while the game fills the other), the platform downmixing the mixer's stereo S16 to mono S8.
+      `make gba-audio` → `examples/gba_audio` plays a looping tone; inspected on emulated ARM7TDMI:
+      **frames=16926** (62 fills pumped), **peak=9000** (mixer produced the tone), **`SOUNDCNT_X=0x0080`**
+      (master enable), **`SOUNDCNT_H=0x0304`** (DSA 100% L+R, Timer0; the 0x0800 FIFO-reset bit
+      auto-clears), Timer0 actively ticking, the **DMA source buffer holding the downmixed ±35/−36
+      square wave**, and the harness self-check global **`phx_gba_audio_verdict==1`** (caught at its
+      store in `main` by a hardware watchpoint). Correct register + buffer state ⟹ correct output, the
+      same logic the PPU path is verified by (#29).
+    Host suite unchanged (`make check`, 120336 checks; depcheck 28 edges — the device code lives in the
+    platform backends, the harnesses are examples). **Every platform seam is now implemented and
+    verified on a real/emulated target on all four platforms — no `*_audio()` stub, no "future work"
+    remains in any backend.**
+
+35. **Camera `zoom` + `shake` implemented — the render module's last designed-but-unbuilt API
+    surface is now complete (render flips 🟡 → ✅).** `Camera2D::zoom` was shipped as "reserved;
+    renders 1:1 for now" and `shake` was unused; both are now real, verified features:
+    - **Zoom** scales the view about the camera origin. The math is a single tier-EXACT Q16.16
+      factor (`s_to_q16`, new in `core/math.h`: `v.raw` on the fixed tier, `v*65536` on float — so
+      an integer/dyadic zoom yields the *same* int32 on both tiers). Each backend maps a
+      camera-relative pixel with `zsc(v) = (int64(v)*zq) >> 16` and takes dest rects as the
+      **difference of two scaled edges** (`zsc(x0+w) − zsc(x0)`), so adjacent tiles share an exact
+      edge (no seams) and **zoom==1 is a bit-exact identity** (existing golden tests unchanged).
+      The software, GL, and GU backends all use the identical integer math, so `gu_compose` stays
+      bit-identical to the soft reference and GL fills the same integer dest rects. The **GBA PPU
+      renders 1:1 and ignores zoom** — a text BG + plain OBJ can't scale; free zoom needs the
+      opt-in affine path (docs/03 §4), out of MVP — documented in `gba_ppu.cpp`.
+    - **Shake** is a deterministic per-frame camera jitter of magnitude `cam.shake` px, applied in
+      the **front end** (`renderer.cpp`) so every backend (which already honours camera pos) shakes
+      identically; it cycles a fixed offset table keyed by an internal frame counter (no RNG → tier-
+      reproducible), and `shake==0` is an exact no-op.
+    - **Verified:** `make render` (soft golden) gained 6 zoom/shake checks (13 total) and `make gu`
+      4 (20 total), both **green on both scalar tiers** — proving zoom is bit-identical float-vs-fixed.
+      `make gl-verify`/`sdl-verify` render the 2× scene through the **real GPU / SDL present** and
+      read it back (9 checks each, pixel-match the soft golden). The GU **hardware** path re-verified
+      on PPSSPP (`GU_VERIFY_PASS`, 0 faults — zoom=1 unchanged on silicon). Host suite unchanged
+      (`make check`, 120336 checks; depcheck 28 edges); all console ROMs/EBOOTs rebuild clean.
+
 ## Next steps (ordered — pick up here)
 
 Done so far: ✅ null backend (framebuffer + scripted input + file I/O) · ✅ runtime/app
@@ -472,24 +556,30 @@ capstone: full game on every system, headless + production builds, both tiers). 
 
 Toward M2 — making it visible + audible (the engine is feature-complete for 2D gameplay):
 
-1. ✅ **platform: `sdl` backend (`src/sdl/`)** — DONE. Real window: it owns the software
-   framebuffer, streams it to an SDL texture each `present()` (logical-size integer upscale),
-   maps keyboard→canonical buttons (arrows/WASD, Z=A/jump, Enter=Start), and uses a monotonic
-   perf-counter clock. Behind `PHX_HAVE_SDL`, linked INSTEAD OF `null`; `make sdl` builds the
-   windowed example. **Authored + syntax-checked against SDL2's API; not run in THIS env (no
-   SDL2/display here) — build it where SDL2 is installed to play.**
-2. ✅ **render: GL backend (`src/gl/gl_backend.cpp`)** — DONE. A GL 1.1 immediate-mode port of
-   the software rasterizer's geometry (textured, tinted quads; ortho pixel projection; nearest
-   filtering; alpha blend) — no glad/glew, just `libGL`. Selected via `PHX_HAVE_GL` (linked
-   INSTEAD OF the soft backend); the SDL platform creates a GL context + swaps buffers in that
-   mode. `make gl` builds the GPU-rendered window. The software backend stays the golden
-   reference. **Authored + syntax-checked against `<GL/gl.h>`/SDL's API; not run here (no
-   SDL2/GL/display) — build with SDL2 + libGL to see it.**
-3. ✅ **audio mixer** (`docs/10` §2) — DONE. Software `AudioMixer` (SoA voices, gain/pan,
-   resampling, loop, music bus) verified headlessly (12 unit cases + a bundle→mix integration).
-   *Remaining glue:* feed it to a real device via an SDL audio callback + a lock-free play/stop
-   command queue (so the audio thread and game thread don't race), and trigger SFX from the
-   example on coin/jump — both unverifiable in this env, deferred with the threading done right.
+1. ✅ **platform: `sdl` backend (`src/sdl/`)** — DONE **+ verified running** (see #33). Real
+   window: it owns the software framebuffer, streams it to an SDL texture each `present()`
+   (logical-size integer upscale), maps keyboard→canonical buttons (arrows/WASD, Z=A/jump,
+   Enter=Start), and uses a monotonic perf-counter clock. Behind `PHX_HAVE_SDL`, linked INSTEAD OF
+   `null`; `make sdl` builds the windowed example. **Now built against real SDL2 (2.32.10) and run
+   on a real display (`:0`): `make sdl-verify` pixel-matches the software golden, and the full
+   windowed game boots + runs (120-frame bounded smoke).**
+2. ✅ **render: GL backend (`src/gl/gl_backend.cpp`)** — DONE **+ pixel-verified on a real GPU**
+   (see #33). A GL 1.1 immediate-mode port of the software rasterizer's geometry (textured, tinted
+   quads; ortho pixel projection; nearest filtering; alpha blend) — no glad/glew, just `libGL`.
+   Selected via `PHX_HAVE_GL` (linked INSTEAD OF the soft backend); the SDL platform creates a GL
+   context + swaps buffers. `make gl` builds the GPU-rendered window. **`make gl-verify` renders the
+   render_test scene through the GPU, reads it back (`glReadPixels`), and matches the software golden
+   exactly** — the software backend is confirmed as the GL oracle on real hardware.
+3. ✅ **audio mixer** (`docs/10` §2) — DONE **+ device verified live** (see #33). Software
+   `AudioMixer` (SoA voices, gain/pan, resampling, loop, music bus) verified headlessly (12 unit
+   cases + a bundle→mix integration), and the **device glue is now run on a real output device**:
+   `make audio-verify` opens a PulseAudio/pipewire device via `phx_sdl_audio_start`, drains the
+   lock-free command queue into the mixer on the SDL audio thread, and confirms a pushed SFX mixes
+   to non-silent output live. Triggering SFX from the example on coin/jump is wired through the same
+   queue. **And the console audio devices are now done + verified too** (see #34): PSP `sceAudio`
+   (`make psp-audio`, `AUDIO_DEVICE_PASS` on PPSSPP) and GBA Direct Sound (`make gba-audio`, verified
+   via the mGBA GDB stub — registers + the downmixed tone in the DMA buffer). Audio output is complete
+   on every platform.
 4. **resource compression + LRU caching** (`docs/06` §4, §6) — ✅ DONE. (a) Per-asset LZSS in
    the `.phxp` format (writer `--compress`; reader decompresses once into the arena, caches the
    result, leaves uncompressed assets zero-copy) — 10 codec unit cases + the raw-vs-compressed
@@ -527,20 +617,23 @@ Toward M2 — making it visible + audible (the engine is feature-complete for 2D
    display-list path — DONE + pixel-verified** (see #32): `submit_gu()` emits real
    `sceGuDrawArray(GU_SPRITES,…)` quads, shipped as `make psp-gu`, verified on PPSSPP 1.20.4 by an
    on-PSP eDRAM readback matching the `gu_compose` model (`GU_VERIFY_PASS`, 0 faults).
-   **Render next-step #6 is complete** — every backend runs on its native target.
+   **Render next-step #6 is complete** — every backend runs on its native target. (c) ✅ **Camera
+   zoom + shake — the last designed render API** (see #35): implemented across soft/GL/GU (tier-exact,
+   bit-identical), verified on both tiers + the real GPU; GBA PPU stays 1:1 (affine zoom is opt-in).
+   **The render module is now fully built (✅).**
 
-Bigger picture: **M2's goals are met.** Every engine system, the full offline asset pipeline, the
-example game consuming all of it, and the audio-device glue are built and verified on the host
-(both scalar tiers); and the one codebase now **cross-compiles to real GBA and PSP binaries**.
-What remains is genuinely beyond this sandbox's reach: *executing* the ROM/EBOOT (no GBA/PSP
-emulator with a display, no PPSSPP) and the SDL window/GL/audio backends (no SDL2 installed) —
-all authored + (cross-)compiled, awaiting a machine that can run them. The next *new* engineering is
-well underway: **both** console-native render backends now exist and are verified headlessly via
-model + compositor pairs — the **GBA PPU** (tier 0, 4bpp tiles + OAM) and the **PSP GU** (tier 1,
-textured quads, bit-identical to the software reference). What remains for them is only the GPU
-submission paths (GBA VRAM/OAM DMA; PSP `sceGu` display list) so the consoles draw via their native
-graphics units instead of the CPU rasterizer — finishable once a machine that can run the binaries
-is available; both compose on-CPU and run on every software-tier platform today.
+Bigger picture: **M2's goals are met — and every backend now runs on a real target.** Every
+engine system, the full offline asset pipeline, the example game consuming all of it, and the
+audio-device glue are built and verified (both scalar tiers); the one codebase **cross-compiles to
+real GBA and PSP binaries** *and* runs on them (mGBA, PPSSPP); and the desktop window/GPU/audio
+backends — formerly the only "authored but unrunnable here" items — now **run and are verified on
+the real display + GPU + audio device** (`make sdl-verify`/`gl-verify`/`audio-verify`, see #33).
+The full backend matrix is exercised end to end: null (headless), SDL software window, OpenGL GPU,
+SDL audio device, GBA software + PPU + Direct Sound on ARM7TDMI, PSP software + GU + sceAudio on
+Allegrex. Every platform seam — render *and* audio output — is implemented and verified on its
+real/emulated target; no `*_audio()` stub or "future work" remains in any backend. Nothing in the
+design remains merely compiled. Remaining work is now genuinely *new scope* (more gameplay content,
+more asset types, performance passes), not bring-up of the existing design.
 
 ### Build commands (current)
 ```
@@ -554,7 +647,12 @@ make gba-platformer       # devkitARM -> build/gba/phx-platformer.gba      (the 
 make gba-platformer-ppu   # devkitARM -> build/gba/phx-platformer-ppu.gba  (the FULL example game on the PPU hardware)
 make psp                  # pspsdk   -> build/psp/EBOOT.PBP            (real PSP EBOOT, software render)
 make psp-gu               # pspsdk   -> build/psp/gu/EBOOT.PBP         (PSP GU hardware: sceGu display list)
-make sdl / make gl        # windowed example (needs SDL2 [+libGL]; not installed here)
+make psp-audio            # pspsdk   -> build/psp/audio/EBOOT.PBP      (PSP sceAudio device; log -> AUDIO_DEVICE_PASS)
+make gba-audio            # devkitARM -> build/gba/phx-audio.gba       (GBA Direct Sound device; verify via GDB stub)
+make sdl / make gl        # windowed example, real window (SDL2 [+libGL]); PHX_MAX_FRAMES caps a bounded run
+make sdl-verify           # render render_test through the SDL window, read back + match the software golden
+make gl-verify            # render render_test through the OpenGL GPU, glReadPixels + match the software golden
+make audio-verify         # open a real audio device, mix a pushed SFX live, confirm non-silent output
 make depcheck             # architectural dependency-law gate
 make clean
 ```

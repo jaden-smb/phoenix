@@ -93,9 +93,9 @@ fenix/
 > under the PC tier (`scalar = float`) and the GBA tier (`scalar = fixed16`) — **and the same
 > engine cross-compiles to a real GBA ROM and PSP EBOOT.** Full breakdown in **[STATUS.md](STATUS.md)**.
 
-| Built & tested ✅ | Authored, cross-compiles (not run here) 🟡 | Designed (docs) ⬜ |
-|---|---|---|
-| core (types, assert, fixed, math, caps, pixel, log, config, time) · memory (4 allocators + MemoryRoot) · ecs (sparse-set World) · input (semantic buttons + edges) · physics (AABB-vs-tilemap + overlap pass) · anim (sprite-sheet + state machine) · scene (LIFO stack + Blackboard + scene arena) · ui (immediate-mode text/bar/menu + focus ring) · audio (software mixer: voices, pan, resample, music + SPSC-ring streaming + lock-free command queue) · resource (`.phxp` + zero-copy `ResourceCache` + LZSS compression + texture/tilemap/sprite/spawns/sound views) · runtime (App loop owns World+Renderer+Input) · platform `null` backend · render front end + software backend (sprites, tilemaps, tint + scale, texture load/unload) · **GBA-native PPU render backend (4bpp tiles + OAM + `ppu_compose`; ARM7TDMI)** · **PSP-native GU render backend (textured sprite quads + `gu_compose`, bit-identical to soft; MIPS Allegrex)** · budget-bounded LRU texture cache · tools (`phxpack` CLI + DEFLATE/PNG + JSON/Tiled + WAV importers) · **example platformer (data-driven by the baked pipeline, headless)** | **GBA platform backend → real `.gba` ROM (devkitARM)** · **PSP platform backend → real `EBOOT.PBP` (pspsdk)** · **`sdl` platform backend (window + audio device) + `gl` render backend** (need SDL2/a display) | GBA PPU hardware DMA path (VRAM/OAM) · PSP GU `sceGu` display-list path · GBA/PSP audio (DMA/sceAudio) |
+| Built & tested ✅ (every backend — render *and* audio — runs on a real target) | Designed (docs) ⬜ |
+|---|---|
+| core (types, assert, fixed, math, caps, pixel, log, config, time) · memory (4 allocators + MemoryRoot) · ecs (sparse-set World) · input (semantic buttons + edges) · physics (AABB-vs-tilemap + overlap pass) · anim (sprite-sheet + state machine) · scene (LIFO stack + Blackboard + scene arena) · ui (immediate-mode text/bar/menu + focus ring) · audio (software mixer: voices, pan, resample, music + SPSC-ring streaming + lock-free command queue) · resource (`.phxp` + zero-copy `ResourceCache` + LZSS compression + texture/tilemap/sprite/spawns/sound views) · runtime (App loop owns World+Renderer+Input; `PHX_MAX_FRAMES` bounded-run cap) · tools (`phxpack` CLI + DEFLATE/PNG + JSON/Tiled + WAV importers) · **example platformer (data-driven by the baked pipeline)** · **render**: front end (sort/batch + camera pan/zoom/shake) + software backend · **OpenGL GPU backend (pixel-verified on a real GPU vs the soft golden)** · **GBA-native PPU backend (4bpp tiles + OAM, hardware VRAM/OAM submission verified on mGBA; ARM7TDMI)** · **PSP-native GU backend (`sceGu` `GU_SPRITES` display list, pixel-verified on PPSSPP; MIPS Allegrex)** · budget-bounded LRU texture cache · **platform**: `null` (headless) · **`sdl` (real window: software-present + a live audio device, verified)** · **`gba` → real `.gba` ROM, runs on mGBA, incl. Direct Sound (DMA1+Timer0→FIFO A)** · **`psp` → real `EBOOT.PBP`, runs on PPSSPP, incl. sceAudio** — every platform seam (render + audio output) implemented + verified | _(nothing pending — the backend bring-up is complete; what's left is new scope: more gameplay, more asset types, perf passes)_ |
 
 ### Build & test right now (host, no cmake needed)
 
@@ -121,9 +121,12 @@ make png                  # decode a real PNG (inflate) -> bake -> mount -> rend
 make sprite               # slice a sheet PNG + clips -> bake -> mount -> build Animator -> render
 make tiled                # parse a Tiled .tmj (JSON) -> bake tilemap + spawns -> mount -> render
 make resource             # bake a .phxp bundle (raw + LZSS) -> mount -> decompress -> render from it
-# ...and, where SDL2 (+ libGL) is installed, play the example in a real window:
+# ...and, with SDL2 (+ libGL), play the example in a real window — or verify the desktop backends:
 make sdl                  # software renderer -> SDL window (arrows/WASD, Z=jump, Enter=start)
 make gl                   # OpenGL renderer  -> SDL window (same game, GPU-drawn quads)
+make sdl-verify           # render a known scene through the SDL window, read back + match the soft golden
+make gl-verify            # render through the OpenGL GPU, glReadPixels + match the soft golden (pixel-exact)
+make audio-verify         # open a real audio device, mix a pushed SFX live, confirm non-silent output
 # ...and, with devkitPro / pspsdk installed, cross-compile the SAME engine to real hardware:
 make gba                  # devkitARM -> build/gba/phx-smoke.gba       (render smoke; boots on a GBA)
 make gba-ppu              # devkitARM -> build/gba/phx-ppu.gba             (PPU hardware smoke: Mode-0 tiles+OBJ)
@@ -131,6 +134,8 @@ make gba-platformer       # devkitARM -> build/gba/phx-platformer.gba      (the 
 make gba-platformer-ppu   # devkitARM -> build/gba/phx-platformer-ppu.gba  (the FULL game on the PPU hardware)
 make psp                  # pspsdk    -> build/psp/EBOOT.PBP           (runs on a PSP / PPSSPP, software render)
 make psp-gu               # pspsdk    -> build/psp/gu/EBOOT.PBP       (PSP GU hardware: sceGu display list)
+make psp-audio            # pspsdk    -> build/psp/audio/EBOOT.PBP   (PSP sceAudio output device)
+make gba-audio            # devkitARM -> build/gba/phx-audio.gba       (GBA Direct Sound: DMA1+Timer0->FIFO A)
 make phxpack              # build the asset CLI + bake a demo bundle end-to-end
 make depcheck             # enforce the acyclic module dependency law
 make clean
@@ -178,9 +183,18 @@ cmake -S . -B build/psp   -DPHX_TARGET=psp -DCMAKE_TOOLCHAIN_FILE=cmake/psp.tool
 > (`make gba-platformer-ppu`): tilemap → BG screenblock, sprites → OAM, Mode-0 DISPCNT, the whole
 > game verified booting + transitioning + rendering its level through real VRAM/OAM via the GDB
 > stub (STATUS.md #29–30). The **PSP GU `sceGu` display-list path is also done** (`make psp-gu`),
-> pixel-verified on PPSSPP by an on-PSP eDRAM readback against the `gu_compose` model (#31–32). So
-> **all four render backends now run on their native targets** (soft, GBA PPU on ARM7TDMI, PSP GU
-> on Allegrec). See the [roadmap](docs/09-roadmap.md) and **[STATUS.md](STATUS.md)**.
+> pixel-verified on PPSSPP by an on-PSP eDRAM readback against the `gu_compose` model (#31–32). And
+> the **desktop backends now run too**: against real SDL2 + libGL + a display, the **OpenGL GPU path
+> is pixel-verified** against the software golden (`make gl-verify`, via `glReadPixels`), the SDL
+> software-present window matches it (`make sdl-verify`), and a **live SDL audio device** mixes a
+> pushed SFX on the audio thread (`make audio-verify`) — with the full windowed game booting and
+> running in both SW and GPU windows (STATUS.md #33). And the **console audio output devices are done
+> too** (STATUS.md #34): PSP `sceAudio` (`make psp-audio`, `AUDIO_DEVICE_PASS` on PPSSPP) and GBA
+> Direct Sound (`make gba-audio`, DMA1+Timer0→FIFO A — verified via the mGBA GDB stub: registers
+> configured and the downmixed tone sitting in the DMA buffer). So **every platform seam — render
+> *and* audio output — is now implemented and verified on a real/emulated target** (null · SDL
+> software window · OpenGL GPU · SDL/PSP/GBA audio devices · GBA software + PPU on ARM7TDMI · PSP
+> software + GU on Allegrex). See the [roadmap](docs/09-roadmap.md) and **[STATUS.md](STATUS.md)**.
 
 ## License
 
