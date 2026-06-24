@@ -54,7 +54,9 @@ inline std::string build_level_tmj() {
     j += "{\"name\":\"player\",\"type\":\"player\",\"point\":true,\"x\":16,\"y\":70},";
     j += "{\"name\":\"c0\",\"type\":\"coin\",\"point\":true,\"x\":40,\"y\":76},";
     j += "{\"name\":\"c1\",\"type\":\"coin\",\"point\":true,\"x\":64,\"y\":76},";
-    j += "{\"name\":\"c2\",\"type\":\"coin\",\"point\":true,\"x\":88,\"y\":76}";
+    j += "{\"name\":\"c2\",\"type\":\"coin\",\"point\":true,\"x\":88,\"y\":76},";
+    j += "{\"name\":\"e0\",\"type\":\"enemy\",\"point\":true,\"x\":104,\"y\":74},";  // patroller
+    j += "{\"name\":\"s0\",\"type\":\"spike\",\"point\":true,\"x\":120,\"y\":76}";   // hazard
     j += "]}]}";
     return j;
 }
@@ -87,6 +89,20 @@ inline bool bake_platformer_assets(const char* path) {
     uint32_t coin[8 * 8];
     for (auto& p : coin) p = rgba(245, 220, 60);
     w.add_texture("coin", coin, 8, 8);
+
+    // enemy: 8x8 red patroller
+    uint32_t enemy[8 * 8];
+    for (auto& p : enemy) p = rgba(210, 60, 60);
+    w.add_texture("enemy", enemy, 8, 8);
+
+    // spike: 8x8 grey hazard (a simple up-triangle so it reads as spikes; rest transparent)
+    uint32_t spike[8 * 8];
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x) {
+            const int half = (x < 4) ? x : (7 - x);     // 0..3 rising to the centre
+            spike[y * 8 + x] = (y >= 7 - half) ? rgba(190, 190, 205) : 0u;
+        }
+    w.add_texture("spike", spike, 8, 8);
 
     // font: a real 5x7 bitmap font in a 128x32 atlas (16 cols x 4 rows of 8x8 cells), so the
     // glyph for ASCII c sits at cell (c-32) and the engine's font config (first_char=32, cols=16)

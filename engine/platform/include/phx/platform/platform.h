@@ -69,6 +69,13 @@ typedef struct phx_platform {
     const void* (*map)(phx_file*);
     void        (*close)(phx_file*);
 
+    /* persistent save storage — a tiny key->blob store: a file on PC/PSP, battery-backed SRAM
+     * on GBA (single-slot; key ignored there). save() writes `size` bytes; load() reads up to
+     * `cap` into `out` and sets *out_size to the bytes read. Both return 0 on success, non-zero
+     * on failure (incl. "no save present"). The caller validates its own magic/version. */
+    int   (*save)(const char* key, const void* data, uint32_t size);
+    int   (*load)(const char* key, void* out, uint32_t cap, uint32_t* out_size);
+
     /* logging sink */
     void  (*log)(phx_log_level level, const char* msg);
 } phx_platform;

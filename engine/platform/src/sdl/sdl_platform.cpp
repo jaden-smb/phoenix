@@ -210,6 +210,23 @@ void        sdl_close(phx_file* f) {
     std::free(h->data); std::free(h);
 }
 
+// Persistence: a plain save file keyed by path (the desktop store).
+int sdl_save(const char* key, const void* data, uint32_t size) {
+    FILE* fp = std::fopen(key, "wb");
+    if (!fp) return 1;
+    size_t w = std::fwrite(data, 1, size, fp);
+    std::fclose(fp);
+    return (w == size) ? 0 : 1;
+}
+int sdl_load(const char* key, void* out, uint32_t cap, uint32_t* out_size) {
+    FILE* fp = std::fopen(key, "rb");
+    if (!fp) { if (out_size) *out_size = 0; return 1; }
+    size_t got = std::fread(out, 1, cap, fp);
+    std::fclose(fp);
+    if (out_size) *out_size = uint32_t(got);
+    return 0;
+}
+
 void sdl_log(phx_log_level level, const char* msg) {
     static const char* tag[] = { "TRACE", "DEBUG", "INFO ", "WARN ", "ERROR" };
     int l = int(level); if (l < 0 || l > 4) l = 2;
@@ -223,6 +240,7 @@ const phx_platform g_sdl_platform = {
     sdl_gfx, sdl_audio,
     sdl_poll_input,
     sdl_open, sdl_map, sdl_close,
+    sdl_save, sdl_load,
     sdl_log,
 };
 

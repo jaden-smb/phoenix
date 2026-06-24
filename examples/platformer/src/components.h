@@ -36,9 +36,13 @@ struct EngineCtx {
 
     // shared asset handles (resolved once at startup)
     TextureId hero_tex = kNoTexture, coin_tex = kNoTexture, tiles_tex = kNoTexture;
+    TextureId enemy_tex = kNoTexture, spike_tex = kNoTexture;
     TilemapId map = kNoTilemap;
     int32_t   level_w = 0, level_h = 0;        // level extent in pixels (for camera clamp)
     ecs::Entity player = ecs::kInvalid;
+    vec2     player_spawn{};                    // where the player (re)spawns on death
+    uint16_t enemies_killed = 0;               // stomped enemies (HUD/score + tests)
+    uint16_t player_deaths  = 0;               // respawns so far (tests)
 
     // hero animation, loaded from the Sprite asset at startup (clips outlive the Animator)
     AnimClip    hero_clips[4]{};
@@ -53,6 +57,9 @@ struct EngineCtx {
     // per-step physics hits (player↔coin etc.), produced by physics_system
     Hit      hits[64];
     uint32_t hit_count = 0;
+
+    const char* save_path = "platformer.sav";  // persistence key (a file on PC/PSP, SRAM on GBA)
+    bool        loaded = false;                 // a valid save was restored at boot
 };
 } // namespace phx
 
@@ -66,7 +73,12 @@ constexpr NameHash kHeroTex  = "hero"_hash;
 constexpr NameHash kCoinTex  = "coin"_hash;
 
 // collision layers
-enum CollLayer : uint16_t { kLayerPlayer = 1 << 0, kLayerCoin = 1 << 1 };
+enum CollLayer : uint16_t {
+    kLayerPlayer = 1 << 0,
+    kLayerCoin   = 1 << 1,
+    kLayerEnemy  = 1 << 2,   // a patrolling enemy: stomp from above kills it, side contact hurts
+    kLayerHazard = 1 << 3,   // a static spike: any contact hurts
+};
 
 // --- rendering: the single drawable, written from the Animator each frame ---
 struct SpriteRef {
@@ -78,13 +90,36 @@ struct SpriteRef {
 
 // --- gameplay ---
 enum AnimState : uint16_t { kIdle = 0, kWalk = 1 };
-struct Player { int16_t health = 3; bool facing_left = false; };
+// `invuln` is the remaining post-hit invulnerability (seconds): brief i-frames so one spike or
+// enemy brush costs a single point, not the whole bar in the frames the boxes overlap.
+struct Player { int16_t health = 3; bool facing_left = false; scalar invuln{}; };
 struct Coin   { uint16_t value = 1; };
+// A patroller: walks between home_x ± range, turning at the bounds. Gravity-bound (has a Body).
+struct Enemy  { int16_t dir = -1; scalar home_x{}; scalar range{}; };
+// A static spike. Tag only — presence + an AABBColl on the hazard layer is the whole behaviour.
+struct Hazard {};
+
+// Persistent save blob (POD, fixed layout — written verbatim to the platform save store). The
+// magic+version let load() tell a real save from fresh storage (uninitialised SRAM / no file).
+struct SaveData {
+    uint32_t magic;     // kSaveMagic
+    uint16_t version;   // kSaveVersion
+    uint16_t score;
+    uint16_t deaths;
+    uint16_t pad;
+};
+constexpr uint32_t kSaveMagic   = 0x53584850u;   // 'PHXS' (little-endian)
+constexpr uint16_t kSaveVersion = 1;
 
 // systems (systems.cpp)
 void player_system(EngineCtx*, scalar dt);
+void enemy_system(EngineCtx*, scalar dt);
 void physics_system(EngineCtx*, scalar dt);
 void interaction_system(EngineCtx*, scalar dt);
+
+// persistence (systems.cpp): write/restore the run via the platform save seam
+void save_game(EngineCtx*);
+bool load_game(EngineCtx*);     // true if a valid save was applied
 void animation_system(EngineCtx*, scalar dt);
 void camera_system(EngineCtx*, scalar dt);
 
@@ -105,6 +140,7 @@ struct PlatformerGame : Game {
     StackAllocator scene_scratch;
     EngineCtx      ctx;
     const char*    bundle = "platformer.phxp";
+    const char*    save_path = "platformer.sav";      // overridable per target (PC/PSP/GBA)
     size_t         scene_scratch_bytes = 256u << 10;  // scene-arena budget; shrink on tight RAM (GBA)
     int32_t        audio_peak = 0;            // running peak of mixed output (proves audio plays)
 
@@ -119,6 +155,10 @@ struct PlatformerGame : Game {
     uint32_t depth() const;
     int      sfx_count() const;
     int32_t  audio_peak_level() const;
+    int      health() const;          // current player HP (-1 if no player)
+    int      enemies_killed() const;  // patrollers stomped
+    int      deaths() const;          // player respawns
+    bool     was_loaded() const;      // a saved game was restored at boot
 };
 
 // tiny int->string for the HUD (no STL in the game TU)

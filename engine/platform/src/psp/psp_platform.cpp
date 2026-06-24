@@ -16,6 +16,7 @@
 #include <pspge.h>
 #include <pspaudio.h>
 #include <pspthreadman.h>
+#include <pspiofilemgr.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -183,6 +184,25 @@ phx_file* psp_open(const char* /*path*/, size_t* out_size) {
 }
 const void* psp_map(phx_file* f) { return f ? reinterpret_cast<PspFile*>(f)->data : nullptr; }
 void        psp_close(phx_file*) {}
+
+// Persistence: a memory-stick file via sceIo (the key is the path, relative to the EBOOT dir).
+int psp_save(const char* key, const void* data, uint32_t size) {
+    SceUID fd = sceIoOpen(key, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+    if (fd < 0) return 1;
+    int w = sceIoWrite(fd, data, int(size));
+    sceIoClose(fd);
+    return (w == int(size)) ? 0 : 1;
+}
+int psp_load(const char* key, void* out, uint32_t cap, uint32_t* out_size) {
+    SceUID fd = sceIoOpen(key, PSP_O_RDONLY, 0777);
+    if (fd < 0) { if (out_size) *out_size = 0; return 1; }
+    int r = sceIoRead(fd, out, int(cap));
+    sceIoClose(fd);
+    if (r < 0) { if (out_size) *out_size = 0; return 1; }
+    if (out_size) *out_size = uint32_t(r);
+    return 0;
+}
+
 void        psp_log(phx_log_level, const char*) {}
 
 const phx_platform g_psp_platform = {
@@ -192,6 +212,7 @@ const phx_platform g_psp_platform = {
     psp_gfx, psp_audio,
     psp_poll_input,
     psp_open, psp_map, psp_close,
+    psp_save, psp_load,
     psp_log,
 };
 

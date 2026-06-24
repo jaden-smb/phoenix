@@ -105,6 +105,23 @@ void        null_close(phx_file* f) {
     std::free(h);
 }
 
+// Persistence: a plain file keyed by path (the headless/PC store).
+int null_save(const char* key, const void* data, uint32_t size) {
+    FILE* fp = std::fopen(key, "wb");
+    if (!fp) return 1;
+    size_t w = std::fwrite(data, 1, size, fp);
+    std::fclose(fp);
+    return (w == size) ? 0 : 1;
+}
+int null_load(const char* key, void* out, uint32_t cap, uint32_t* out_size) {
+    FILE* fp = std::fopen(key, "rb");
+    if (!fp) { if (out_size) *out_size = 0; return 1; }       // no save present
+    size_t got = std::fread(out, 1, cap, fp);
+    std::fclose(fp);
+    if (out_size) *out_size = uint32_t(got);
+    return 0;
+}
+
 void null_log(phx_log_level level, const char* msg) {
     static const char* tag[] = { "TRACE", "DEBUG", "INFO ", "WARN ", "ERROR" };
     int l = int(level); if (l < 0 || l > 4) l = 2;
@@ -118,6 +135,7 @@ const phx_platform g_null_platform = {
     null_gfx, null_audio,
     null_poll_input,
     null_open, null_map, null_close,
+    null_save, null_load,
     null_log,
 };
 

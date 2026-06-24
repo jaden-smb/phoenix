@@ -8,7 +8,61 @@ plus the immediate next steps. Updated as development proceeds (see the README's
 
 ---
 
-## Current milestone: **M2 — reached real hardware, on every backend. One C++17 codebase cross-compiles to a Game Boy Advance ROM and a PSP EBOOT (and runs on mGBA/PPSSPP), plus a real desktop window with SDL software-present, an OpenGL GPU path, and a live SDL audio device — all pixel/output-verified against the software golden reference. Full asset pipeline + the example running off all of it.**
+## Current milestone: **M5 — the MVP gate. The example platformer is now a real game (two enemy types, damage + i-frames + stomp, death/respawn, save/load) on all four targets, baked by the full two-stage asset pipeline, behind a green CI size gate, with the canonical CMake tree building every target.**
+
+### Latest session (2026-06-23) — M3 tooling + M5 gameplay + CI size gate
+
+> **M5 is essentially met.** The example is no longer a tech slice — it's a small game with
+> enemies you can stomp or get hurt by, a working health bar, recoverable death, and persistence;
+> it builds and runs on PC, GBA (software + PPU), and PSP; the offline pipeline is the documented
+> two-stage converter→assembler flow; and CI enforces the GBA budget.
+
+- **Canonical CMake build repaired (M0 gap closed).** The four-target CMake tree was broken — it
+  referenced nonexistent/empty tool dirs, was missing `tests/CMakeLists.txt`, the PSP toolchain
+  file, and 11 of 13 engine-module `CMakeLists.txt`. Now it configures + builds + `ctest`s on the
+  host (**19/19**) and the portable engine **cross-compiles for GBA (ARM7TDMI) and PSP (MIPS)** via
+  CMake. Headless backends (null + software) are the default; SDL/GL are opt-in.
+- **M3 converter CLIs are real tools.** `phxsprite` / `phxtile` / `phxsnd` / `phxbin` were empty
+  dirs (the design's two-stage pipeline was unbuilt). They're now standalone CLIs over a shared
+  `tools/phxpack/builders.h` (one bake path), each emitting an intermediate `.phx*` file; `phxpack`
+  gained a host **bundle reader** and now MERGES those intermediates into `assets.phxp` (or still
+  bakes sources directly). `phxbin` is new: JSON → flat fixed-stride table **+ a generated `.gen.h`**
+  accessor. Covered by `pipeline_test` (30 in-process checks) + a `tools_cli` ctest running the real
+  binaries. ✅
+- **Console example artifacts.** `make gba-platformer` / `gba-platformer-ppu` ROMs + a **new**
+  `make psp-platformer` EBOOT (`examples/platformer/src/psp_main.cpp` — module info + HOME-exit +
+  PSP budgets; bundle embedded via `bin2s`, served from memory by the PSP backend's existing
+  `phx_psp_set_bundle`). All three rebuild clean with the new gameplay.
+- **GBA performance.** Root-caused the software ROM's slowness (full per-pixel rasterization into a
+  32-bit EWRAM backbuffer + per-pixel RGBA→BGR555 + 2× blit — the PPU path is the shippable one).
+  Landed the free global win: **`REG_WAITCNT = 0x4317`** (prefetch + fast 3/1 ROM timing) at init —
+  the BIOS leaves it at the slowest setting; this speeds up *every* GBA build incl. the PPU path.
+- **M5 — two enemy types.** A **patroller** (walks a range; stomp-from-above kills + bounces +
+  scores, side-touch hurts) and a static **spike** hazard. Damage decrements `Player.health` with
+  ~1 s **i-frames**; **0 HP → respawn** at the spawn point. Spawns are data-driven from the Tiled
+  object group; the HUD health bar is now functional. ✅
+- **M5 — save/load.** New `save`/`load` pair on the platform C seam (a key→blob store): a **file**
+  on PC/PSP (`sceIo` on PSP), battery **SRAM** (0x0E000000, byte-wise, `SRAM_V113` signature) on
+  GBA. The game writes a `SaveData{magic,version,score,deaths}` on pause/quit and restores it at
+  boot (magic/version validated → fresh storage reads as new game). ✅
+- **CI size gate (closes the MVP gate).** `tools/common/size_gate.py` classifies the GBA ELF's
+  static sections into IWRAM (32 KB) / EWRAM (256 KB) by load address and checks the ROM file size,
+  failing on over-budget (`make size-gate`). Current: **ROM 116.5 KB / 1 MB, IWRAM 10.4 / 28 KB,
+  EWRAM static 0 / 64 KB**. `.github/workflows/ci.yml` has three jobs: **host** (full suite +
+  fixed-point determinism), **gba-size** (devkitARM container → ROM + size gate), and **psp**
+  (pspdev container → EBOOT). To keep the PSP build single-SDK, its asset embedding now uses a
+  portable `tools/common/bin2s.py` (devkitPro-bin2s-compatible symbols) instead of devkitPro's
+  `bin2s`, so the `psp` job needs only pspsdk + a host compiler. ✅
+- **Determinism held throughout.** Enemies + save/load produce **bit-identical** results on the PC
+  (`float`) and GBA (`fixed16`) tiers — the whole playthrough lands on `score=4, health=2,
+  enemies_killed=1`, and the save round-trip restores `score=4` on both.
+
+**Still open (post-M5):** the GUI editors `phxtmap`/`phxentity` (M6); parallax + a profiler overlay;
+per-target audio encode (phxsnd is mono16 for all targets); UI dialogue; a determinism suite as a
+named release gate + a sanitizer pass (M7); and **runtime verification of the GBA-SRAM / PSP-`sceIo`
+save paths** (the host file path is tested; the console save paths compile but are unrun here).
+
+### (M2 — reached real hardware, on every backend)
 ### (M1 COMPLETE — a full headless platformer runs on every engine system)
 > The portability thesis is proven on metal: the **same** portable engine that passes the host
 > suite cross-compiles with **devkitARM** → a real `.gba` ROM and **pspsdk** → a real `EBOOT.PBP`
@@ -119,7 +173,7 @@ module edges); `runtime` is the composition root at the top of the layering.
 | **tools/phxpack** | ✅ | bundle writer lib (**`--compress`: LZSS each blob, kept only where it shrinks**) + **CLI: PNG/PPM→texture, tilemap-CSV→tilemap, `.sprdef`→sheet + anim clips, `.tmj`→Tiled tilemap + spawns, `.wav`→sound → `.phxp`**. Ships dependency-free decoders for **DEFLATE/zlib + PNG** (8-bit gray/RGB/palette/RGBA, all 5 filters), **JSON + Tiled**, and **RIFF/WAV** (8/16-bit, mono/stereo → mono16). The asset converters are complete |
 | **core/pixel** | ✅ | shared `Rgba`/`rgba()`/`PixelFormat` (so render & resource don't depend on each other) |
 | **audio** | ✅ | software `AudioMixer`: SoA voices (count from `caps.audio_channels`), per-voice gain+pan, Q16 nearest-sample resampling, loop, music bus, generation-guarded handles. **+ streaming**: an SPSC `RingBuffer` + `AudioStream` (pump() resamples a source — incl. a zero-copy bundle blob — into the ring off the audio path; the music bus drains it 1:1, silence on underrun). All-integer → byte-identical on both tiers. `mix()` fills a stereo buffer (pure; no device). **+ a lock-free SPSC `AudioCommandQueue`** (game thread push → audio-thread drain into the mixer) so device playback never races; `stop_music()`. The SDL backend's audio device runs a game-supplied fill callback that drains the queue + mixes. Depends only on core+memory |
-| **examples/platformer** | ✅ | full game on real modules **driven entirely by the asset pipeline**: its level geometry + entity placement come from a baked **Tiled map (`Tilemap` + `Spawns`)**, the hero animation from a **`Sprite`** asset, and jump/coin SFX from **`Sound`** assets through an `AudioMixer` — nothing gameplay-relevant is hardcoded. Title/level/pause `SceneStack`, player + physics + anim + coins + HUD. Builds as a production binary (`make`) and a headless test (`make platformer`) on both tiers |
+| **examples/platformer** | ✅ | full game on real modules **driven entirely by the asset pipeline**: its level geometry + entity placement come from a baked **Tiled map (`Tilemap` + `Spawns`)**, the hero animation from a **`Sprite`** asset, and jump/coin SFX from **`Sound`** assets through an `AudioMixer` — nothing gameplay-relevant is hardcoded. Title/level/pause `SceneStack`, player + physics + anim + coins + HUD. **M5 gameplay:** two enemy types (patroller + spike) with damage/i-frames/stomp/respawn (functional health bar), and **save/load** (score+deaths) via the platform save seam (file on PC/PSP, SRAM on GBA). Builds as a production binary (`make`), GBA ROMs (`make gba-platformer[-ppu]`), a PSP EBOOT (`make psp-platformer`), and a headless save→reload test (`make platformer`) — **bit-identical on both tiers** |
 
 **Tests:** `tests/` — unit: fixed (7), memory (9), ecs (8), time (5), input (4), physics (6),
 anim (6), scene (8), ui (2), audio (12), stream (9 — ring SPSC + AudioStream pump/loop/
@@ -637,10 +691,14 @@ more asset types, performance passes), not bring-up of the existing design.
 
 ### Build commands (current)
 ```
-make check                # full host suite (both via TIER), all integrations, dep gate
+make check                # full host suite: unit + integration + pipeline + tools + dep gate
+make test TIER=gba_sim    # foundation suite under the GBA fixed-point tier (determinism)
+make pipeline / make tools # two-stage asset pipeline (converters -> intermediates -> merge) + CLI smoke
+make size-gate            # build the PPU ROM + enforce the GBA ROM/IWRAM/EWRAM budget (MVP gate)
+make psp-platformer       # pspsdk   -> build/psp/platformer/EBOOT.PBP (the FULL example game)
+cmake -S . -B build/cmake # canonical 4-target tree; `cmake --build` + `ctest` (19/19 on host)
 make ppu                  # GBA-native PPU backend: quantize->tiles+OAM->compose, verified headlessly
 make gu                   # PSP-native GU backend: record sprite quads->compose (bit-identical to soft)
-make test TIER=gba_sim    # foundation suite under the GBA fixed-point tier
 make gba                  # devkitARM -> build/gba/phx-smoke.gba       (render smoke ROM, software rasterizer)
 make gba-ppu              # devkitARM -> build/gba/phx-ppu.gba             (PPU hardware smoke: Mode-0 tiles+OBJ)
 make gba-platformer       # devkitARM -> build/gba/phx-platformer.gba      (the FULL example game, software render)

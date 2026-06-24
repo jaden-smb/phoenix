@@ -91,6 +91,12 @@ public:
         push(name, phx::AssetType::Blob, std::move(blob));
     }
 
+    // Add an already-baked asset with its name hash intact (used to MERGE a pre-baked bundle —
+    // e.g. converter output — whose TOC stores hashes, not the original asset names).
+    void add_raw(phx::NameHash hash, phx::AssetType type, std::vector<uint8_t> blob) {
+        entries_.push_back(Entry{ hash, type, std::move(blob) });
+    }
+
     // Assemble and write. Returns false on I/O error.
     bool write(const std::string& path) {
         // sort by name hash so the runtime can binary-search the TOC

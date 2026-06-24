@@ -47,13 +47,15 @@ fenix/
 │   └── ui/                       Immediate-mode menus/text/HUD/dialogue (-> sprite path)
 │
 ├── tools/                        Host-only (C++17, STL allowed; never ships to console)
-│   ├── phxpack/                  Bundle assembler: png/ppm/tmcsv/sprdef/tmj/wav -> assets.phxp; DEFLATE/PNG/JSON/Tiled/WAV importers
-│   ├── phxsprite/                PNG (+slices) -> .phxspr (atlas + animation tables)
-│   ├── phxtile/                  Tiled .tmj/.tmx -> .phxtmap (layers + collision + spawns)
-│   ├── phxsnd/                   WAV -> .phxsnd (PCM/ADPCM/8-bit per target)
-│   ├── phxbin/                   JSON/XML -> .phxbin (+ generated accessor header)
-│   ├── phxtmap/                  GUI tilemap editor (ImGui + engine GL backend)
-│   ├── phxentity/                GUI entity/prefab editor (reflection-driven)
+│   ├── phxpack/                  Bundle ASSEMBLER: bakes sources directly OR merges .phx* intermediates -> assets.phxp.
+│   │                             builders.h = the ONE shared bake path (DEFLATE/PNG/JSON/Tiled/WAV importers);
+│   │                             bundle_reader.h merges pre-baked converter output.
+│   ├── phxsprite/                CONVERTER: PNG + .sprdef/json sidecar -> .phxspr (atlas + animation clips)
+│   ├── phxtile/                  CONVERTER: Tiled .tmj -> .phxtmap (layers + spawns; solid tiles = collision)
+│   ├── phxsnd/                   CONVERTER: WAV -> .phxsnd (mono16; per-target ADPCM/8-bit is future)
+│   ├── phxbin/                   CONVERTER: JSON -> .phxbin flat table (+ generated .gen.h accessor)
+│   ├── phxtmap/                  GUI tilemap editor (ImGui + engine GL backend) — M6, not yet built
+│   ├── phxentity/                GUI entity/prefab editor (reflection-driven) — M6, not yet built
 │   └── common/                   depcheck.py + shared tool utilities
 │
 ├── examples/

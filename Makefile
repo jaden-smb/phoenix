@@ -237,6 +237,23 @@ AUDIO     := $(BUILD)/phx_audio
 # The phxpack CLI (host tool): inputs -> .phxp bundle.
 PHXPACK := $(BUILD)/phxpack
 
+# Per-format converter CLIs (docs/08): author source -> intermediate .phx*, merged by phxpack.
+PHXSPRITE := $(BUILD)/phxsprite
+PHXTILE   := $(BUILD)/phxtile
+PHXSND    := $(BUILD)/phxsnd
+PHXBIN    := $(BUILD)/phxbin
+
+# The two-stage pipeline integration test (converters -> intermediates -> merge -> mount).
+PIPELINE_SRC := engine/core/src/assert.cpp \
+                engine/core/src/fixed.cpp \
+                engine/core/src/log.cpp \
+                engine/memory/src/memory_root.cpp \
+                engine/platform/src/null/null_platform.cpp \
+                engine/resource/src/cache.cpp \
+                tests/pipeline_test.cpp
+PIPELINE_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(PIPELINE_SRC))
+PIPELINE     := $(BUILD)/phx_pipeline
+
 # The render smoke links the front end + software backend + null platform framebuffer.
 RENDER_SRC := engine/core/src/assert.cpp \
               engine/core/src/fixed.cpp \
@@ -262,10 +279,10 @@ GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/
             $(patsubst tests/render_test.cpp,tests/gu_test.cpp,$(RENDER_SRC)))
 GU_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(GU_SRC))
 
-.PHONY: test smoke render ppu gu playable physics anim scene ui platformer sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu psp psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack check build clean depcheck
+.PHONY: test smoke render ppu gu playable physics anim scene ui platformer sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu psp psp-platformer psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck
 
 # Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstone + audio + resource + dep gate.
-check: test smoke render ppu gu playable physics anim scene ui platformer audio texcache png sprite tiled resource phxpack depcheck
+check: test smoke render ppu gu playable physics anim scene ui platformer audio texcache png sprite tiled resource phxpack pipeline tools depcheck
 
 test: $(BIN)
 	@./$(BIN)
@@ -433,6 +450,14 @@ gba-platformer: $(BUILD)/gba/phx-platformer.gba
 gba-platformer-ppu: $(BUILD)/gba/phx-platformer-ppu.gba
 	@echo "built $<  —  full game on the GBA PPU (Mode-0 tiles + OBJ); load in mGBA"
 
+# Enforce the GBA budget (docs/09 MVP gate): classify the ELF's static sections into IWRAM/EWRAM
+# and check the ROM file size, failing if any budget is exceeded. Builds the shippable PPU ROM.
+size-gate: $(BUILD)/gba/phx-platformer-ppu.gba
+	@python3 tools/common/size_gate.py \
+	  --rom $(BUILD)/gba/phx-platformer-ppu.gba \
+	  --elf $(BUILD)/gba/platformer-ppu.elf \
+	  --size-tool $(DEVKITARM)/bin/arm-none-eabi-size
+
 # host tool that bakes the .phxp the ROM embeds (same importers as the host game)
 $(PLATBAKE): $(BUILD)/examples/platformer/src/bake_main.o
 	@mkdir -p $(dir $@)
@@ -497,9 +522,11 @@ PSP_PRXGEN := $(PSPDEV)/bin/psp-prxgen
 # GCC from turning those functions' byte loops back into calls to themselves (infinite recursion).
 PSP_FLAGS  := -std=c++17 -O2 -fno-rtti -fno-exceptions -fno-threadsafe-statics -fno-tree-loop-distribute-patterns -Wall -Wextra -G0 -DPHX_TARGET_PSP=1 \
               -I$(PSPSDK)/include
-PSP_INC    := -Iengine/core/include -Iengine/memory/include -Iengine/render/include \
-              -Iengine/render/src -Iengine/input/include -Iengine/platform/include \
-              -Iengine/audio/include
+PSP_INC    := -Iengine/core/include -Iengine/memory/include -Iengine/ecs/include \
+              -Iengine/input/include -Iengine/audio/include -Iengine/platform/include \
+              -Iengine/render/include -Iengine/render/src -Iengine/resource/include \
+              -Iengine/physics/include -Iengine/anim/include -Iengine/scene/include \
+              -Iengine/ui/include -Iengine/runtime/include -Iexamples/platformer/src
 # The PRX link flow: keep relocations (-Wl,-q) + the prx specs/linkfile so psp-prxgen works.
 PSP_LDFLAGS:= -L$(PSPSDK)/lib -specs=$(PSPSDK)/lib/prxspecs -Wl,-q,-T$(PSPSDK)/lib/linkfile.prx
 PSP_LIBS   := -lpspaudio -lpspdisplay -lpspge -lpspctrl -lpspgu -lpsputility -lpspuser -lpspkernel
@@ -521,8 +548,27 @@ PSP_AUDIO_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/cor
                  examples/psp_audio/main.cpp
 PSP_AUDIO_OBJ := $(patsubst %.cpp,$(BUILD)/psp/%.o,$(PSP_AUDIO_SRC))
 
+# The full example platformer as a PSP EBOOT: the portable engine + gameplay systems + the PSP
+# platform backend (software renderer), with the .phxp bundle baked offline (host) and linked
+# into the EBOOT via bin2s — exactly like the GBA ROM (the PSP backend's file seam serves the
+# embedded bundle on mount, via phx_psp_set_bundle()). Entry point: psp_main.cpp (module info +
+# HOME-exit callbacks + PSP-sized budgets), the PSP analogue of gba_main.cpp.
+PSP_PLAT_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
+                engine/memory/src/memory_root.cpp engine/ecs/src/world.cpp \
+                engine/render/src/renderer.cpp engine/render/src/soft/soft_renderer.cpp \
+                engine/physics/src/physics.cpp engine/anim/src/anim.cpp \
+                engine/scene/src/scene.cpp engine/ui/src/ui.cpp engine/runtime/src/app.cpp \
+                engine/resource/src/cache.cpp engine/audio/src/mixer.cpp \
+                engine/platform/src/psp/psp_platform.cpp \
+                examples/platformer/src/systems.cpp examples/platformer/src/psp_main.cpp
+PSP_PLAT_OBJ := $(patsubst %.cpp,$(BUILD)/psp/%.o,$(PSP_PLAT_SRC))
+
 psp: $(BUILD)/psp/EBOOT.PBP
 	@echo "built $<  —  run in PPSSPP / on a PSP"
+
+# Bake the bundle on the host, embed it in the EBOOT, and build the playable platformer.
+psp-platformer: $(BUILD)/psp/platformer/EBOOT.PBP
+	@echo "built $<  —  run in PPSSPP / on a PSP (arrows move, X/triangle jump, Start = menu)"
 
 psp-gu: $(BUILD)/psp/gu/EBOOT.PBP
 	@echo "built $<  —  PSP GU hardware backend (sceGu display list); run in PPSSPP"
@@ -541,6 +587,27 @@ $(BUILD)/psp/EBOOT.PBP: $(PSP_OBJ)
 	$(PSP_PRXGEN) $(BUILD)/psp/smoke.elf $(BUILD)/psp/smoke.prx
 	$(PSP_MKSFO) "Phoenix PSP Smoke" $(BUILD)/psp/PARAM.SFO
 	$(PSP_PACK) $@ $(BUILD)/psp/PARAM.SFO NULL NULL NULL NULL NULL $(BUILD)/psp/smoke.prx NULL
+
+# The platformer EBOOT: host-bake the bundle, embed it via bin2s (same tool/symbols as the GBA
+# ROM: `platformer_phxp` + `platformer_phxp_size`), link the game, then PRX -> pack into EBOOT.PBP.
+$(BUILD)/psp/platformer.phxp: $(PLATBAKE)
+	@mkdir -p $(dir $@)
+	./$(PLATBAKE) $@
+
+# Uses the portable bin2s (tools/common/bin2s.py) instead of devkitPro's, so the PSP EBOOT build
+# depends only on pspsdk + a host python3 (no second SDK) — important for CI.
+$(BUILD)/psp/bundle.o: $(BUILD)/psp/platformer.phxp
+	python3 tools/common/bin2s.py $< > $(BUILD)/psp/bundle.s
+	$(PSP_CXX) -x assembler-with-cpp -c $(BUILD)/psp/bundle.s -o $@
+
+$(BUILD)/psp/platformer/EBOOT.PBP: $(PSP_PLAT_OBJ) $(BUILD)/psp/bundle.o
+	@mkdir -p $(dir $@)
+	$(PSP_CXX) $(PSP_FLAGS) $(PSP_PLAT_OBJ) $(BUILD)/psp/bundle.o $(PSP_LDFLAGS) $(PSP_LIBS) -o $(BUILD)/psp/platformer/platformer.elf
+	$(PSP_FIXUP) $(BUILD)/psp/platformer/platformer.elf
+	$(PSP_PRXGEN) $(BUILD)/psp/platformer/platformer.elf $(BUILD)/psp/platformer/platformer.prx
+	$(PSP_MKSFO) "Phoenix Platformer" $(BUILD)/psp/platformer/PARAM.SFO
+	$(PSP_PACK) $@ $(BUILD)/psp/platformer/PARAM.SFO NULL NULL NULL NULL NULL $(BUILD)/psp/platformer/platformer.prx NULL
+	@echo "EBOOT: $@ ($$(stat -c%s $@) bytes)"
 	@echo "EBOOT: $@ ($$(stat -c%s $@) bytes)"
 
 $(BUILD)/psp/gu/EBOOT.PBP: $(PSP_GU_OBJ)
@@ -597,7 +664,23 @@ phxpack: $(PHXPACK)
 	@test -f $(BUILD)/tone.wav && ./$(PHXPACK) --out $(BUILD)/cli_wav.phxp --target 2 $(BUILD)/tone.wav \
 	  && head -c4 $(BUILD)/cli_wav.phxp | grep -q PHXP && echo "PHXPACK PASS (baked a WAV sound)" || (echo "PHXPACK FAIL (wav)"; exit 1)
 
-build: $(BIN) $(SMOKE) $(RENDER) $(PPU) $(GU) $(PLAYABLE) $(PHYSICS) $(ANIM) $(SCENE) $(UI) $(PLATFORMER) $(PLATAPP) $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) $(RESOURCE) $(PHXPACK)
+# The two-stage pipeline in-process: converters bake intermediates, phxpack merges, the cache
+# mounts and reads back every asset type. Also drops the build/p_* source fixtures the CLI smoke
+# (`tools`) re-runs the real binaries over.
+pipeline: $(PIPELINE)
+	@./$(PIPELINE)
+
+# CLI smoke: run the REAL converter + assembler binaries over the fixtures `pipeline` dropped,
+# proving the executables parse args, link, and produce a valid merged bundle.
+tools: pipeline $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXPACK)
+	@./$(PHXSPRITE) --out $(BUILD)/c_hero.phxspr  --name hero  $(BUILD)/p_hero.sprdef
+	@./$(PHXTILE)   --out $(BUILD)/c_level.phxtmap --name level $(BUILD)/p_level.tmj
+	@./$(PHXSND)    --out $(BUILD)/c_tone.phxsnd   --name tone  $(BUILD)/p_tone.wav
+	@./$(PHXBIN)    --out $(BUILD)/c_items.phxbin  --name items --header $(BUILD)/c_items.gen.h $(BUILD)/p_items.json
+	@./$(PHXPACK)   --out $(BUILD)/c_assets.phxp $(BUILD)/c_hero.phxspr $(BUILD)/c_level.phxtmap $(BUILD)/c_tone.phxsnd $(BUILD)/c_items.phxbin
+	@head -c4 $(BUILD)/c_assets.phxp | grep -q PHXP && echo "TOOLS PASS (4 converters -> merged bundle)" || (echo "TOOLS FAIL"; exit 1)
+
+build: $(BIN) $(SMOKE) $(RENDER) $(PPU) $(GU) $(PLAYABLE) $(PHYSICS) $(ANIM) $(SCENE) $(UI) $(PLATFORMER) $(PLATAPP) $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) $(RESOURCE) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PIPELINE)
 
 $(BIN): $(UNIT_OBJ)
 	@mkdir -p $(dir $@)
@@ -671,9 +754,32 @@ $(TILED): $(TILED_OBJ)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(TILED_OBJ) -o $@
 
-$(PHXPACK): tools/phxpack/main.cpp tools/phxpack/bundle_writer.h
+PHXPACK_HDRS := tools/phxpack/bundle_writer.h tools/phxpack/bundle_reader.h tools/phxpack/builders.h \
+                tools/phxpack/png.h tools/phxpack/tiled.h tools/phxpack/wav.h tools/phxpack/json.h
+
+$(PHXPACK): tools/phxpack/main.cpp $(PHXPACK_HDRS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) tools/phxpack/main.cpp -o $@
+
+$(PHXSPRITE): tools/phxsprite/main.cpp $(PHXPACK_HDRS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) tools/phxsprite/main.cpp -o $@
+
+$(PHXTILE): tools/phxtile/main.cpp $(PHXPACK_HDRS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) tools/phxtile/main.cpp -o $@
+
+$(PHXSND): tools/phxsnd/main.cpp $(PHXPACK_HDRS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) tools/phxsnd/main.cpp -o $@
+
+$(PHXBIN): tools/phxbin/main.cpp $(PHXPACK_HDRS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) tools/phxbin/main.cpp -o $@
+
+$(PIPELINE): $(PIPELINE_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(PIPELINE_OBJ) -o $@
 
 $(BUILD)/%.o: %.cpp
 	@mkdir -p $(dir $@)

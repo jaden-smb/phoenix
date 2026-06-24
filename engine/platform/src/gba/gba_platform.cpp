@@ -24,6 +24,13 @@ namespace {
 #define REG_DISPSTAT (*(volatile uint16_t*)0x04000004)
 #define REG_VCOUNT   (*(volatile uint16_t*)0x04000006)
 #define REG_KEYINPUT (*(volatile uint16_t*)0x04000130)
+#define REG_WAITCNT  (*(volatile uint16_t*)0x04000204)
+// Game Pak access timing + prefetch. The BIOS leaves WAITCNT at 0x0000 — the SLOWEST ROM
+// timing (WS0 4/2 wait states, prefetch buffer OFF) — and all code/const-data executes from
+// cartridge ROM, so every instruction fetch pays it. 0x4317 = prefetch ON + WS0 3/1, the
+// standard all-carts-safe fast setting; a one-write, global speedup for every GBA build
+// (software AND PPU paths). Set once at init before anything hot runs.
+constexpr uint16_t kWaitCntFast = 0x4317;
 static volatile uint16_t* const kVRAM = (volatile uint16_t*)0x06000000;
 
 // DirectSound (Mode A): DMA1 streams 8-bit signed PCM into FIFO A, clocked by Timer0 overflow.
@@ -129,6 +136,7 @@ inline uint16_t to_bgr555(uint32_t rgba) {       // soft fb is R | G<<8 | B<<16 
 }
 
 int gba_init(const phx_platform_desc* desc) {
+    REG_WAITCNT = kWaitCntFast;              // fast ROM timing + prefetch (see note above)
     int w = desc->width  > 0 ? desc->width  : kScreenW;
     int h = desc->height > 0 ? desc->height : kScreenH;
     if (w > kScreenW) w = kScreenW;
@@ -208,6 +216,31 @@ phx_file* gba_open(const char* /*path*/, size_t* out_size) {
 const void* gba_map(phx_file* f) { return f ? reinterpret_cast<GbaFile*>(f)->data : nullptr; }
 void        gba_close(phx_file*) {}
 
+// Persistence: battery-backed cartridge SRAM at 0x0E000000 (single slot; key ignored). SRAM is
+// an 8-bit bus — it MUST be accessed one byte at a time (no 16/32-bit loads/stores), so these
+// copy byte-wise. There is no "absent" state to report: uninitialised SRAM reads back as garbage,
+// so the caller validates a magic/version in the blob to tell a real save from a fresh cart.
+static volatile uint8_t* const kSRAM = (volatile uint8_t*)0x0E000000;
+constexpr uint32_t kSramSize = 32u * 1024u;
+// Emulators/flash carts auto-detect the save type by scanning the ROM for this signature; keep
+// it in the binary (the GBA link doesn't gc-sections, so `used` is enough) so SRAM saves are
+// recognised (mGBA, VBA, hardware).
+__attribute__((used)) static const char kSramSig[] = "SRAM_V113";
+
+int gba_save(const char* /*key*/, const void* data, uint32_t size) {
+    if (size > kSramSize) return 1;
+    const uint8_t* s = static_cast<const uint8_t*>(data);
+    for (uint32_t i = 0; i < size; ++i) kSRAM[i] = s[i];
+    return 0;
+}
+int gba_load(const char* /*key*/, void* out, uint32_t cap, uint32_t* out_size) {
+    if (cap > kSramSize) cap = kSramSize;
+    uint8_t* d = static_cast<uint8_t*>(out);
+    for (uint32_t i = 0; i < cap; ++i) d[i] = kSRAM[i];
+    if (out_size) *out_size = cap;
+    return 0;                                       // caller's magic check decides if it's valid
+}
+
 void gba_log(phx_log_level, const char*) {}        // no console on hardware
 
 const phx_platform g_gba_platform = {
@@ -217,6 +250,7 @@ const phx_platform g_gba_platform = {
     gba_gfx, gba_audio,
     gba_poll_input,
     gba_open, gba_map, gba_close,
+    gba_save, gba_load,
     gba_log,
 };
 

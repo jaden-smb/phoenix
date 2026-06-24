@@ -41,17 +41,21 @@ add_subdirectory(engine/scene)
 add_subdirectory(engine/physics)
 add_subdirectory(engine/anim)
 add_subdirectory(engine/ui)
+add_subdirectory(engine/runtime)
 
 # ---- the example game ------------------------------------------------------
 add_subdirectory(examples/platformer)
 
 # ---- host-only tools (always built for the host, even when cross-compiling) -
+# The asset pipeline (docs/08): per-format CONVERTERS bake author sources into intermediate
+# .phx* files; the phxpack ASSEMBLER merges them into assets.phxp. They share one bake path
+# (tools/phxpack/builders.h). The phxtmap/phxentity GUI editors are M6 (not yet built).
 if(NOT CMAKE_CROSSCOMPILING)
-  add_subdirectory(tools/phxpack)
-  add_subdirectory(tools/phxsprite)
-  add_subdirectory(tools/phxtile)
-  add_subdirectory(tools/phxsnd)
-  add_subdirectory(tools/phxbin)
+  add_subdirectory(tools/phxpack)     # assembler
+  add_subdirectory(tools/phxsprite)   # PNG/sprdef/json -> .phxspr
+  add_subdirectory(tools/phxtile)     # Tiled .tmj      -> .phxtmap
+  add_subdirectory(tools/phxsnd)      # WAV             -> .phxsnd
+  add_subdirectory(tools/phxbin)      # JSON            -> .phxbin (+ .gen.h)
   enable_testing()
   add_subdirectory(tests)
 endif()

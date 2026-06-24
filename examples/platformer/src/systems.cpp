@@ -11,6 +11,12 @@ namespace game {
 static const scalar kRun     = s_from_int(70);    // px/s
 static const scalar kJump    = s_from_int(200);   // px/s (upward)
 static const scalar kGravity = s_from_int(600);   // px/s^2
+static const scalar kEnemyRun    = s_from_int(28);   // patroller speed px/s
+static const scalar kEnemyRange  = s_from_int(20);   // patrol half-span px from spawn
+static const scalar kStompBounce = s_from_int(150);  // upward bounce after a kill
+static const scalar kHurtKick    = s_from_int(120);  // upward knock on taking a hit
+static const scalar kInvuln      = s_from_int(1);    // i-frames after a hit (seconds)
+static const int16_t kMaxHealth  = 3;
 
 // ---- systems --------------------------------------------------------------------------
 void player_system(EngineCtx* c, scalar /*dt*/) {
@@ -34,22 +40,75 @@ void player_system(EngineCtx* c, scalar /*dt*/) {
     });
 }
 
+// Patroller movement + the player's i-frame countdown. Runs before physics so the velocities
+// it sets are integrated this step.
+void enemy_system(EngineCtx* c, scalar dt) {
+    ecs::World& w = *c->world;
+    w.each<Player>([&](ecs::Entity, Player& pl) {
+        if (pl.invuln > s_from_int(0)) { pl.invuln -= dt; if (pl.invuln < s_from_int(0)) pl.invuln = s_from_int(0); }
+    });
+    w.each<Enemy, Body, Transform>([&](ecs::Entity e, Enemy& en, Body& b, Transform& t) {
+        if      (t.pos.x <= en.home_x - en.range) en.dir = 1;     // turn at the patrol bounds
+        else if (t.pos.x >= en.home_x + en.range) en.dir = -1;
+        b.vel.x = (en.dir > 0) ? kEnemyRun : -kEnemyRun;
+        if (SpriteRef* sr = w.get<SpriteRef>(e)) { if (en.dir < 0) sr->flags |= kFlipX; else sr->flags &= uint16_t(~kFlipX); }
+    });
+}
+
 void physics_system(EngineCtx* c, scalar dt) {
     c->hit_count = c->physics->step(*c->world, dt, Span<Hit>{ c->hits, 64 });
 }
 
+namespace {
+// Damage the player (unless invulnerable), with i-frames + a little knock-up. At 0 HP, respawn
+// at the spawn point with full health (a death that's recoverable, not a game-over).
+void hurt_player(EngineCtx* c, ecs::Entity pe, Player& pl) {
+    if (pl.invuln > s_from_int(0)) return;                       // i-frames: ignore the hit
+    pl.health = int16_t(pl.health - 1);
+    pl.invuln = kInvuln;
+    if (Body* b = c->world->get<Body>(pe)) b->vel.y = -kHurtKick;
+    if (pl.health <= 0) {                                        // death -> respawn
+        pl.health = kMaxHealth;
+        ++c->player_deaths;
+        if (Transform* t = c->world->get<Transform>(pe)) t->pos = c->player_spawn;
+        if (Body* b = c->world->get<Body>(pe)) b->vel = vec2{ s_from_int(0), s_from_int(0) };
+    }
+}
+} // namespace
+
 void interaction_system(EngineCtx* c, scalar /*dt*/) {
     ecs::World& w = *c->world;
     for (uint32_t i = 0; i < c->hit_count; ++i) {
+        // Orient the pair so `pe` is the player (if it's in this hit at all).
         ecs::Entity a = c->hits[i].a, b = c->hits[i].b;
-        ecs::Entity coin = ecs::kInvalid;
-        if (w.has<Player>(a) && w.has<Coin>(b)) coin = b;
-        else if (w.has<Player>(b) && w.has<Coin>(a)) coin = a;
-        if (coin == ecs::kInvalid) continue;
-        Blackboard& bb = c->scenes->persistent();
-        bb.set_int("score"_hash, bb.get_int("score"_hash) + w.get<Coin>(coin)->value);
-        if (c->mixer && c->coin_snd.samples) { c->mixer->play_sfx(c->coin_snd); ++c->sfx_triggers; }
-        w.despawn(coin);                       // safe: not iterating the world here
+        ecs::Entity pe = w.has<Player>(a) ? a : (w.has<Player>(b) ? b : ecs::kInvalid);
+        if (pe == ecs::kInvalid) continue;
+        ecs::Entity other = (pe == a) ? b : a;
+        Player* pl = w.get<Player>(pe);
+        if (!pl) continue;
+
+        if (w.has<Coin>(other)) {                                // collect
+            Blackboard& bb = c->scenes->persistent();
+            bb.set_int("score"_hash, bb.get_int("score"_hash) + w.get<Coin>(other)->value);
+            if (c->mixer && c->coin_snd.samples) { c->mixer->play_sfx(c->coin_snd); ++c->sfx_triggers; }
+            w.despawn(other);                                    // safe: not iterating the world here
+        } else if (w.has<Enemy>(other)) {                        // stomp (kill) vs side-touch (hurt)
+            Body* pb = w.get<Body>(pe);
+            Transform* pt = w.get<Transform>(pe);
+            Transform* et = w.get<Transform>(other);
+            const bool stomp = pb && pt && et && pb->vel.y > s_from_int(0) && pt->pos.y < et->pos.y;
+            if (stomp) {
+                w.despawn(other);
+                pb->vel.y = -kStompBounce;
+                ++c->enemies_killed;
+                Blackboard& bb = c->scenes->persistent();
+                bb.set_int("score"_hash, bb.get_int("score"_hash) + 2);
+            } else {
+                hurt_player(c, pe, *pl);
+            }
+        } else if (w.has<Hazard>(other)) {                       // spike: always hurts
+            hurt_player(c, pe, *pl);
+        }
     }
 }
 
@@ -71,6 +130,35 @@ void camera_system(EngineCtx* c, scalar /*dt*/) {
     px = px < 0 ? 0 : (px > maxx ? maxx : px);
     py = py < 0 ? 0 : (py > maxy ? maxy : py);
     c->camera->pos = vec2{ s_from_int(px), s_from_int(py) };
+}
+
+// ---- persistence ----------------------------------------------------------------------
+// Snapshot the run (score + deaths) into the platform save store. Called at save points
+// (entering pause, quitting) — a checkpoint the player returns to on next boot.
+void save_game(EngineCtx* c) {
+    const phx_platform* plat = c->app->platform();
+    if (!plat->save) return;
+    Blackboard& bb = c->scenes->persistent();
+    SaveData sd{};
+    sd.magic = kSaveMagic; sd.version = kSaveVersion;
+    sd.score  = uint16_t(bb.get_int("score"_hash));
+    sd.deaths = c->player_deaths;
+    plat->save(c->save_path, &sd, uint32_t(sizeof sd));
+}
+
+// Restore a previously saved run, if the store holds a valid (magic+version) blob. Returns
+// true when applied. Called once at boot before the title screen.
+bool load_game(EngineCtx* c) {
+    const phx_platform* plat = c->app->platform();
+    if (!plat->load) return false;
+    SaveData sd{};
+    uint32_t got = 0;
+    if (plat->load(c->save_path, &sd, uint32_t(sizeof sd), &got) != 0) return false;
+    if (got < sizeof sd || sd.magic != kSaveMagic || sd.version != kSaveVersion) return false;
+    c->scenes->persistent().set_int("score"_hash, int(sd.score));
+    c->player_deaths = sd.deaths;
+    c->loaded = true;
+    return true;
 }
 
 // ---- helpers --------------------------------------------------------------------------
@@ -125,7 +213,8 @@ public:
                     ecs::Entity p = w.spawn();
                     w.add<Transform>(p, { pos });
                     w.add<Body>(p, {});
-                    w.add<AABBColl>(p, { vec2{ s_from_int(4), s_from_int(4) }, kLayerPlayer, kLayerCoin });
+                    w.add<AABBColl>(p, { vec2{ s_from_int(4), s_from_int(4) }, kLayerPlayer,
+                                        uint16_t(kLayerCoin | kLayerEnemy | kLayerHazard) });
                     w.add<Player>(p, {});
                     SpriteRef sr{}; sr.tex = c->hero_tex; sr.sw = 8; sr.sh = 8; sr.layer = 2;
                     w.add<SpriteRef>(p, sr);
@@ -134,6 +223,7 @@ public:
                     an.sheet = c->hero_sheet; an.play(kIdle);
                     w.add<Animator>(p, an);
                     c->player = p;
+                    c->player_spawn = pos;
                 } else if (sp.type == "coin"_hash) {
                     ecs::Entity e = w.spawn();
                     w.add<Transform>(e, { pos });
@@ -141,6 +231,22 @@ public:
                     w.add<Coin>(e, {});
                     SpriteRef cs{}; cs.tex = c->coin_tex; cs.sw = 8; cs.sh = 8; cs.layer = 1;
                     w.add<SpriteRef>(e, cs);
+                } else if (sp.type == "enemy"_hash) {               // patroller (stomp to kill)
+                    ecs::Entity e = w.spawn();
+                    w.add<Transform>(e, { pos });
+                    w.add<Body>(e, {});
+                    w.add<AABBColl>(e, { vec2{ s_from_int(4), s_from_int(4) }, kLayerEnemy, kLayerPlayer });
+                    Enemy en{}; en.dir = -1; en.home_x = pos.x; en.range = kEnemyRange;
+                    w.add<Enemy>(e, en);
+                    SpriteRef es{}; es.tex = c->enemy_tex; es.sw = 8; es.sh = 8; es.layer = 2;
+                    w.add<SpriteRef>(e, es);
+                } else if (sp.type == "spike"_hash) {               // static hazard
+                    ecs::Entity e = w.spawn();
+                    w.add<Transform>(e, { pos });
+                    w.add<AABBColl>(e, { vec2{ s_from_int(4), s_from_int(4) }, kLayerHazard, kLayerPlayer });
+                    w.add<Hazard>(e, {});
+                    SpriteRef ss{}; ss.tex = c->spike_tex; ss.sw = 8; ss.sh = 8; ss.layer = 1;
+                    w.add<SpriteRef>(e, ss);
                 }
             }
         }
@@ -149,11 +255,12 @@ public:
 
     void update(EngineCtx* c, scalar dt) override {
         player_system(c, dt);
+        enemy_system(c, dt);
         physics_system(c, dt);
         interaction_system(c, dt);
         animation_system(c, dt);
         camera_system(c, dt);
-        if (c->input->just(Button::Start)) c->scenes->push(make_pause_scene(c));
+        if (c->input->just(Button::Start)) { save_game(c); c->scenes->push(make_pause_scene(c)); }
     }
 
     void render(EngineCtx* c, scalar) override {
@@ -197,7 +304,7 @@ public:
         ui_.rect(UIRect{ vec2{ s_from_int(30), s_from_int(28) }, vec2{ s_from_int(68), s_from_int(40) } }, rgba(10, 10, 20));
         ui_.text(vec2{ s_from_int(44), s_from_int(32) }, *c->font, "PAUSED", rgba(255, 255, 255));
         if (ui_.button(UIRect{ vec2{ s_from_int(36), s_from_int(44) }, vec2{ s_from_int(56), s_from_int(8) } }, *c->font, "RESUME")) c->scenes->pop();
-        if (ui_.button(UIRect{ vec2{ s_from_int(36), s_from_int(56) }, vec2{ s_from_int(56), s_from_int(8) } }, *c->font, "QUIT"))   c->app->request_quit();
+        if (ui_.button(UIRect{ vec2{ s_from_int(36), s_from_int(56) }, vec2{ s_from_int(56), s_from_int(8) } }, *c->font, "QUIT"))   { save_game(c); c->app->request_quit(); }
         ui_.end();
     }
     void update(EngineCtx* c, scalar) override {
@@ -227,6 +334,8 @@ void PlatformerGame::on_start(App& app) {
     ctx.tiles_tex = load_tex(&ctx, kTilesTex);
     ctx.hero_tex  = load_tex(&ctx, kHeroTex);
     ctx.coin_tex  = load_tex(&ctx, kCoinTex);
+    ctx.enemy_tex = load_tex(&ctx, "enemy"_hash);
+    ctx.spike_tex = load_tex(&ctx, "spike"_hash);
     font.tex = load_tex(&ctx, "font"_hash);
     font.glyph_w = 8; font.glyph_h = 8; font.cols = 16; font.first_char = 32;
     font.advance = 8; font.line_h = 8;
@@ -246,6 +355,8 @@ void PlatformerGame::on_start(App& app) {
     if (auto js = res->sound("jump"_hash); js.ok()) { auto v = js.unwrap(); ctx.jump_snd = SoundView{ v.samples, v.frames, v.rate }; }
     if (auto cs = res->sound("coin"_hash); cs.ok()) { auto v = cs.unwrap(); ctx.coin_snd = SoundView{ v.samples, v.frames, v.rate }; }
 
+    ctx.save_path = save_path;          // let the entry point pick the store path (PC/PSP/GBA)
+    load_game(&ctx);                    // restore a saved run (score/deaths) if the store has one
     scenes->push(make_title_scene(&ctx));
 }
 
@@ -282,5 +393,13 @@ bool PlatformerGame::player_on_ground() const {
 uint32_t PlatformerGame::depth() const { return scenes ? scenes->depth() : 0; }
 int      PlatformerGame::sfx_count() const { return int(ctx.sfx_triggers); }
 int32_t  PlatformerGame::audio_peak_level() const { return audio_peak; }
+int      PlatformerGame::health() const {
+    if (!ctx.world || ctx.player == ecs::kInvalid) return -1;
+    Player* p = ctx.world->get<Player>(ctx.player);
+    return p ? int(p->health) : -1;
+}
+int      PlatformerGame::enemies_killed() const { return int(ctx.enemies_killed); }
+int      PlatformerGame::deaths() const { return int(ctx.player_deaths); }
+bool     PlatformerGame::was_loaded() const { return ctx.loaded; }
 
 } // namespace game
