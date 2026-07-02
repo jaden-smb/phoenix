@@ -37,17 +37,36 @@ public:
         push(name, phx::AssetType::Texture, std::move(blob));
     }
 
+    // `parallax`: optional per-layer camera factors (one {fx,fy} pair per layer, 1.0 = moves
+    // with the world), e.g. from Tiled's parallaxx/parallaxy. The Q16 table is appended — and
+    // the header flag set — only when some factor differs from 1, so bundles without parallax
+    // stay byte-identical to the old format.
     void add_tilemap(const std::string& name, const uint16_t* indices,
                      uint16_t w, uint16_t h, uint8_t layers,
-                     uint8_t tile_w, uint8_t tile_h, const std::string& tileset) {
+                     uint8_t tile_w, uint8_t tile_h, const std::string& tileset,
+                     const std::vector<std::pair<double,double>>* parallax = nullptr) {
         phx::TilemapBlobHeader mh{};
         mh.width = w; mh.height = h; mh.layers = layers;
         mh.tile_w = tile_w; mh.tile_h = tile_h;
         mh.tileset = phx::fnv1a(tileset.c_str());
+        bool want_par = false;
+        if (parallax)
+            for (auto& p : *parallax) if (p.first != 1.0 || p.second != 1.0) want_par = true;
+        if (want_par) mh.flags |= phx::kTilemapHasParallax;
         const size_t n = size_t(w) * h * layers;
-        std::vector<uint8_t> blob(sizeof(mh) + n * sizeof(uint16_t));
+        const size_t par_off = (sizeof(mh) + n * sizeof(uint16_t) + 3) & ~size_t(3);  // 4-align
+        std::vector<uint8_t> blob(want_par ? par_off + size_t(layers) * 2 * sizeof(int32_t)
+                                           : sizeof(mh) + n * sizeof(uint16_t));
         std::memcpy(blob.data(), &mh, sizeof(mh));
         std::memcpy(blob.data() + sizeof(mh), indices, n * sizeof(uint16_t));
+        if (want_par) {
+            int32_t* pq = reinterpret_cast<int32_t*>(blob.data() + par_off);
+            for (uint8_t l = 0; l < layers; ++l) {
+                const auto pr = l < parallax->size() ? (*parallax)[l] : std::make_pair(1.0, 1.0);
+                pq[l * 2 + 0] = int32_t(pr.first  * 65536.0 + (pr.first  < 0 ? -0.5 : 0.5));
+                pq[l * 2 + 1] = int32_t(pr.second * 65536.0 + (pr.second < 0 ? -0.5 : 0.5));
+            }
+        }
         push(name, phx::AssetType::Tilemap, std::move(blob));
     }
 
@@ -66,8 +85,29 @@ public:
         push(name, phx::AssetType::Sprite, std::move(blob));
     }
 
-    // Mono 16-bit PCM sound at `rate` Hz (e.g. decoded from a WAV).
+    // Mono 16-bit PCM sound at `rate` Hz (e.g. decoded from a WAV). PER-TARGET ENCODE
+    // (docs/06): on tier 0 (GBA) the PCM is resampled down to the GBA device rate at BAKE
+    // time — the ROM carries ~2.7× less sample data and the 16 MHz CPU mixes 1:1 instead
+    // of resampling every voice. Q16 linear interpolation, all-integer (deterministic).
+    // Tiers 1/2 keep the source rate: their mixers run at 44.1 kHz and resample cheaply.
+    static constexpr uint32_t kTier0Rate = 16384;   // == the GBA Direct Sound device rate
     void add_sound(const std::string& name, const int16_t* samples, uint32_t frames, uint32_t rate) {
+        std::vector<int16_t> enc;
+        if (target_ == 0 && rate > kTier0Rate && frames) {
+            const uint64_t step = (uint64_t(rate) << 16) / kTier0Rate;   // src frames per out, Q16
+            const uint32_t out_n = uint32_t((uint64_t(frames) << 16) / step);
+            enc.resize(out_n);
+            uint64_t pos = 0;
+            for (uint32_t i = 0; i < out_n; ++i, pos += step) {
+                const uint32_t i0 = uint32_t(pos >> 16);
+                const uint32_t i1 = i0 + 1 < frames ? i0 + 1 : i0;
+                const int32_t  f  = int32_t(pos & 0xFFFF);
+                enc[i] = int16_t((int32_t(samples[i0]) * (65536 - f) + int32_t(samples[i1]) * f) >> 16);
+            }
+            std::printf("  ~ sound   %-12s tier-0 encode: %u Hz -> %u Hz (%u -> %u frames)\n",
+                        name.c_str(), rate, kTier0Rate, frames, out_n);
+            samples = enc.data(); frames = out_n; rate = kTier0Rate;
+        }
         phx::SoundBlobHeader sh{}; sh.frames = frames; sh.rate = rate;
         std::vector<uint8_t> blob(sizeof(sh) + size_t(frames) * sizeof(int16_t));
         std::memcpy(blob.data(), &sh, sizeof(sh));

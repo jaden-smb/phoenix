@@ -8,6 +8,7 @@ add_executable(platformer
 # phxpack writer headers on the include path (and the engine resource headers they reference).
 target_include_directories(platformer PRIVATE
   ${CMAKE_SOURCE_DIR}/tools/phxpack
+  ${CMAKE_SOURCE_DIR}/tools/common
   ${CMAKE_SOURCE_DIR}/engine/resource/include
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )

@@ -138,6 +138,16 @@ make psp-audio            # pspsdk    -> build/psp/audio/EBOOT.PBP   (PSP sceAud
 make gba-audio            # devkitARM -> build/gba/phx-audio.gba       (GBA Direct Sound: DMA1+Timer0->FIFO A)
 make phxpack              # build the asset CLI + bake a demo bundle end-to-end
 make depcheck             # enforce the acyclic module dependency law
+make determinism          # M7 gate: 9 suites + the rendered frame byte-identical across BOTH scalar tiers
+make sanitize             # M7 gate: the full check suite under ASan+UBSan (no recover)
+# ...and, with MinGW-w64 (g++-mingw-w64-x86-64 or llvm-mingw), cross-compile to Windows:
+make win                  # ALL of the above binaries as statically-linked PE32+ .exe (build/win/)
+make win-verify           # run the Windows unit-suite exe under Wine (native or flatpak)
+make gba-save             # devkitARM -> battery-SRAM save smoke ROM (verify via mGBA GDB stub)
+make psp-save             # pspsdk   -> sceIo save smoke EBOOT (PPSSPP log: SAVE_DEVICE/PERSIST_PASS)
+# ...and, with SDL2, the GUI editors (docs/08) — built on the engine's own window/renderer/UI:
+make tmap                 # phxtmap: mouse tilemap editor over the open Tiled .tmj (+ entity mode)
+make entity               # phxentity: entity/prefab table editor over the phxbin author JSON
 make clean
 ```
 
@@ -173,8 +183,17 @@ cmake -S . -B build/gba   -DPHX_TARGET=gba -DCMAKE_TOOLCHAIN_FILE=cmake/gba.tool
 cmake -S . -B build/psp   -DPHX_TARGET=psp -DCMAKE_TOOLCHAIN_FILE=cmake/psp.toolchain.cmake
 ```
 
-> **Status:** the one C++17 codebase runs the full host test suite (both scalar tiers) **and
-> cross-compiles to real GBA and PSP binaries** — three architectures, one source. The GBA
+> **Status:** the one C++17 codebase runs the full host test suite (both scalar tiers), **cross-
+> compiles to real GBA and PSP binaries** — *and to Windows*: `make win` (MinGW-w64) builds every
+> test/tool/game binary as a statically-linked PE32+ exe, and the **complete unit suite + the whole
+> platformer run verified under Wine** (`make win-verify`); the CMake tree builds `platformer.exe`
+> via `cmake/mingw.toolchain.cmake`. The renderer's designed API is fully built including
+> **parallax** (`set_tilemap_parallax`: per-map camera factors in the front end, Q16-exact on both
+> tiers, inherited by every backend). The **console save seams are runtime-verified** (PSP sceIo on
+> PPSSPP incl. persistence across boots — which found and fixed a NOCWD path bug — and GBA battery
+> SRAM round-tripping on mGBA). The **M7 determinism and ASan+UBSan gates** are named make targets
+> and CI jobs; their first runs caught a tier-contamination build bug, negative-shift UB in
+> `fixed16` itself, and heap overflows in four test fixtures — all fixed. The GBA
 > platformer ROM is now **verified actually running** on emulated ARM7TDMI (headlessly, via
 > `mgba-qt` offscreen + its GDB stub + a VRAM→PNG dump): title screen, fixed-step loop, input
 > polling, and the **Start→level transition all confirmed on hardware** (this also caught + fixed

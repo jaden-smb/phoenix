@@ -195,8 +195,20 @@ public:
         d.indices = tv.indices; d.width = tv.width; d.height = tv.height; d.layers = tv.layers;
         d.tile_w = tv.tile_w; d.tile_h = tv.tile_h; d.tileset = c->tiles_tex;
         c->map = c->render->upload_tilemap(d);
+        c->map_layers = tv.layers;
 
-        TileGrid g; g.tiles = tv.indices; g.w = tv.width; g.h = tv.height;
+        // Per-layer parallax factors baked from Tiled's parallaxx/parallaxy (Q16 in the view).
+        if (tv.parallax_q16)
+            for (uint8_t l = 0; l < tv.layers; ++l)
+                c->render->set_tilemap_parallax(c->map, l,
+                                                s_from_q16(tv.parallax_q16[l * 2 + 0]),
+                                                s_from_q16(tv.parallax_q16[l * 2 + 1]));
+
+        // Collision reads the LAST tile layer — the map convention is backdrop layers first
+        // (drawn behind), the gameplay/solid layer last (drawn in front).
+        TileGrid g;
+        g.tiles = tv.indices + size_t(tv.layers - 1) * tv.width * tv.height;
+        g.w = tv.width; g.h = tv.height;
         g.tile_w = tv.tile_w; g.tile_h = tv.tile_h; g.solid_from = 1;
         c->physics->set_tilemap(g);
         c->physics->set_gravity(vec2{ s_from_int(0), kGravity });
@@ -261,11 +273,13 @@ public:
         animation_system(c, dt);
         camera_system(c, dt);
         if (c->input->just(Button::Start)) { save_game(c); c->scenes->push(make_pause_scene(c)); }
+        if (c->input->just(Button::Select)) c->show_profiler = !c->show_profiler;
     }
 
     void render(EngineCtx* c, scalar) override {
         Renderer& r = *c->render;
-        r.draw_tilemap(c->map, 0);
+        for (uint8_t l = 0; l < c->map_layers; ++l)   // backdrop(s) first, solid layer last
+            r.draw_tilemap(c->map, l);
         draw_world_sprites(c);
 
         hud_.begin(r, *c->input);
@@ -276,6 +290,9 @@ public:
         int hp = 3; if (Player* pl = c->world->get<Player>(c->player)) hp = pl->health;
         hud_.bar(UIRect{ vec2{ s_from_int(2), s_from_int(12) }, vec2{ s_from_int(40), s_from_int(5) } },
                  s_from_int(hp) / s_from_int(3), rgba(220, 40, 40), rgba(60, 60, 60));
+        if (c->show_profiler)                        // Select toggles the frame profiler
+            hud_.profile_overlay(vec2{ s_from_int(2), s_from_int(20) },
+                                 c->app->profile(), c->font);
         hud_.end();
     }
 };

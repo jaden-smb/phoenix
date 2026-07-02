@@ -13,7 +13,9 @@ set(CMAKE_C_COMPILER   ${DEVKITARM}/bin/arm-none-eabi-gcc)
 set(CMAKE_CXX_COMPILER ${DEVKITARM}/bin/arm-none-eabi-g++)
 set(CMAKE_OBJCOPY      ${DEVKITARM}/bin/arm-none-eabi-objcopy CACHE FILEPATH "")
 
-set(_arch "-mthumb -mthumb-interwork -mcpu=arm7tdmi")
+# PHX_GBA_HW marks REAL hardware (MMIO/VRAM/OAM paths) on top of the PHX_TARGET_GBA tier
+# define from caps_select.cmake — the host TIER=gba_sim build gets the tier but not this.
+set(_arch "-mthumb -mthumb-interwork -mcpu=arm7tdmi -DPHX_GBA_HW=1")
 set(CMAKE_C_FLAGS_INIT   "${_arch}")
 set(CMAKE_CXX_FLAGS_INIT "${_arch} -fno-exceptions -fno-rtti")
 set(CMAKE_C_FLAGS_RELEASE_INIT   "-Os -ffast-math")

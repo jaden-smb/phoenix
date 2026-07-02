@@ -185,16 +185,38 @@ phx_file* psp_open(const char* /*path*/, size_t* out_size) {
 const void* psp_map(phx_file* f) { return f ? reinterpret_cast<PspFile*>(f)->data : nullptr; }
 void        psp_close(phx_file*) {}
 
-// Persistence: a memory-stick file via sceIo (the key is the path, relative to the EBOOT dir).
+// Persistence: a memory-stick file via sceIo. A bare key (no device prefix) is anchored at
+// ms0:/PSP/SAVEDATA/PHX/<key> — a bare relative path has NO cwd when the EBOOT is launched
+// directly (sceIoOpen fails with SCE_KERNEL_ERROR_NOCWD, seen on PPSSPP), and a UMD/flash
+// game could never write next to itself anyway. Keys that already carry a device ("ms0:/…")
+// pass through untouched.
+void psp_save_path(const char* key, char* out, uint32_t cap) {
+    static const char kPrefix[] = "ms0:/PSP/SAVEDATA/PHX/";
+    if (strchr(key, ':')) {                       // already device-anchored: use as-is
+        uint32_t i = 0;
+        for (; key[i] && i + 1 < cap; ++i) out[i] = key[i];
+        out[i] = '\0';
+        return;
+    }
+    uint32_t i = 0;
+    for (; kPrefix[i] && i + 1 < cap; ++i) out[i] = kPrefix[i];
+    for (uint32_t k = 0; key[k] && i + 1 < cap; ++k, ++i) out[i] = key[k];
+    out[i] = '\0';
+}
 int psp_save(const char* key, const void* data, uint32_t size) {
-    SceUID fd = sceIoOpen(key, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+    char path[256]; psp_save_path(key, path, sizeof(path));
+    sceIoMkdir("ms0:/PSP", 0777);                 // idempotent; EEXIST is fine
+    sceIoMkdir("ms0:/PSP/SAVEDATA", 0777);
+    sceIoMkdir("ms0:/PSP/SAVEDATA/PHX", 0777);
+    SceUID fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
     if (fd < 0) return 1;
     int w = sceIoWrite(fd, data, int(size));
     sceIoClose(fd);
     return (w == int(size)) ? 0 : 1;
 }
 int psp_load(const char* key, void* out, uint32_t cap, uint32_t* out_size) {
-    SceUID fd = sceIoOpen(key, PSP_O_RDONLY, 0777);
+    char path[256]; psp_save_path(key, path, sizeof(path));
+    SceUID fd = sceIoOpen(path, PSP_O_RDONLY, 0777);
     if (fd < 0) { if (out_size) *out_size = 0; return 1; }
     int r = sceIoRead(fd, out, int(cap));
     sceIoClose(fd);

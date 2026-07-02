@@ -11,6 +11,8 @@
 
 #include "builders.h"        // the converter bake logic
 #include "bundle_reader.h"   // the assembler's merge logic
+#include "editor.h"                        // phxtmap's document model (load/edit/save .tmj)
+#include "../tools/phxentity/editor.h"     // phxentity's document model (phxbin JSON tables)
 
 #include "png_fixtures.h"
 
@@ -133,6 +135,24 @@ int main() {
         check(s.frames == 8 && s.rate == 22050, "sound meta from .phxsnd");
         check(s.samples && s.samples[1] == 1000 && s.samples[4] == -3000, "sound samples"); }
 
+    // per-target encode: the SAME 22050 Hz WAV baked for tier 0 (GBA) is resampled at bake
+    // time to the 16384 Hz device rate (fewer ROM bytes, 1:1 runtime mixing); tier 2 kept
+    // the source rate above. First sample must survive; frame count scales by 16384/22050.
+    {
+        phxtool::BundleWriter w0(0);
+        check(phxtool::build_wav(w0, "build/p_tone.wav", "tone"), "phxsnd build (tier 0)");
+        check(w0.write("build/p_tone0.phxp"), "write tier-0 bundle");
+        ResourceCache* c0 = ResourceCache::create(arena).unwrap();
+        check(c0->mount(plat, "build/p_tone0.phxp") == Status::Ok, "mount tier-0 bundle");
+        auto s0 = c0->sound("tone"_hash);
+        check(s0.ok(), "sound('tone') tier 0");
+        if (s0.ok()) { SoundDataView s = s0.unwrap();
+            check(s.rate == 16384, "tier-0 sound resampled to the GBA device rate");
+            check(s.frames == uint32_t((uint64_t(8) << 16) / ((uint64_t(22050) << 16) / 16384)),
+                  "tier-0 frame count scaled by 16384/22050");
+            check(s.samples && s.samples[0] == 0, "tier-0 first sample intact"); }
+    }
+
     // data table, from phxbin: [u32 count][u32 stride][records...], ItemRecord{u16 id; u32 price; i16 atk;}
     auto bl = cache->blob("items"_hash);
     check(bl.ok(), "blob('items') merged");
@@ -147,6 +167,67 @@ int main() {
         std::memcpy(&price0, p + 8 + 4, 4);
         std::memcpy(&atk1,   p + 8 + stride + 8, 2);
         check(id0 == 1 && price0 == 100 && atk1 == -3, "table record fields"); }
+
+    // phxtmap editor document model: blank -> paint tiles + place spawns + a parallax layer
+    // -> save .tmj -> the REAL importer parses it back identically (editors emit author
+    // formats the converters bake, docs/08 §1) -> erase round-trips too.
+    {
+        using phxtool::TmapDoc;
+        TmapDoc d = TmapDoc::blank(4, 3, 8, 8, "tiles");
+        d.layers.insert(d.layers.begin(), std::vector<uint16_t>(12, 0));   // backdrop under main
+        d.layer_names.insert(d.layer_names.begin(), "backdrop");
+        d.layer_parallax.insert(d.layer_parallax.begin(), { 0.5, 1.0 });
+        d.set_tile(0, 1, 0, 7);                    // a cloud on the backdrop
+        d.set_tile(1, 2, 2, 3);                    // ground on the main layer
+        d.add_spawn("player", 8, 16);
+        d.add_spawn("coin", 24, 16);
+        check(d.tile(1, 2, 2) == 3 && d.tile(0, 1, 0) == 7, "editor set/get tiles");
+        check(d.dirty, "edits mark the doc dirty");
+
+        TmapDoc r;
+        check(TmapDoc::load(d.save_tmj(), r), "editor .tmj re-parses via the real importer");
+        check(r.width == 4 && r.height == 3 && r.layers.size() == 2, "round-trip dimensions/layers");
+        check(r.tile(0, 1, 0) == 7 && r.tile(1, 2, 2) == 3, "round-trip painted tiles");
+        check(r.layer_parallax.size() == 2 && r.layer_parallax[0].first == 0.5 &&
+              r.layer_parallax[1].first == 1.0, "round-trip parallax factors");
+        check(r.spawns.size() == 2 && r.spawns[0].type == "player" && r.spawns[0].x == 8 &&
+              r.spawns[1].type == "coin" && r.spawns[1].x == 24, "round-trip spawns");
+
+        check(r.remove_spawn_at(25, 17), "erase the spawn under the pointer's cell");
+        check(r.spawns.size() == 1 && r.spawns[0].type == "player", "right spawn removed");
+        r.set_tile(1, 2, 2, 0);
+        TmapDoc r2;
+        check(TmapDoc::load(r.save_tmj(), r2) && r2.tile(1, 2, 2) == 0 && r2.spawns.size() == 1,
+              "erase edits survive a second round-trip");
+    }
+
+    // phxentity editor document model: load the items table, edit (clamped to the field's
+    // declared type), clone + delete records, save — and prove the saved JSON still BAKES
+    // through the real phxbin builder (editors emit author formats the converters accept).
+    {
+        using phxtool::BinDoc;
+        BinDoc d;
+        check(BinDoc::load(kItems, d), "entity editor loads the phxbin JSON");
+        check(d.struct_name == "ItemRecord" && d.fields.size() == 3 && d.records.size() == 2,
+              "entity doc shape");
+        check(d.records[0][1] == 100 && d.records[1][2] == -3, "entity doc values");
+
+        d.step(0, 1, +10);                              // price 100 -> 110
+        d.step(1, 2, -1000000);                         // atk clamps to i16 min
+        check(d.records[0][1] == 110 && d.records[1][2] == -32768, "step + type clamp");
+        d.add_record(0);                                // clone record 0
+        d.remove_record(1);
+        check(d.records.size() == 2 && d.records[1][1] == 110, "clone + delete records");
+
+        write_file("build/p_items_edited.json", d.save_json().data(), d.save_json().size());
+        BinDoc r;
+        check(BinDoc::load(d.save_json(), r) && r.records.size() == 2 &&
+              r.records[1][1] == 110 && r.records[1][2] == 5, "entity doc round-trip");
+        phxtool::BundleWriter wb(2);
+        check(phxtool::build_bin(wb, "build/p_items_edited.json", "items2",
+                                 "build/p_items_edited.gen.h"),
+              "edited table still bakes through the real phxbin builder");
+    }
 
     // the generated accessor header exists and declares the struct
     bool gen_ok = false;

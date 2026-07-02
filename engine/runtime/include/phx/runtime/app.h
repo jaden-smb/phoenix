@@ -7,6 +7,7 @@
 #define PHX_RUNTIME_APP_H
 
 #include "phx/core/config.h"
+#include "phx/core/profile.h"
 #include "phx/core/time.h"
 #include "phx/memory/memory_root.h"
 #include "phx/input/input.h"
@@ -44,6 +45,9 @@ public:
     Renderer&           render()          { return *render_; }
     uint64_t            frame()    const  { return frame_; }
     scalar              dt()       const  { return dt_; }
+    // Last frame's phase timings (update/render/present/frame, µs), stamped by the loop from
+    // the platform clock every frame. Feed to UI::profile_overlay or a custom HUD readout.
+    const FrameProfile& profile()  const  { return prof_; }
 
 private:
     Config               cfg_;
@@ -53,6 +57,7 @@ private:
     Renderer*            render_ = nullptr;
     InputState           input_  {};
     StepAccumulator      acc_;
+    FrameProfile         prof_   {};
     scalar               dt_     = scalar{};
     uint64_t             frame_  = 0;
     bool                 quit_   = false;

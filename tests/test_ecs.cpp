@@ -3,6 +3,8 @@
 #include "phx/ecs/world.h"
 #include "phx/memory/memory_root.h"
 
+#include <cstdlib>
+
 using namespace phx;
 using namespace phx::ecs;
 
@@ -11,10 +13,13 @@ struct Position { int x, y; };
 struct Velocity { int x, y; };
 struct Tag {};
 
-// Each test gets a fresh world carved from a small arena.
+// Each test gets a fresh world carved from a small arena. Bound-checked: a new test case
+// that outgrows the pool must fail loudly, not hand out memory past it.
 World* fresh_world(uint32_t cap = 256) {
-    static uint8_t* pool = new uint8_t[8 << 20];   // 8 MB scratch for tests (host only)
+    static const size_t kPool = 32 << 20;          // scratch for tests (host only)
+    static uint8_t* pool = new uint8_t[kPool];
     static size_t   off  = 0;
+    if (off + (1 << 20) > kPool) { std::abort(); }
     ArenaAllocator* a = new ArenaAllocator();       // leaked intentionally (test lifetime)
     a->init(pool + off, 1 << 20);
     off += (1 << 20);

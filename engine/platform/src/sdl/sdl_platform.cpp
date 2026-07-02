@@ -180,7 +180,9 @@ void sdl_poll_input(phx_input_raw* out) {
 
     int mx = 0, my = 0;
     Uint32 ms = SDL_GetMouseState(&mx, &my);
-    out->pointer_x = int16_t(mx); out->pointer_y = int16_t(my);
+    // Mouse arrives in WINDOW pixels; the seam promises framebuffer coordinates, so undo
+    // the integer upscale (tools like phxtmap hit-test tiles against these).
+    out->pointer_x = int16_t(mx / kScale); out->pointer_y = int16_t(my / kScale);
     out->pointer_down = (ms & SDL_BUTTON(SDL_BUTTON_LEFT)) ? 1 : 0;
 }
 

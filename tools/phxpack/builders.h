@@ -145,9 +145,11 @@ inline bool build_tmj(BundleWriter& w, const std::string& in, const std::string&
     flat.reserve(tm.layers.size() * size_t(tm.width) * size_t(tm.height));
     for (const auto& L : tm.layers) flat.insert(flat.end(), L.begin(), L.end());
     w.add_tilemap(nm, flat.data(), uint16_t(tm.width), uint16_t(tm.height),
-                  uint8_t(tm.layers.size()), uint8_t(tm.tile_w), uint8_t(tm.tile_h), tm.tileset);
-    std::printf("  + tilemap %-12s %dx%d tiles x%u layers, tileset '%s'  (%s, Tiled)\n",
-                nm.c_str(), tm.width, tm.height, unsigned(tm.layers.size()), tm.tileset.c_str(), in.c_str());
+                  uint8_t(tm.layers.size()), uint8_t(tm.tile_w), uint8_t(tm.tile_h), tm.tileset,
+                  tm.has_parallax() ? &tm.layer_parallax : nullptr);
+    std::printf("  + tilemap %-12s %dx%d tiles x%u layers%s, tileset '%s'  (%s, Tiled)\n",
+                nm.c_str(), tm.width, tm.height, unsigned(tm.layers.size()),
+                tm.has_parallax() ? " (parallax)" : "", tm.tileset.c_str(), in.c_str());
     if (!tm.spawns.empty()) {
         std::vector<phx::SpawnDef> sd;
         for (const auto& s : tm.spawns)

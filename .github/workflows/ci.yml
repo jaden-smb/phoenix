@@ -22,8 +22,34 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y g++ make python3
       - name: Build + test (PC tier, scalar = float)
         run: make check
-      - name: Determinism — GBA fixed-point tier (scalar = fixed16)
-        run: make clean && make test TIER=gba_sim
+      - name: Determinism gate — identical outcomes + frame across scalar tiers
+        run: make determinism
+
+  # Sanitizer gate (M7): the full check suite under ASan + UBSan, no recover — any UB or
+  # heap error fails the job. Runs in its own build root (build/asan).
+  sanitize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y g++ make python3
+      - name: Full check suite under ASan+UBSan
+        run: make sanitize
+
+  # Windows: cross-compile the FULL host build (engine + every test/tool binary) to PE32+
+  # executables with MinGW-w64, and run the complete unit suite + the platformer under Wine.
+  windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW-w64 + Wine
+        run: sudo apt-get update && sudo apt-get install -y make python3 g++-mingw-w64-x86-64 wine64
+      - name: Cross-compile all binaries to Windows PE32+
+        run: make win
+      - name: Run the unit suite + the full game under Wine
+        run: |
+          wine build/win/phx_tests.exe
+          wine build/win/phx_platformer.exe
 
   # GBA: cross-compile the example platformer into a real .gba ROM and enforce the budget
   # (docs/09 MVP gate). The devkitARM image provides the cross toolchain + bin2s; we add the

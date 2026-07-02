@@ -67,8 +67,41 @@ void Renderer::unload_texture(TextureId id) {
     if (live_tex_) --live_tex_;
 }
 TilemapId Renderer::upload_tilemap(const TilemapDesc& d){ return be_->upload_map(d); }
-void      Renderer::set_tilemap_scroll(TilemapId id, vec2 px) { be_->set_scroll(id, px); }
-void      Renderer::draw_tilemap(TilemapId id, uint8_t layer) { be_->draw_tilemap(id, layer); }
+
+void Renderer::set_tilemap_scroll(TilemapId id, vec2 px) {
+    if (id < kMaxTilemaps) scroll_[id].base = px;   // remembered so parallax composes with it
+    be_->set_scroll(id, px);
+}
+
+void Renderer::set_tilemap_parallax(TilemapId id, uint8_t layer, scalar fx, scalar fy) {
+    if (id >= kMaxTilemaps || layer >= kParallaxLayers) return;
+    scroll_[id].fx_q16[layer] = s_to_q16(fx);
+    scroll_[id].fy_q16[layer] = s_to_q16(fy);
+}
+
+void Renderer::draw_tilemap(TilemapId id, uint8_t layer) {
+    // Parallax: a layer with factor f draws as if scrolled by base + (f−1)·camera, so the
+    // backend's usual (tile − scroll − cam) lands on (tile − base − f·cam). f==1 restores
+    // the plain base scroll (the backend's per-map scroll is re-sent before each layer draw,
+    // so differently-factored layers of one map compose correctly). Q16 integer math
+    // end-to-end: both scalar tiers compute the identical whole-pixel offset, and the
+    // camera here is the post-shake one, so backgrounds shake at their own depth too.
+    if (id < kMaxTilemaps) {
+        const MapScroll& m = scroll_[id];
+        const uint8_t   l = layer < kParallaxLayers ? layer : uint8_t(kParallaxLayers - 1);
+        const int32_t  fx = layer < kParallaxLayers ? m.fx_q16[l] : kQ16One;
+        const int32_t  fy = layer < kParallaxLayers ? m.fy_q16[l] : kQ16One;
+        if (fx != kQ16One || fy != kQ16One) {
+            const int64_t cx = s_to_q16(cam_.pos.x), cy = s_to_q16(cam_.pos.y);
+            const int32_t px = int32_t((s_to_q16(m.base.x) + (fx - kQ16One) * cx / kQ16One) >> 16);
+            const int32_t py = int32_t((s_to_q16(m.base.y) + (fy - kQ16One) * cy / kQ16One) >> 16);
+            be_->set_scroll(id, vec2{ s_from_int(px), s_from_int(py) });
+        } else {
+            be_->set_scroll(id, m.base);   // restore: an earlier parallax layer may have shifted it
+        }
+    }
+    be_->draw_tilemap(id, layer);
+}
 
 void Renderer::draw_sprite(const DrawSprite& s) {
     if (count_ >= cap_) { ++stats_.sprites_dropped; return; }   // honest ceiling, graceful

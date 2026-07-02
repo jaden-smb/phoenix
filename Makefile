@@ -27,14 +27,26 @@ INCLUDES := -Iengine/core/include \
             -Iengine/ui/include \
             -Iengine/runtime/include \
             -Itools/phxpack \
+            -Itools/phxtmap \
+            -Itools/common \
             -Iexamples/platformer/src \
             -Itests
 
+TIER ?= pc
 ifeq ($(TIER),gba_sim)
   CXXFLAGS += -DPHX_TARGET_GBA=1
 endif
+CXXFLAGS += $(EXTRA_CXXFLAGS)   # hook for wrapper targets (e.g. `sanitize` adds -fsanitize=…)
 
 BUILD  := build
+
+# Host objects are compiled into a per-tier directory so the float (pc) and fixed-point
+# (gba_sim) tiers can never contaminate each other: without this, `make test TIER=gba_sim`
+# followed by `make check` would link stale fixed16 objects into the float build (make
+# tracks timestamps, not flags). Binaries keep their documented build/ paths; the tier
+# stamp below relinks them exactly when the tier changes.
+HOSTOBJ   := $(BUILD)/obj-$(TIER)
+TIERSTAMP := $(BUILD)/.tier-$(TIER)
 BIN    := $(BUILD)/phx_tests
 SMOKE  := $(BUILD)/phx_smoke
 RENDER := $(BUILD)/phx_render
@@ -71,7 +83,7 @@ UNIT_ENGINE := engine/core/src/assert.cpp \
                engine/audio/src/mixer.cpp \
                engine/audio/src/stream.cpp
 
-UNIT_OBJ  := $(patsubst %.cpp,$(BUILD)/%.o,$(UNIT_ENGINE) $(TEST_SRC))
+UNIT_OBJ  := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(UNIT_ENGINE) $(TEST_SRC))
 
 # The App now owns a World + Renderer, so anything linking the loop links those too.
 APP_SRC := engine/core/src/assert.cpp \
@@ -90,31 +102,31 @@ APP_SRC := engine/core/src/assert.cpp \
 
 # The smoke binary: the loop + its own main.
 SMOKE_SRC := $(APP_SRC) tests/smoke_app.cpp
-SMOKE_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(SMOKE_SRC))
+SMOKE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(SMOKE_SRC))
 
 # The playable binary: full stack (memory+ecs+input+render+loop) driven by scripted input.
 PLAYABLE_SRC := $(APP_SRC) tests/playable_test.cpp
-PLAYABLE_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(PLAYABLE_SRC))
+PLAYABLE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PLAYABLE_SRC))
 PLAYABLE     := $(BUILD)/phx_playable
 
 # The physics binary: full stack with PhysicsWorld driving a falling body onto a tile floor.
 PHYSICS_SRC := $(APP_SRC) tests/physics_test.cpp
-PHYSICS_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(PHYSICS_SRC))
+PHYSICS_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PHYSICS_SRC))
 PHYSICS     := $(BUILD)/phx_physics
 
 # The anim binary: full stack with AnimationSystem driving a sprite-sheet frame on screen.
 ANIM_SRC := $(APP_SRC) tests/anim_test.cpp
-ANIM_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(ANIM_SRC))
+ANIM_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(ANIM_SRC))
 ANIM     := $(BUILD)/phx_anim
 
 # The scene binary: full stack with a SceneStack driving a gameplay scene + menu overlay.
 SCENE_SRC := $(APP_SRC) tests/scene_test.cpp
-SCENE_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(SCENE_SRC))
+SCENE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(SCENE_SRC))
 SCENE     := $(BUILD)/phx_scene
 
 # The ui binary: full stack with the immediate-mode UI drawing text/bar/menu + focus nav.
 UI_SRC := $(APP_SRC) tests/ui_test.cpp
-UI_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(UI_SRC))
+UI_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(UI_SRC))
 UI     := $(BUILD)/phx_ui
 
 # The platformer binary (M1 capstone): the full example game + every engine system, driven
@@ -125,7 +137,7 @@ PLATFORMER_SRC := $(APP_SRC) \
                   engine/audio/src/mixer.cpp \
                   examples/platformer/src/systems.cpp \
                   tests/platformer_test.cpp
-PLATFORMER_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(PLATFORMER_SRC))
+PLATFORMER_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PLATFORMER_SRC))
 PLATFORMER     := $(BUILD)/phx_platformer
 
 # The production example binary (real main; runs until quit). Built to prove the shipping
@@ -135,7 +147,7 @@ PLATAPP_SRC := $(APP_SRC) \
                engine/audio/src/mixer.cpp \
                examples/platformer/src/systems.cpp \
                examples/platformer/src/main.cpp
-PLATAPP_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(PLATAPP_SRC))
+PLATAPP_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PLATAPP_SRC))
 PLATAPP     := $(BUILD)/platformer
 
 # The SDL build of the example: a REAL WINDOW you can play. Swaps the null backend for the
@@ -164,7 +176,7 @@ RESOURCE_SRC := engine/core/src/assert.cpp \
                 engine/render/src/soft/soft_renderer.cpp \
                 engine/resource/src/cache.cpp \
                 tests/resource_test.cpp
-RESOURCE_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(RESOURCE_SRC))
+RESOURCE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(RESOURCE_SRC))
 RESOURCE     := $(BUILD)/phx_resource
 
 # The texcache binary: drive a real Renderer through the budget-bounded LRU TextureCache.
@@ -177,7 +189,7 @@ TEXCACHE_SRC := engine/core/src/assert.cpp \
                 engine/render/src/soft/soft_renderer.cpp \
                 engine/render/src/texture_cache.cpp \
                 tests/texcache_test.cpp
-TEXCACHE_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(TEXCACHE_SRC))
+TEXCACHE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(TEXCACHE_SRC))
 TEXCACHE     := $(BUILD)/phx_texcache
 
 # The png binary: decode a real PNG (pipeline decoder) -> bake -> mount -> render from it.
@@ -190,7 +202,7 @@ PNG_SRC := engine/core/src/assert.cpp \
            engine/render/src/soft/soft_renderer.cpp \
            engine/resource/src/cache.cpp \
            tests/png_test.cpp
-PNG_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(PNG_SRC))
+PNG_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PNG_SRC))
 PNG     := $(BUILD)/phx_png
 
 # The sprite binary: decode a sheet PNG -> bake Texture+Sprite -> mount -> build Animator -> render.
@@ -205,7 +217,7 @@ SPRITE_SRC := engine/core/src/assert.cpp \
               engine/render/src/soft/soft_renderer.cpp \
               engine/resource/src/cache.cpp \
               tests/sprite_test.cpp
-SPRITE_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(SPRITE_SRC))
+SPRITE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(SPRITE_SRC))
 SPRITE     := $(BUILD)/phx_sprite
 
 # The tiled binary: parse a Tiled .tmj -> bake Tilemap+Spawns -> mount -> render + resolve spawns.
@@ -218,7 +230,7 @@ TILED_SRC := engine/core/src/assert.cpp \
              engine/render/src/soft/soft_renderer.cpp \
              engine/resource/src/cache.cpp \
              tests/tiled_test.cpp
-TILED_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(TILED_SRC))
+TILED_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(TILED_SRC))
 TILED     := $(BUILD)/phx_tiled
 
 # The audio binary: bake a PCM blob -> mount through the seam -> mix it.
@@ -231,7 +243,7 @@ AUDIO_SRC := engine/core/src/assert.cpp \
              engine/audio/src/mixer.cpp \
              engine/audio/src/stream.cpp \
              tests/audio_test.cpp
-AUDIO_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(AUDIO_SRC))
+AUDIO_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(AUDIO_SRC))
 AUDIO     := $(BUILD)/phx_audio
 
 # The phxpack CLI (host tool): inputs -> .phxp bundle.
@@ -251,7 +263,7 @@ PIPELINE_SRC := engine/core/src/assert.cpp \
                 engine/platform/src/null/null_platform.cpp \
                 engine/resource/src/cache.cpp \
                 tests/pipeline_test.cpp
-PIPELINE_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(PIPELINE_SRC))
+PIPELINE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PIPELINE_SRC))
 PIPELINE     := $(BUILD)/phx_pipeline
 
 # The render smoke links the front end + software backend + null platform framebuffer.
@@ -263,26 +275,51 @@ RENDER_SRC := engine/core/src/assert.cpp \
               engine/render/src/renderer.cpp \
               engine/render/src/soft/soft_renderer.cpp \
               tests/render_test.cpp
-RENDER_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(RENDER_SRC))
+RENDER_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(RENDER_SRC))
 
 # The PPU smoke links the SAME front end + null platform, but swaps the software backend
 # for the GBA-native PPU backend (quantize -> 4bpp tiles + OAM -> ppu_compose). It proves
 # the GBA hardware render model headlessly (palette/alignment/sprite-ceiling limits + all).
 PPU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/gba/gba_ppu.cpp,\
              $(patsubst tests/render_test.cpp,tests/ppu_test.cpp,$(RENDER_SRC)))
-PPU_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(PPU_SRC))
+PPU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PPU_SRC))
 
 # The GU smoke: the SAME front end + null platform, swapping in the PSP-native GU backend
 # (record GU sprite quads -> gu_compose). The GU is full-colour, so its output is bit-
 # identical to the software reference — this renders the render_test scene and matches it.
 GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/gu/gu_backend.cpp,\
             $(patsubst tests/render_test.cpp,tests/gu_test.cpp,$(RENDER_SRC)))
-GU_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(GU_SRC))
+GU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(GU_SRC))
 
 .PHONY: test smoke render ppu gu playable physics anim scene ui platformer sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu psp psp-platformer psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck
 
 # Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstone + audio + resource + dep gate.
 check: test smoke render ppu gu playable physics anim scene ui platformer audio texcache png sprite tiled resource phxpack pipeline tools depcheck
+
+# --- M7 release gates --------------------------------------------------------------------------
+# Determinism gate: the SAME suites under scalar=float (pc) and scalar=fixed16 (gba_sim) must
+# print identical outcomes AND render the byte-identical frame. Cheap to run: the per-tier
+# object dirs mean the second tier is mostly relinks. This is a named release gate (docs/09 §5).
+DET_SUITES := test render ppu gu physics anim scene ui platformer
+determinism:
+	@echo "determinism gate: pc (scalar=float) vs gba_sim (scalar=fixed16)"
+	@$(MAKE) -s $(DET_SUITES) TIER=pc      | grep -aE "PASS|FAIL" > $(BUILD)/det-pc.log
+	@cp $(BUILD)/render_out.ppm $(BUILD)/det-pc.ppm
+	@$(MAKE) -s $(DET_SUITES) TIER=gba_sim | grep -aE "PASS|FAIL" > $(BUILD)/det-gba.log
+	@cp $(BUILD)/render_out.ppm $(BUILD)/det-gba.ppm
+	@diff $(BUILD)/det-pc.log $(BUILD)/det-gba.log >/dev/null \
+	  && cmp -s $(BUILD)/det-pc.ppm $(BUILD)/det-gba.ppm \
+	  && echo "DETERMINISM PASS ($$(grep -c . $(BUILD)/det-pc.log) suite outcomes + the rendered frame identical across tiers)" \
+	  || { echo "DETERMINISM FAIL — tier outcomes diverge:"; diff $(BUILD)/det-pc.log $(BUILD)/det-gba.log; exit 1; }
+
+# Sanitizer gate: the full check suite under ASan + UBSan (no recover: any UB/heap error fails).
+# Its own build root so instrumented objects never mix with the normal ones.
+# detect_leaks=0: the engine allocates from arenas only (zero hot-path heap), so heap leaks can
+# only come from test fixtures — which intentionally leak ("test lifetime") — and one-shot CLIs.
+sanitize:
+	@ASAN_OPTIONS=detect_leaks=0 $(MAKE) check BUILD=$(BUILD)/asan \
+	  EXTRA_CXXFLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -O1"
+	@echo "SANITIZE PASS (full check suite clean under ASan+UBSan)"
 
 test: $(BIN)
 	@./$(BIN)
@@ -370,6 +407,55 @@ audio-verify:
 	  $(AUDIOVER_SRC) `sdl2-config --libs` -o $(BUILD)/audio_device_verify
 	@./$(BUILD)/audio_device_verify
 
+# --- GUI editors (SDL) ----------------------------------------------------------------------
+# phxtmap: the mouse-driven tilemap editor over the ENGINE's own window/renderer/UI (docs/08).
+# Its document model (tools/phxtmap/editor.h) is unit-tested in the pipeline suite; this builds
+# the interactive shell. Needs SDL2 + a display; deliberately not part of `check`.
+TMAP_SRC := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) \
+            engine/platform/src/sdl/sdl_platform.cpp tools/phxtmap/main.cpp
+
+tmap:
+	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found)."; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
+	  $(TMAP_SRC) `sdl2-config --libs` -o $(BUILD)/phxtmap
+	@echo "built $(BUILD)/phxtmap  —  GUI tilemap editor: ./$(BUILD)/phxtmap [--out f.tmj] [f.tmj]"
+
+# phxentity: the keyboard-driven entity/prefab TABLE editor over the same engine shell
+# (edits the phxbin author JSON; docs/08). Needs SDL2 + a display.
+ENTITY_SRC := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) \
+              engine/platform/src/sdl/sdl_platform.cpp tools/phxentity/main.cpp
+
+entity:
+	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found)."; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
+	  $(ENTITY_SRC) `sdl2-config --libs` -o $(BUILD)/phxentity
+	@echo "built $(BUILD)/phxentity  —  GUI prefab-table editor: ./$(BUILD)/phxentity file.json"
+
+# --- Windows cross build (MinGW-w64) --------------------------------------------------------
+# Cross-compiles the FULL host build — engine + every test/tool binary — into Windows PE32+
+# executables (the null platform backend is pure C++/stdio, so the whole suite is Windows-clean
+# with no OS-specific code). Reuses the host rules recursively with the MinGW compiler and its
+# own build root, so it can never mix objects with the native build. Works with GCC MinGW
+# (apt install g++-mingw-w64-x86-64) or llvm-mingw; override WIN_CXX to point at either.
+WIN_CXX ?= x86_64-w64-mingw32-g++
+
+win:
+	@command -v $(WIN_CXX) >/dev/null 2>&1 || { echo "needs a MinGW-w64 toolchain ($(WIN_CXX) not found); e.g. 'apt install g++-mingw-w64-x86-64' or llvm-mingw, or set WIN_CXX="; exit 1; }
+	@$(MAKE) build BUILD=$(BUILD)/win CXX="$(WIN_CXX) -static"
+	@echo "built $(BUILD)/win/*.exe (PE32+ Windows binaries, statically linked — no runtime DLLs)"
+
+# Runs the Windows unit-test exe under Wine (native wine or the org.winehq.Wine flatpak).
+win-verify: win
+	@if command -v wine >/dev/null 2>&1; then \
+	  wine $(BUILD)/win/phx_tests.exe; \
+	elif command -v flatpak >/dev/null 2>&1 && flatpak info org.winehq.Wine >/dev/null 2>&1; then \
+	  flatpak run --filesystem=host org.winehq.Wine $(CURDIR)/$(BUILD)/win/phx_tests.exe; \
+	else \
+	  echo "needs wine (or the org.winehq.Wine flatpak) to run the .exe suite"; exit 1; \
+	fi
+
 # --- GBA cross build (devkitARM) ------------------------------------------------------------
 # Cross-compiles the portable engine + the GBA platform backend into a real .gba ROM. Needs
 # devkitPro/devkitARM. Not part of `check` (it targets ARM7TDMI). Proves the portability thesis
@@ -384,7 +470,9 @@ GBA_ARCH   := -mthumb -mthumb-interwork -mcpu=arm7tdmi
 # that GCC's __cxa_guard_acquire calls for a function-local `static` with a runtime initializer
 # (e.g. phx::type_id<T>()'s id) DEADLOCK on bare metal. Dropping the guard is correct here and
 # fixes a hard hang on the first World::add<>() (it spun forever before any LevelScene render).
-GBA_FLAGS  := -std=c++17 -O2 -fno-rtti -fno-exceptions -fno-threadsafe-statics -Wall -Wextra $(GBA_ARCH) -DPHX_TARGET_GBA=1
+# PHX_TARGET_GBA selects the fixed-point tier (also set by the host TIER=gba_sim build);
+# PHX_GBA_HW additionally marks REAL hardware (MMIO/VRAM/OAM paths) — only the cross build sets it.
+GBA_FLAGS  := -std=c++17 -O2 -fno-rtti -fno-exceptions -fno-threadsafe-statics -Wall -Wextra $(GBA_ARCH) -DPHX_TARGET_GBA=1 -DPHX_GBA_HW=1
 GBA_INC    := -Iengine/core/include -Iengine/memory/include -Iengine/ecs/include \
               -Iengine/input/include -Iengine/audio/include -Iengine/platform/include \
               -Iengine/render/include -Iengine/render/src -Iengine/resource/include \
@@ -409,6 +497,13 @@ GBA_AUDIO_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/cor
                  engine/audio/src/mixer.cpp engine/platform/src/gba/gba_platform.cpp \
                  examples/gba_audio/main.cpp
 GBA_AUDIO_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GBA_AUDIO_SRC))
+
+# The GBA battery-SRAM save smoke: round-trips a magic-tagged blob through the seam's real
+# 0x0E000000 byte-wise SRAM path. Verdict in GDB-readable globals; mGBA also persists the SRAM
+# to a .sav whose "PHXS" magic can be checked host-side (run twice for the persistence proof).
+GBA_SAVE_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
+                engine/platform/src/gba/gba_platform.cpp examples/gba_save/main.cpp
+GBA_SAVE_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GBA_SAVE_SRC))
 
 # The full example platformer as a GBA ROM: the portable engine + gameplay systems + the GBA
 # platform backend, with the .phxp bundle baked offline (host) and linked into ROM via bin2s.
@@ -459,13 +554,13 @@ size-gate: $(BUILD)/gba/phx-platformer-ppu.gba
 	  --size-tool $(DEVKITARM)/bin/arm-none-eabi-size
 
 # host tool that bakes the .phxp the ROM embeds (same importers as the host game)
-$(PLATBAKE): $(BUILD)/examples/platformer/src/bake_main.o
+$(PLATBAKE): $(HOSTOBJ)/examples/platformer/src/bake_main.o
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+	$(CXX) $(CXXFLAGS) $< -o $@
 
 $(BUILD)/gba/platformer.phxp: $(PLATBAKE)
 	@mkdir -p $(dir $@)
-	./$(PLATBAKE) $@
+	./$(PLATBAKE) $@ 0    # tier 0: per-target encode (sounds resampled to the GBA device rate)
 
 # bin2s: bundle bytes -> a .rodata assembly object (lives in cartridge ROM, not EWRAM)
 $(BUILD)/gba/bundle.o: $(BUILD)/gba/platformer.phxp
@@ -504,6 +599,15 @@ $(BUILD)/gba/phx-ppu.gba: $(GBA_PPU_OBJ)
 $(BUILD)/gba/phx-audio.gba: $(GBA_AUDIO_OBJ)
 	$(GBA_CXX) $(GBA_FLAGS) -specs=gba.specs $(GBA_AUDIO_OBJ) -o $(BUILD)/gba/audio.elf
 	$(GBA_OBJCOPY) -O binary $(BUILD)/gba/audio.elf $@
+	$(GBA_FIX) $@ >/dev/null
+	@echo "ROM: $@ ($$(stat -c%s $@) bytes, header fixed)"
+
+gba-save: $(BUILD)/gba/phx-save.gba
+	@echo "built $<  —  battery-SRAM save smoke; verify via the mGBA GDB stub (phx_gba_save_verdict) or the .sav magic"
+
+$(BUILD)/gba/phx-save.gba: $(GBA_SAVE_OBJ)
+	$(GBA_CXX) $(GBA_FLAGS) -specs=gba.specs $(GBA_SAVE_OBJ) -o $(BUILD)/gba/save.elf
+	$(GBA_OBJCOPY) -O binary $(BUILD)/gba/save.elf $@
 	$(GBA_FIX) $@ >/dev/null
 	@echo "ROM: $@ ($$(stat -c%s $@) bytes, header fixed)"
 
@@ -547,6 +651,12 @@ PSP_AUDIO_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/cor
                  engine/audio/src/mixer.cpp engine/platform/src/psp/psp_platform.cpp \
                  examples/psp_audio/main.cpp
 PSP_AUDIO_OBJ := $(patsubst %.cpp,$(BUILD)/psp/%.o,$(PSP_AUDIO_SRC))
+
+# The PSP save smoke: round-trips a magic-tagged blob through the seam's real sceIo path
+# (memory-stick file). Verdict via thread names in PPSSPP's log; run twice for persistence.
+PSP_SAVE_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
+                engine/platform/src/psp/psp_platform.cpp examples/psp_save/main.cpp
+PSP_SAVE_OBJ := $(patsubst %.cpp,$(BUILD)/psp/%.o,$(PSP_SAVE_SRC))
 
 # The full example platformer as a PSP EBOOT: the portable engine + gameplay systems + the PSP
 # platform backend (software renderer), with the .phxp bundle baked offline (host) and linked
@@ -592,7 +702,7 @@ $(BUILD)/psp/EBOOT.PBP: $(PSP_OBJ)
 # ROM: `platformer_phxp` + `platformer_phxp_size`), link the game, then PRX -> pack into EBOOT.PBP.
 $(BUILD)/psp/platformer.phxp: $(PLATBAKE)
 	@mkdir -p $(dir $@)
-	./$(PLATBAKE) $@
+	./$(PLATBAKE) $@ 1    # tier 1 (PSP)
 
 # Uses the portable bin2s (tools/common/bin2s.py) instead of devkitPro's, so the PSP EBOOT build
 # depends only on pspsdk + a host python3 (no second SDK) — important for CI.
@@ -628,6 +738,18 @@ $(BUILD)/psp/audio/EBOOT.PBP: $(PSP_AUDIO_OBJ)
 	$(PSP_PACK) $@ $(BUILD)/psp/audio/PARAM.SFO NULL NULL NULL NULL NULL $(BUILD)/psp/audio/audio.prx NULL
 	@echo "EBOOT: $@ ($$(stat -c%s $@) bytes)"
 
+psp-save: $(BUILD)/psp/save/EBOOT.PBP
+	@echo "built $<  —  sceIo save smoke; run in PPSSPP twice, grep log for SAVE_DEVICE_PASS / SAVE_PERSIST_PASS"
+
+$(BUILD)/psp/save/EBOOT.PBP: $(PSP_SAVE_OBJ)
+	@mkdir -p $(BUILD)/psp/save
+	$(PSP_CXX) $(PSP_FLAGS) $(PSP_SAVE_OBJ) $(PSP_LDFLAGS) $(PSP_LIBS) -o $(BUILD)/psp/save/save.elf
+	$(PSP_FIXUP) $(BUILD)/psp/save/save.elf
+	$(PSP_PRXGEN) $(BUILD)/psp/save/save.elf $(BUILD)/psp/save/save.prx
+	$(PSP_MKSFO) "Phoenix PSP Save" $(BUILD)/psp/save/PARAM.SFO
+	$(PSP_PACK) $@ $(BUILD)/psp/save/PARAM.SFO NULL NULL NULL NULL NULL $(BUILD)/psp/save/save.prx NULL
+	@echo "EBOOT: $@ ($$(stat -c%s $@) bytes)"
+
 resource: $(RESOURCE)
 	@./$(RESOURCE)
 
@@ -655,13 +777,15 @@ phxpack: $(PHXPACK)
 	@head -c4 $(BUILD)/cli.phxp | grep -q PHXP && echo "PHXPACK PASS (valid PHXP bundle)" || (echo "PHXPACK FAIL"; exit 1)
 	@./$(PHXPACK) --out $(BUILD)/cli_z.phxp --target 2 --compress $(BUILD)/t.ppm $(BUILD)/m.tmcsv
 	@head -c4 $(BUILD)/cli_z.phxp | grep -q PHXP && echo "PHXPACK PASS (valid compressed bundle)" || (echo "PHXPACK FAIL"; exit 1)
-	@test -f $(BUILD)/png_in.png && ./$(PHXPACK) --out $(BUILD)/cli_png.phxp --target 2 $(BUILD)/png_in.png \
+	@# fixture INPUTS live at literal build/ — the suite binaries that drop them (png/sprite/
+	@# tiled/audio) hardcode that path, so it holds even when a wrapper overrides $(BUILD)
+	@test -f build/png_in.png && ./$(PHXPACK) --out $(BUILD)/cli_png.phxp --target 2 build/png_in.png \
 	  && head -c4 $(BUILD)/cli_png.phxp | grep -q PHXP && echo "PHXPACK PASS (baked a real PNG)" || (echo "PHXPACK FAIL (png)"; exit 1)
-	@test -f $(BUILD)/hero.sprdef && ./$(PHXPACK) --out $(BUILD)/cli_spr.phxp --target 2 $(BUILD)/hero.sprdef \
+	@test -f build/hero.sprdef && ./$(PHXPACK) --out $(BUILD)/cli_spr.phxp --target 2 build/hero.sprdef \
 	  && head -c4 $(BUILD)/cli_spr.phxp | grep -q PHXP && echo "PHXPACK PASS (baked a sprite sheet + clips)" || (echo "PHXPACK FAIL (sprdef)"; exit 1)
-	@test -f $(BUILD)/level.tmj && ./$(PHXPACK) --out $(BUILD)/cli_tmj.phxp --target 2 $(BUILD)/level.tmj \
+	@test -f build/level.tmj && ./$(PHXPACK) --out $(BUILD)/cli_tmj.phxp --target 2 build/level.tmj \
 	  && head -c4 $(BUILD)/cli_tmj.phxp | grep -q PHXP && echo "PHXPACK PASS (baked a Tiled map + spawns)" || (echo "PHXPACK FAIL (tmj)"; exit 1)
-	@test -f $(BUILD)/tone.wav && ./$(PHXPACK) --out $(BUILD)/cli_wav.phxp --target 2 $(BUILD)/tone.wav \
+	@test -f build/tone.wav && ./$(PHXPACK) --out $(BUILD)/cli_wav.phxp --target 2 build/tone.wav \
 	  && head -c4 $(BUILD)/cli_wav.phxp | grep -q PHXP && echo "PHXPACK PASS (baked a WAV sound)" || (echo "PHXPACK FAIL (wav)"; exit 1)
 
 # The two-stage pipeline in-process: converters bake intermediates, phxpack merges, the cache
@@ -672,11 +796,13 @@ pipeline: $(PIPELINE)
 
 # CLI smoke: run the REAL converter + assembler binaries over the fixtures `pipeline` dropped,
 # proving the executables parse args, link, and produce a valid merged bundle.
+# fixture INPUTS (build/p_*) live at literal build/ — pipeline_test hardcodes that path,
+# so it holds even when a wrapper target overrides $(BUILD) (e.g. `sanitize`).
 tools: pipeline $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXPACK)
-	@./$(PHXSPRITE) --out $(BUILD)/c_hero.phxspr  --name hero  $(BUILD)/p_hero.sprdef
-	@./$(PHXTILE)   --out $(BUILD)/c_level.phxtmap --name level $(BUILD)/p_level.tmj
-	@./$(PHXSND)    --out $(BUILD)/c_tone.phxsnd   --name tone  $(BUILD)/p_tone.wav
-	@./$(PHXBIN)    --out $(BUILD)/c_items.phxbin  --name items --header $(BUILD)/c_items.gen.h $(BUILD)/p_items.json
+	@./$(PHXSPRITE) --out $(BUILD)/c_hero.phxspr  --name hero  build/p_hero.sprdef
+	@./$(PHXTILE)   --out $(BUILD)/c_level.phxtmap --name level build/p_level.tmj
+	@./$(PHXSND)    --out $(BUILD)/c_tone.phxsnd   --name tone  build/p_tone.wav
+	@./$(PHXBIN)    --out $(BUILD)/c_items.phxbin  --name items --header $(BUILD)/c_items.gen.h build/p_items.json
 	@./$(PHXPACK)   --out $(BUILD)/c_assets.phxp $(BUILD)/c_hero.phxspr $(BUILD)/c_level.phxtmap $(BUILD)/c_tone.phxsnd $(BUILD)/c_items.phxbin
 	@head -c4 $(BUILD)/c_assets.phxp | grep -q PHXP && echo "TOOLS PASS (4 converters -> merged bundle)" || (echo "TOOLS FAIL"; exit 1)
 
@@ -781,9 +907,23 @@ $(PIPELINE): $(PIPELINE_OBJ)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(PIPELINE_OBJ) -o $@
 
-$(BUILD)/%.o: %.cpp
+$(HOSTOBJ)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
+
+# Tier stamp: exactly one .tier-* exists at a time. Host binaries depend on it, so switching
+# TIER forces a relink (their objects already live in per-tier dirs — no recompile needed),
+# and a binary linked under one tier can never be mistaken for up-to-date under the other.
+$(TIERSTAMP):
+	@mkdir -p $(BUILD)
+	@rm -f $(BUILD)/.tier-*
+	@touch $@
+
+HOST_BINS := $(BIN) $(SMOKE) $(RENDER) $(PPU) $(GU) $(PLAYABLE) $(PHYSICS) $(ANIM) $(SCENE) \
+             $(UI) $(PLATFORMER) $(PLATAPP) $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) \
+             $(RESOURCE) $(PIPELINE) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) \
+             $(PLATBAKE)
+$(HOST_BINS): $(TIERSTAMP)
 
 # Header-dependency tracking: each compile emits a .d listing the headers it included, so a
 # changed header rebuilds exactly the objects that use it (this is what kept a `bake.h` edit

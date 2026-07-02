@@ -5,12 +5,16 @@
 #include "phx/audio/mixer.h"
 #include "phx/memory/allocators.h"
 
+#include <cstdlib>
+
 using namespace phx;
 
 namespace {
 ArenaAllocator* fresh_arena() {
-    static uint8_t* pool = new uint8_t[8 << 20];
-    static size_t   off  = 0;
+    static const size_t kPool = 32 << 20;        // bound-checked: outgrowing the pool must
+    static uint8_t* pool = new uint8_t[kPool];   // fail loudly, not hand out memory past it
+    static size_t   off  = 0;                    // (ASan caught exactly that at 8 MB)
+    if (off + (1 << 20) > kPool) { std::abort(); }
     ArenaAllocator* a = new ArenaAllocator();
     a->init(pool + off, 1 << 20);
     off += (1 << 20);

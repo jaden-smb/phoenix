@@ -18,7 +18,7 @@ extern "C" void phx_null_set_button_script(const uint32_t*, uint32_t);
 using namespace phx;
 
 namespace {
-constexpr int FBW = 64, FBH = 48, FRAMES = 5;
+constexpr int FBW = 160, FBH = 80, FRAMES = 5;   // wide enough for the profiler overlay too
 const Rgba kRed   = rgba(220, 40, 40);
 const Rgba kGreen = rgba(40, 200, 40);
 const Rgba kGray  = rgba(70, 70, 90);
@@ -61,6 +61,27 @@ struct UIGame final : Game {
         if (ui.button(UIRect{ vec2{ s_from_int(4),  s_from_int(30) }, vec2{ s_from_int(40), s_from_int(8) } }, font, "ONE")) activated = 0;
         if (ui.button(UIRect{ vec2{ s_from_int(4),  s_from_int(40) }, vec2{ s_from_int(40), s_from_int(8) } }, font, "TWO")) activated = 1;
 
+        // Dialogue: box 1 reveals HALF of "HI LLAMA" (typewriter mid-line: H I . L drawn,
+        // L A M A not yet, no continue marker); box 2 fully reveals it in a NARROW box so
+        // "LLAMA" word-wraps to the second row, with the continue marker in the corner.
+        DialogueView dlg{};
+        dlg.lines = "HI LLAMA"; dlg.stride = 9; dlg.count = 1;
+        ui.dialogue(UIRect{ vec2{ s_from_int(64), s_from_int(22) }, vec2{ s_from_int(90), s_from_int(14) } },
+                    font, dlg, 0, s_half(s_from_int(1)));
+        ui.dialogue(UIRect{ vec2{ s_from_int(64), s_from_int(44) }, vec2{ s_from_int(60), s_from_int(26) } },
+                    font, dlg, 0, s_from_int(1));
+
+        // Profiler overlay with a SYNTHETIC profile so the bar pixels are deterministic:
+        // update = half the budget (30px), render = the full budget (60px, touching the
+        // tick), present = a quarter (15px). Bars-only (no font) — the GBA-safe mode.
+        FrameProfile prof{};
+        prof.budget_us = 16667;
+        prof.update_us = prof.budget_us / 2;
+        prof.render_us = prof.budget_us;
+        prof.present_us = prof.budget_us / 4;
+        prof.frame_us  = prof.update_us + prof.render_us + prof.present_us;
+        ui.profile_overlay(vec2{ s_from_int(64), s_from_int(4) }, prof, nullptr);
+
         ui.end();
         r.end_frame();
     }
@@ -76,6 +97,27 @@ struct UIGame final : Game {
         ++checks; if (px(40, 22) != kGray)  { ++fail; std::printf("    FAIL bar bg not gray (40,22)=%08X\n", px(40,22)); }
         ++checks; if (ui.focus() != 1)      { ++fail; std::printf("    FAIL focus=%d want 1\n", ui.focus()); }
         ++checks; if (activated != 1)       { ++fail; std::printf("    FAIL activated=%d want 1\n", activated); }
+
+        // Profiler overlay: phase bars + budget tick at the expected pixels (pos 64,4).
+        const Rgba kUpd = rgba(90, 200, 90), kRen = rgba(90, 140, 240), kPre = rgba(230, 160, 70);
+        ++checks; if (px(70, 7)   != kUpd)  { ++fail; std::printf("    FAIL update bar (70,7)=%08X\n", px(70,7)); }
+        ++checks; if (px(70, 11)  != kRen)  { ++fail; std::printf("    FAIL render bar (70,11)=%08X\n", px(70,11)); }
+        ++checks; if (px(125, 11) != kRen)  { ++fail; std::printf("    FAIL render bar reaches the budget (125,11)=%08X\n", px(125,11)); }
+        ++checks; if (px(70, 15)  != kPre)  { ++fail; std::printf("    FAIL present bar (70,15)=%08X\n", px(70,15)); }
+        ++checks; if (px(126, 7)  != rgba(255,255,255)) { ++fail; std::printf("    FAIL budget tick (126,7)=%08X\n", px(126,7)); }
+        // And the loop actually stamped the REAL profile (null clock steps deterministically).
+        ++checks; if (app.profile().frame_us == 0) { ++fail; std::printf("    FAIL app profile not stamped\n"); }
+
+        // Dialogue box 1 (half reveal): 'H' and 'L' drawn, 'M' not yet, no marker.
+        const Rgba kLabel = rgba(230, 230, 240), kPanel = rgba(50, 50, 70);
+        ++checks; if (px(68, 26)  != kLabel) { ++fail; std::printf("    FAIL dlg 'H' (68,26)=%08X\n", px(68,26)); }
+        ++checks; if (px(92, 26)  != kLabel) { ++fail; std::printf("    FAIL dlg 'L' revealed (92,26)=%08X\n", px(92,26)); }
+        ++checks; if (px(102, 26) != kPanel) { ++fail; std::printf("    FAIL dlg 'M' drawn too early (102,26)=%08X\n", px(102,26)); }
+        ++checks; if (px(150, 32) != kPanel) { ++fail; std::printf("    FAIL dlg marker before full reveal (150,32)=%08X\n", px(150,32)); }
+        // Dialogue box 2 (full reveal, narrow): "LLAMA" wrapped to row 2 + continue marker.
+        ++checks; if (px(68, 48)  != kLabel) { ++fail; std::printf("    FAIL dlg2 'H' (68,48)=%08X\n", px(68,48)); }
+        ++checks; if (px(68, 56)  != kLabel) { ++fail; std::printf("    FAIL dlg2 'L' not wrapped to row 2 (68,56)=%08X\n", px(68,56)); }
+        ++checks; if (px(120, 66) != kLabel) { ++fail; std::printf("    FAIL dlg2 continue marker (120,66)=%08X\n", px(120,66)); }
 
         ok = (fail == 0);
         std::printf("    text+bar drawn; focus moved to %d; activated button %d\n", ui.focus(), activated);

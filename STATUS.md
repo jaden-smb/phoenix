@@ -8,9 +8,132 @@ plus the immediate next steps. Updated as development proceeds (see the README's
 
 ---
 
-## Current milestone: **M5 — the MVP gate. The example platformer is now a real game (two enemy types, damage + i-frames + stomp, death/respawn, save/load) on all four targets, baked by the full two-stage asset pipeline, behind a green CI size gate, with the canonical CMake tree building every target.**
+## Current milestone: **M5 COMPLETE + M7 gates standing. Every MVP checklist item is now proven — including the Windows exe (built by both trees, full suite + game verified under Wine) and renderer parallax — and the M7 determinism + sanitizer gates run in CI (each caught real bugs on first run).**
 
-### Latest session (2026-06-23) — M3 tooling + M5 gameplay + CI size gate
+### Latest session (2026-07-01) — Windows proven · parallax · console saves verified · M7 gates
+
+- **Build-system bug: tier contamination (found via a false test failure).** `TIER=gba_sim` wrote
+  objects to the same `build/` paths as the float tier, so switching tiers linked stale mixed-tier
+  objects — a fixed16 `renderer.o` against a float `soft_renderer.o` made camera shake silently
+  vanish (`make check` failed on the shake pixel until `make clean`). Host objects now live in
+  per-tier dirs (`build/obj-pc`, `build/obj-gba_sim`) and a tier stamp relinks binaries exactly on
+  tier switch — both tiers coexist, no clean needed, binaries keep their documented paths. ✅
+- **Windows (the last MVP target) is proven.** New `make win` cross-compiles the FULL host build —
+  engine + all 19 test binaries + the 5 asset CLIs + the game — to statically-linked PE32+ exes
+  with any MinGW-w64 (`WIN_CXX` overridable; llvm-mingw and GCC both work), and the canonical CMake
+  tree gained `cmake/mingw.toolchain.cmake` (builds `platformer.exe` + all 13 engine libs with
+  `-DPHX_TARGET=windows`). **Verified running under Wine: the complete unit suite (120,336 checks
+  /101 cases), the render suite, and the whole platformer incl. its save→reload round trip all
+  PASS as Windows binaries** (`make win-verify`). A `windows` CI job (MinGW + Wine) keeps it true.
+  Fixed en route: `log.h` used GNU `##__VA_ARGS__` (clang -Wpedantic warns) → standard variadics. ✅
+- **Parallax — the last unimplemented MVP renderer feature.** `set_tilemap_parallax(id, fx, fy)`:
+  per-map camera factor (1 = world, ½ = half-speed background, 0 = screen-fixed sky), applied in
+  the FRONT END through the existing `set_scroll` seam — zero backend changes, so soft/GL/GU/PPU
+  all inherit it (on GBA it is exactly the free per-BG HOFS/VOFS trick of docs/03 §4). All-integer
+  Q16 math like zoom → identical pixels on both tiers; composes with base scroll and the shaken
+  camera. 6 new render_test checks (½-factor, factor-0, scroll composition), green on both tiers
+  and as a Windows exe under Wine. ✅
+- **Console save paths verified at runtime (the M5 leftover) — and a real PSP bug found.** New
+  `make psp-save` / `make gba-save` verify EBOOTs/ROMs (`examples/psp_save`, `examples/gba_save`).
+  On PPSSPP the sceIo path failed with `SCE_KERNEL_ERROR_NOCWD`: the seam passed bare relative
+  keys to `sceIoOpen`, which has no cwd when the EBOOT isn't launched from a directory context
+  (and a UMD game could never write next to itself). **Fix in the seam:** bare keys anchor at
+  `ms0:/PSP/SAVEDATA/PHX/<key>` (device-prefixed keys pass through). Now **SAVE_DEVICE_PASS**
+  (sceIo round trip) and **SAVE_PERSIST_PASS** (blob intact across two PPSSPP boots; `PHXS` v1
+  counter=2 confirmed in the memstick file) — the platformer's PSP save inherits the fix. On GBA,
+  the byte-wise 0x0E000000 SRAM round trip is **verified on emulated ARM7TDMI** via the mGBA GDB
+  stub (`phx_gba_save_verdict==1`); cross-boot persistence is NOT provable on this mGBA setup (it
+  never attaches the .sav to lazily-autodetected homebrew saves; no `monitor reset`; stub can't
+  read 0x0E region) → moved to the real-hardware checklist. ✅/🟡
+- **M7 gates are real now — and each caught bugs on its first run.** (a) **`make determinism`**:
+  9 suites + the rendered frame byte-compared across both tiers (cheap: per-tier obj dirs).
+  First run caught a genuine regression: `make ppu TIER=gba_sim` had not LINKED since #29 — the
+  PPU's hardware-submission path keys off `PHX_TARGET_GBA`, which gba_sim also defines, pulling
+  `phx_gba_set_direct` into a host link. Fix: new **`PHX_GBA_HW`** define (set only by the real
+  cross builds in the Makefile + `gba.toolchain.cmake`) now guards MMIO paths; PHX_TARGET_GBA
+  remains purely the scalar-tier switch. (b) **`make sanitize`**: the full check suite under
+  ASan+UBSan (`-fno-sanitize-recover`, own build root). First runs caught: **negative-left-shift
+  UB in `fixed16::from_int` and `operator/`** (now well-defined multiplies — the core GBA math
+  type!), the same UB in the WAV decoder's 8-bit path, and **heap overflows in four test
+  fixtures** (unbounded static pools; the scene/audio pools actually overflowed — silent heap
+  corruption in every previous run; all pools now bound-checked). Both gates are CI jobs. ✅
+- **Gate status after all fixes:** `make check` (25 PASS lines) · `make determinism` PASS ·
+  `make sanitize` PASS · `make size-gate` OK (ROM 116 KB, IWRAM 10.4/28 KB) · full unit suite +
+  platformer PASS under Wine · all GBA ROMs + PSP EBOOTs rebuild clean.
+
+**Still open:** **real-hardware testing** (GBA cart — incl. SRAM persistence across power
+cycles, which emulation can't prove here — and a physical PSP); a license decision (README says
+TBD); editor polish beyond the MVPs below (phxtmap rendering the real tileset PNG instead of
+procedural swatches; an automated pointer-driven GUI interaction test).
+
+### (Same session, part 3) — M6 editors: `phxtmap` + `phxentity` (the last M6 item)
+
+- **The GUI editors exist and run.** Both DOGFOOD the engine per the risk register: the same App
+  loop, SDL window, software renderer, and immediate-mode UI the games use — no bespoke UI stack.
+  Both split a headlessly unit-tested DOCUMENT model (`tools/<editor>/editor.h`) from a thin
+  interactive shell (`main.cpp`), and both emit **author formats the converters bake** (docs/08
+  §1) — never engine blobs.
+- **`phxtmap`** (`make tmap`): mouse-driven tilemap editor over the open Tiled `.tmj`. Paint/erase
+  tiles (drag paints), a clickable 16-swatch palette, layer cycling (incl. parallax layers — the
+  factors round-trip), an ENTITY mode placing/removing typed spawn objects, camera scroll, save
+  on Enter with a dirty flag. Loads any `.tmj` the importer accepts or starts blank (`--size`).
+  Tiles render as procedural swatches (layout editing needs positions, not art). En route the
+  **SDL backend's pointer was fixed to report framebuffer coordinates** (it reported window
+  pixels — 3× off; the seam and `InputState.pointer` already carried pointer state end to end).
+- **`phxentity`** (`make entity`): keyboard-driven editor for the phxbin author JSON (typed
+  record tables): cell cursor, ±1/±10 stepping **clamped to the field's declared type range**
+  (u8…i32), record clone/delete, scrolling grid, save-in-place.
+- **Verified:** doc models in the pipeline suite — `.tmj` blank→paint→spawn→parallax→save→
+  re-import round-trip, erase round-trip; phxbin JSON load→step/clamp→clone/delete→save→
+  re-load, and the saved table **still bakes through the real `build_bin`** (67 pipeline checks
+  total). Both GUIs boot + run bounded on the real display (`PHX_MAX_FRAMES` smoke). The shared
+  5×7 debug font was extracted to `tools/common/debug_font.h` (the example's bake now uses it
+  too). Full gates after everything: `check` ✅ `determinism` ✅ `sanitize` ✅ `depcheck` ✅.
+
+**With this, every item on the M0–M7 roadmap that can be built and verified on this machine is
+done: all four targets proven at runtime (incl. Windows under Wine), the full renderer API, all
+gameplay systems, the two-stage asset pipeline with per-target encode, both GUI editors, and the
+M7 determinism/sanitizer release gates in CI. What remains is physical-hardware validation, the
+license, and post-1.0 roadmap scope (docs/09 §3).**
+
+### (Same session, part 2) — M6: parallax through the pipeline · profiler overlay · dialogue · per-target audio encode
+
+- **Parallax is now data-driven end to end.** The Tiled importer reads the native per-layer
+  `parallaxx`/`parallaxy` properties; `BundleWriter::add_tilemap` appends a per-layer Q16 factor
+  table to the Tilemap blob (flag bit in the old pad byte, 4-aligned for ARM — bundles without
+  factors stay byte-identical to the old format); `TilemapView` exposes it (`parallax_q16`); and
+  the render front end went per-layer: `set_tilemap_parallax(map, layer, fx, fy)` (4 slots — the
+  GBA BG ceiling) re-sends the effective scroll before each layer draw, so differently-factored
+  layers of ONE map compose. **The platformer now has a half-speed cloud backdrop layer authored
+  in its .tmj** (new convention: the LAST tile layer is the gameplay/solid one — physics reads it,
+  render draws all layers in order). Verified: tiled suite round-trips the factors past the
+  alignment pad (31 checks), render suite, the full game on both tiers + a real-window boot.
+- **Profiler overlay (M6).** `core/profile.h` (`FrameProfile` — pure-int POD, keeps core closed);
+  the App loop stamps update/render/present/frame µs from the platform clock every frame
+  (`App::profile()`); `UI::profile_overlay` draws three phase bars against the frame budget +
+  a budget tick + an optional ms readout when a font is supplied (bars-only mode needs no font
+  asset — GBA-safe). Select toggles it in the platformer. Fixing the fallout taught the null
+  platform a better clock: **one sim step per pump_events + 1 µs per clock read** — frame pacing
+  is now independent of how often the loop reads the clock (the old per-call step made the
+  profiler's 4 reads quintuple simulated time — caught by the smoke suite's exact step count).
+- **UI dialogue (docs/10 §6).** `UI::dialogue(box, font, DialogueView, line, reveal_t)`:
+  word-wrapped fixed-advance text with a Q16 typewriter reveal (tier-identical pacing), optional
+  portrait, '\n' support, hard-wrap for over-long words, and a continue marker on full reveal.
+  `DialogueView` is stride-based — exactly the shape of a phxbin-baked char[N] table. Verified by
+  ui suite pixel checks (half-reveal cutoff, word wrap onto row 2, marker) — 20 checks, both tiers.
+- **Per-target audio encode (M6).** `add_sound` now encodes per tier: tier 0 (GBA) resamples PCM
+  down to the 16384 Hz Direct Sound device rate at bake time (Q16 linear, all-integer) — less
+  cartridge ROM and 1:1 runtime mixing on the 16 MHz CPU; tiers 1/2 keep the source rate. The
+  platformer bake takes the tier (`platbake out.phxp 0|1|2`; the GBA/PSP bundle rules pass 0/1),
+  and `phxsnd --target 0` now actually encodes. Verified by pipeline suite (37 checks: tier-0
+  bundle mounts at 16384 Hz with the scaled frame count; tier-2 untouched); size-gate stays green.
+- **Gates after all of it:** `make check` ✅ · `make determinism` ✅ · `make sanitize` ✅ ·
+  `make size-gate` ✅ · GBA + PSP platformer artifacts rebuild with per-tier bundles.
+- **Note for `phxtmap`/`phxentity` (the remaining M6 item):** the platform seam has no pointer
+  input — editors need a mouse/touch extension to the C seam (or a keyboard-cursor-only editor UI)
+  before the GUI work can start. Design that seam extension first.
+
+### (Previous session 2026-06-23) — M3 tooling + M5 gameplay + CI size gate
 
 > **M5 is essentially met.** The example is no longer a tech slice — it's a small game with
 > enemies you can stomp or get hurt by, a working health bar, recoverable death, and persistence;

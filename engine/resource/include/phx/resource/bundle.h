@@ -71,10 +71,15 @@ struct TilemapBlobHeader {
     uint8_t  layers;
     uint8_t  tile_w;
     uint8_t  tile_h;
-    uint8_t  pad;
+    uint8_t  flags;        // TilemapFlags (was pad — old bundles read as 0 = no extras)
     NameHash tileset;      // name hash of the tileset texture asset
-    // followed by width*height*layers uint16 tile indices
+    // followed by width*height*layers uint16 tile indices;
+    // if (flags & kTilemapHasParallax): then — 4-byte aligned from the blob start (zero
+    // padding after an odd index count; unaligned int32 loads fault on ARM) — `layers`
+    // pairs of int32 Q16.16 {fx, fy} per-layer camera factors (1<<16 = moves with the
+    // world), imported from Tiled's native parallaxx/parallaxy layer properties.
 };
+enum : uint8_t { kTilemapHasParallax = 1 << 0 };
 
 // Sound asset: mono 16-bit signed PCM at `rate` Hz. The runtime wraps it as an audio SoundView
 // (kept POD here so `resource` needs no dependency on `audio`).

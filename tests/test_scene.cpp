@@ -6,6 +6,7 @@
 #include "phx/memory/allocators.h"
 
 #include <cstring>
+#include <cstdlib>
 
 using namespace phx;
 
@@ -49,10 +50,15 @@ struct Pusher : Scene {
     }
 };
 
-// Fresh stack with its own persistent arena + scene scratch StackAllocator.
+// Fresh stack with its own persistent arena + scene scratch StackAllocator. Every call
+// carves 2 MB from the pool, so it must be sized to the number of PHX_TEST cases in this
+// file — the bounds check makes a new test case that outgrows it fail loudly instead of
+// handing out memory past the pool (ASan caught exactly that when the pool was 8 MB).
 SceneStack* fresh_stack(StackAllocator** scratch_out) {
-    static uint8_t* pool = new uint8_t[8 << 20];
+    static const size_t kPool = 32 << 20;
+    static uint8_t* pool = new uint8_t[kPool];
     static size_t   off  = 0;
+    if (off + (2 << 20) > kPool) { std::abort(); }   // grow kPool when adding test cases
     ArenaAllocator* a = new ArenaAllocator(); a->init(pool + off, 1 << 20); off += (1 << 20);
     StackAllocator* sc = new StackAllocator(); sc->init(pool + off, 1 << 20); off += (1 << 20);
     *scratch_out = sc;

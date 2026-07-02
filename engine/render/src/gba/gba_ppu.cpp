@@ -21,7 +21,7 @@
 #include "phx/platform/gfx_soft.h"
 #include "ppu_model.h"
 
-#if defined(PHX_TARGET_GBA)
+#if defined(PHX_GBA_HW)
 #include <stdint.h>
 // Platform hook (engine/platform/src/gba): take over the display so present() skips the Mode-3
 // software blit and lets the PPU scan our VRAM/OAM/PALRAM out directly.
@@ -63,7 +63,7 @@ public:
         maps_    = a.alloc_array<MapRec>(kMaxTilemaps);
         bg_map_  = a.alloc_array<PpuScreenEntry>(kMapCap);
         oam_     = a.alloc_array<PpuObj>(kObjMax);
-#if !defined(PHX_TARGET_GBA)
+#if !defined(PHX_GBA_HW)
         scratch_ = a.alloc_array<uint32_t>(kScreenW * kScreenH);   // compose target (host/sw tier)
 #endif
 
@@ -79,7 +79,7 @@ public:
         // The hardware OBJ ceiling is 128; respect a tighter caps budget if one is set.
         obj_limit_ = caps.max_sprites && caps.max_sprites < kObjMax ? uint16_t(caps.max_sprites)
                                                                     : kObjMax;
-#if defined(PHX_TARGET_GBA)
+#if defined(PHX_GBA_HW)
         phx_gba_set_direct(1);   // we own the display; the platform must not Mode-3-blit over VRAM
 #endif
     }
@@ -213,7 +213,7 @@ public:
         st_.oam       = oam_;
         st_.obj_count = obj_n_;
 
-#if defined(PHX_TARGET_GBA)
+#if defined(PHX_GBA_HW)
         // Real hardware: program the PPU (tiles->VRAM, palette->PALRAM, map->screenblock,
         // OBJ->OAM, Mode-0 DISPCNT) and let the silicon scan it out. `ppu_compose` (the else
         // branch) is the exact golden definition of the frame this must produce.
@@ -237,7 +237,7 @@ public:
     RenderStats& stats() override { return stats_; }
 
 private:
-#if defined(PHX_TARGET_GBA)
+#if defined(PHX_GBA_HW)
     // Push the built model into the PPU's memory-mapped state. VRAM/PALRAM/OAM forbid 8-bit
     // writes, so everything goes out as 16-/32-bit units. Layout: BG charblock 0 @0x06000000
     // holds the 4bpp tiles; the same tiles are duplicated into OBJ tile VRAM @0x06010000
@@ -322,7 +322,7 @@ private:
         for (const E& e : kT) if (e.w == w && e.h == h) { shape = e.shape; size = e.size; return true; }
         return false;
     }
-#endif // PHX_TARGET_GBA
+#endif // PHX_GBA_HW
 
     // Find `texel`'s BGR555 colour in the palette, or add it. Returns false if the palette
     // is full (the >16-colour GBA limit). idx is set to the 1..15 palette slot on success.

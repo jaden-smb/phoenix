@@ -18,7 +18,9 @@ struct fixed16 {
     constexpr fixed16() = default;
     constexpr explicit fixed16(int32_t raw_value) : raw(raw_value) {}
 
-    static constexpr fixed16 from_int(int32_t i)   { return fixed16(i << kShift); }
+    // × kOne, not << kShift: left-shifting a negative is UB in C++17 (UBSan-caught); the
+    // multiply is well-defined over the whole valid ±32767 input range and compiles the same.
+    static constexpr fixed16 from_int(int32_t i)   { return fixed16(i * kOne); }
     static constexpr fixed16 from_raw(int32_t r)   { return fixed16(r); }
     // approximate float construction is compile-time only (used in tuning constants);
     // gameplay never produces float at runtime on GBA.
@@ -35,8 +37,8 @@ struct fixed16 {
         return fixed16(int32_t((int64_t(a.raw) * b.raw) >> kShift));    // 64-bit intermediate
     }
     friend constexpr fixed16 operator/(fixed16 a, fixed16 b) {
-        return fixed16(int32_t((int64_t(a.raw) << kShift) / b.raw));    // see header note
-    }
+        return fixed16(int32_t((int64_t(a.raw) * kOne) / b.raw));       // see header note; × not
+    }                                                                   // << (negative-shift UB)
     friend constexpr fixed16 operator*(fixed16 a, int32_t s) { return fixed16(a.raw * s); }
 
     fixed16& operator+=(fixed16 b) { raw += b.raw; return *this; }

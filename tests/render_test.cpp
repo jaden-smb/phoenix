@@ -123,6 +123,36 @@ int main() {
     expect_px(fb, 44, 44, kRed,    "zoom2 sprite scaled to 16px");
     expect_px(fb, 23, 23, kBlue,   "zoom2: old sprite spot is now a background tile");
 
+    // --- parallax: at camera x=8, a factor-half map scrolls by only 4 (row 0 is
+    // blue 0..7 | yellow 8..15 | blue 16..23 in world pixels -> screen = world - 4),
+    // a factor-0 map is fixed to the screen, and a base scroll of 4 composes with
+    // factor-half to a total shift of 8. All Q16 integer math -> identical on both tiers. ---
+    const Camera2D pcam{ vec2{ s_from_int(8), s_from_int(0) }, s_from_int(1), 0 };
+    r->set_tilemap_parallax(map, 0, s_half(s_from_int(1)), s_from_int(1));
+    r->begin_frame(pcam);
+    r->draw_tilemap(map, 0);
+    r->end_frame();
+    fb = phx_gfx_soft_lock(plat->gfx());
+    expect_px(fb, 3,  3, kBlue,   "parallax 1/2: tile(0,0) blue still on screen at -4");
+    expect_px(fb, 5,  3, kYellow, "parallax 1/2: tile(1,0) yellow shifted by 4, not 8");
+    expect_px(fb, 12, 3, kBlue,   "parallax 1/2: tile(2,0) blue begins at 12");
+
+    r->set_tilemap_parallax(map, 0, s_from_int(0), s_from_int(0));
+    r->begin_frame(pcam);
+    r->draw_tilemap(map, 0);
+    r->end_frame();
+    fb = phx_gfx_soft_lock(plat->gfx());
+    expect_px(fb, 3,  3, kBlue,   "parallax 0: sky layer ignores the camera");
+    expect_px(fb, 11, 3, kYellow, "parallax 0: tile(1,0) yellow at its world spot");
+
+    r->set_tilemap_parallax(map, 0, s_half(s_from_int(1)), s_from_int(1));
+    r->set_tilemap_scroll(map, vec2{ s_from_int(4), s_from_int(0) });
+    r->begin_frame(pcam);
+    r->draw_tilemap(map, 0);
+    r->end_frame();
+    fb = phx_gfx_soft_lock(plat->gfx());
+    expect_px(fb, 3, 3, kYellow, "parallax 1/2 + scroll 4: total shift 8 puts yellow at origin");
+
     // --- camera shake: a fresh renderer (frame 0 -> deterministic +8px X jitter) shifts the
     // scene left by 8, so the yellow tile(1,0) (world x 8..15) lands at the origin. shake is
     // a front-end camera offset, so this exercises the same path every backend sees. ---

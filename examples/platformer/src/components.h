@@ -38,11 +38,13 @@ struct EngineCtx {
     TextureId hero_tex = kNoTexture, coin_tex = kNoTexture, tiles_tex = kNoTexture;
     TextureId enemy_tex = kNoTexture, spike_tex = kNoTexture;
     TilemapId map = kNoTilemap;
+    uint8_t   map_layers = 1;                  // tile layers to draw (last = gameplay/solid)
     int32_t   level_w = 0, level_h = 0;        // level extent in pixels (for camera clamp)
     ecs::Entity player = ecs::kInvalid;
     vec2     player_spawn{};                    // where the player (re)spawns on death
     uint16_t enemies_killed = 0;               // stomped enemies (HUD/score + tests)
     uint16_t player_deaths  = 0;               // respawns so far (tests)
+    bool     show_profiler  = false;           // Select toggles the frame profiler overlay
 
     // hero animation, loaded from the Sprite asset at startup (clips outlive the Animator)
     AnimClip    hero_clips[4]{};

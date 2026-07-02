@@ -23,7 +23,14 @@ struct TiledMap {
     int width = 0, height = 0, tile_w = 0, tile_h = 0;
     std::string tileset;                       // name of the first tileset (-> texture ref)
     std::vector<std::vector<uint16_t>> layers; // tile-layer GIDs (flip bits stripped)
+    // Tiled's native per-layer parallax factors (parallaxx/parallaxy, default 1) — one pair
+    // per tile layer, same order as `layers`. Carried into the baked Tilemap as Q16.
+    std::vector<std::pair<double,double>> layer_parallax;
     std::vector<TiledSpawn> spawns;            // flattened from every object group
+    bool has_parallax() const {
+        for (auto& p : layer_parallax) if (p.first != 1.0 || p.second != 1.0) return true;
+        return false;
+    }
 };
 
 // Tiled GIDs carry flip/rotate flags in the top 4 bits; the index is the low 28.
@@ -66,6 +73,10 @@ inline bool tiled_load(const std::string& text, TiledMap& out) {
                 idx.push_back(uint16_t(gi));                  // small tilesets fit uint16
             }
             out.layers.push_back(std::move(idx));
+            const JsonValue* px = L.find("parallaxx");
+            const JsonValue* py = L.find("parallaxy");
+            out.layer_parallax.emplace_back(px ? px->as_num(1.0) : 1.0,
+                                            py ? py->as_num(1.0) : 1.0);
         } else if (lt == "objectgroup") {
             const JsonValue* objs = L.find("objects");
             if (objs && objs->is_arr()) {

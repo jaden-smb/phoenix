@@ -68,7 +68,8 @@ inline bool wav_decode(const uint8_t* data, size_t n, std::vector<int16_t>& mono
         for (uint32_t c = 0; c < channels; ++c) {
             int32_t s;
             if (bits == 16) s = int16_t(le16(f + c * 2));         // signed LE
-            else            s = (int32_t(f[c]) - 128) << 8;       // 8-bit unsigned -> signed 16
+            else            s = (int32_t(f[c]) - 128) * 256;      // 8-bit unsigned -> signed 16
+                                                                  // (× not <<: negative-shift UB)
             acc += s;
         }
         mono[i] = int16_t(acc / int32_t(channels));               // downmix to mono

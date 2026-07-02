@@ -94,6 +94,42 @@ int main() {
     check(sv.count == 2 && sv.spawns[0].type == "player"_hash && sv.spawns[0].x == 8 && sv.spawns[0].y == 16, "player spawn resolves");
     check(sv.count == 2 && sv.spawns[1].type == "coin"_hash && sv.spawns[1].x == 16, "coin spawn resolves");
 
+    // Parallax: a map whose single 3x1 layer scrolls at half camera speed (Tiled's native
+    // parallaxx). The ODD index count (3) forces the Q16 table's 4-byte alignment padding,
+    // so this proves factor import -> bake -> mount AND the padded layout in one pass.
+    {
+        const char* kParTmj =
+        "{ \"width\":3, \"height\":1, \"tilewidth\":8, \"tileheight\":8,"
+        "  \"tilesets\":[ { \"firstgid\":1, \"name\":\"tiles\" } ],"
+        "  \"layers\":[ { \"type\":\"tilelayer\", \"name\":\"sky\", \"width\":3, \"height\":1,"
+        "                \"parallaxx\":0.5, \"parallaxy\":0, \"data\":[1,2,1] } ] }";
+        phxtool::TiledMap ptm;
+        check(phxtool::tiled_load(kParTmj, ptm), "tiled_load (parallax map)");
+        check(ptm.has_parallax(), "importer sees the parallax factors");
+        check(ptm.layer_parallax.size() == 1 && ptm.layer_parallax[0].first == 0.5 &&
+              ptm.layer_parallax[0].second == 0.0, "parallaxx/parallaxy parsed");
+
+        const char* pbundle = "build/test_tiled_par.phxp";
+        phxtool::BundleWriter pw(/*tier*/2);
+        pw.add_tilemap("sky", ptm.layers[0].data(), 3, 1, 1, 8, 8, "tiles",
+                       &ptm.layer_parallax);
+        check(pw.write(pbundle), "bake parallax tilemap");
+
+        ResourceCache* pc = ResourceCache::create(arena).unwrap();
+        check(pc->mount(plat, pbundle) == Status::Ok, "mount parallax bundle");
+        auto pv = pc->tilemap("sky"_hash);
+        check(pv.ok(), "tilemap('sky') found");
+        TilemapView pm = pv.unwrap();
+        check(pm.indices && pm.indices[0] == 1 && pm.indices[2] == 1, "parallax map indices intact");
+        check(pm.parallax_q16 != nullptr, "parallax table present in the view");
+        check(pm.parallax_q16 && pm.parallax_q16[0] == (1 << 15) && pm.parallax_q16[1] == 0,
+              "Q16 factors survive bake -> mount (0.5, 0) past the alignment pad");
+        check((reinterpret_cast<uintptr_t>(pm.parallax_q16) & 3u) == 0, "Q16 table is 4-aligned");
+    }
+
+    // The original (no-parallax) map must NOT grow a table — old-format blobs read back as-is.
+    check(m.parallax_q16 == nullptr, "map without factors has no parallax table");
+
     // Render the imported map and confirm the tiles reach the framebuffer.
     auto rr = Renderer::create(plat->gfx(), arena, caps());
     Renderer* r = rr.unwrap();

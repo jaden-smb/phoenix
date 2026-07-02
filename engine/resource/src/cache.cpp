@@ -112,6 +112,12 @@ Result<TilemapView> ResourceCache::tilemap(NameHash name) {
     v.tile_h  = mh->tile_h;
     v.tileset = mh->tileset;
     v.indices = reinterpret_cast<const uint16_t*>(p + sizeof(TilemapBlobHeader));
+    if (mh->flags & kTilemapHasParallax) {
+        // The Q16 table sits after the indices, 4-aligned from the blob start (bundle.h).
+        const size_t idx_end = sizeof(TilemapBlobHeader) +
+                               size_t(mh->width) * mh->height * mh->layers * sizeof(uint16_t);
+        v.parallax_q16 = reinterpret_cast<const int32_t*>(p + ((idx_end + 3) & ~size_t(3)));
+    }
     return Result<TilemapView>::good(v);
 }
 

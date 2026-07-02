@@ -31,6 +31,9 @@ struct TilemapView {
     uint8_t         tile_w  = 8;
     uint8_t         tile_h  = 8;
     NameHash        tileset = 0;
+    // Per-layer camera parallax factors: `layers` pairs of Q16.16 {fx, fy}, or nullptr when
+    // the map has none (every layer moves with the world). Feed to set_tilemap_parallax.
+    const int32_t*  parallax_q16 = nullptr;
 };
 
 struct BlobView {

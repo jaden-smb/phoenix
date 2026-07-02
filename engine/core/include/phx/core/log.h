@@ -27,13 +27,16 @@ void log_emit(LogLevel level, const char* fmt, ...);   // formats into a fixed s
     #endif
 #endif
 
-#define PHX_LOG_(lvl, intlvl, fmt, ...) \
-    do { if ((intlvl) >= PHX_LOG_FLOOR) ::phx::log_emit(::phx::LogLevel::lvl, fmt, ##__VA_ARGS__); } while (0)
+// The format string rides inside __VA_ARGS__ (there is always at least one argument), so
+// no `##__VA_ARGS__` token pasting is needed — that is a GNU extension clang's -Wpedantic
+// flags, and the MinGW/clang Windows build holds the same zero-warnings bar.
+#define PHX_LOG_(lvl, intlvl, ...) \
+    do { if ((intlvl) >= PHX_LOG_FLOOR) ::phx::log_emit(::phx::LogLevel::lvl, __VA_ARGS__); } while (0)
 
-#define PHX_LOG_TRACE(fmt, ...) PHX_LOG_(Trace, 0, fmt, ##__VA_ARGS__)
-#define PHX_LOG_DEBUG(fmt, ...) PHX_LOG_(Debug, 1, fmt, ##__VA_ARGS__)
-#define PHX_LOG_INFO(fmt, ...)  PHX_LOG_(Info,  2, fmt, ##__VA_ARGS__)
-#define PHX_LOG_WARN(fmt, ...)  PHX_LOG_(Warn,  3, fmt, ##__VA_ARGS__)
-#define PHX_LOG_ERROR(fmt, ...) PHX_LOG_(Error, 4, fmt, ##__VA_ARGS__)
+#define PHX_LOG_TRACE(...) PHX_LOG_(Trace, 0, __VA_ARGS__)
+#define PHX_LOG_DEBUG(...) PHX_LOG_(Debug, 1, __VA_ARGS__)
+#define PHX_LOG_INFO(...)  PHX_LOG_(Info,  2, __VA_ARGS__)
+#define PHX_LOG_WARN(...)  PHX_LOG_(Warn,  3, __VA_ARGS__)
+#define PHX_LOG_ERROR(...) PHX_LOG_(Error, 4, __VA_ARGS__)
 
 #endif // PHX_CORE_LOG_H

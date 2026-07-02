@@ -17,11 +17,15 @@ namespace {
 struct NullGfx { phx_soft_fb fb; };
 NullGfx g_gfx = { { nullptr, 0, 0 } };
 
-// Virtual clock: each clock_ns() call advances time by one sim step. With the App loop
-// calling clock_ns() once per iteration, that yields exactly one fixed step per frame —
-// fully deterministic. Configurable via phx_null_set_step_ns() for tests.
+// Virtual clock: pump_events() (once per frame) advances time by one sim step — exactly
+// one fixed step per frame no matter how many times the loop reads the clock (the frame
+// profiler adds four reads per frame). Each clock_ns() call additionally ticks 1 µs so
+// intra-frame phase deltas stay visible and strictly ordered; that drift (~5 µs per
+// 16667 µs frame) is far below one sim step over any bounded test run. Deterministic.
+// Configurable via phx_null_set_step_ns() for tests.
 uint64_t g_step_ns = 1000000000ull / 60;   // default ~60 Hz
 uint64_t g_vtime   = 0;
+constexpr uint64_t kCallTickNs = 1000;     // 1 µs per clock read (see above)
 
 // Optional frame budget: pump_events returns 0 (quit) after N frames. 0 = run forever.
 uint64_t g_max_frames = 0;
@@ -49,12 +53,13 @@ void     null_shutdown(void) {
     std::free(g_gfx.fb.pixels);
     g_gfx.fb.pixels = nullptr; g_gfx.fb.w = g_gfx.fb.h = 0;
 }
-uint64_t null_clock_ns(void) { uint64_t t = g_vtime; g_vtime += g_step_ns; return t; }
+uint64_t null_clock_ns(void) { uint64_t t = g_vtime; g_vtime += kCallTickNs; return t; }
 void     null_sleep_ns(uint64_t) {}
 
 int  null_pump_events(void) {
     if (g_max_frames && g_frames >= g_max_frames) return 0;   // request quit
     ++g_frames;
+    g_vtime += g_step_ns;                                     // one sim step per frame
     return 1;
 }
 void null_present(void) {}

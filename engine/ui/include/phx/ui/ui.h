@@ -10,6 +10,7 @@
 
 #include "phx/core/math.h"
 #include "phx/core/pixel.h"
+#include "phx/core/profile.h"
 #include "phx/render/renderer.h"
 #include "phx/input/input.h"
 
@@ -29,6 +30,18 @@ struct BitmapFont {
 
 struct UIRect { vec2 pos; vec2 size; };
 
+// A dialogue data view: `count` NUL-terminated lines at a fixed `stride` (exactly the shape
+// of a phxbin-baked table of char[N] rows — point `lines` at the first row — but any
+// contiguous string storage works). Optional speaker portrait drawn left of the text.
+struct DialogueView {
+    const char* lines      = nullptr;
+    uint16_t    stride     = 0;          // bytes from one line to the next
+    uint16_t    count      = 0;
+    TextureId   portrait   = kNoTexture; // optional; kNoTexture = text-only box
+    uint8_t     portrait_w = 0;
+    uint8_t     portrait_h = 0;
+};
+
 class UI {
 public:
     // Begin a frame: bind the renderer + this frame's input, lazily create the white quad,
@@ -45,6 +58,22 @@ public:
     // A focus-ring menu button: draws a panel (highlighted when focused) + centered label.
     // Returns true on the frame it is focused AND the confirm button (A) is pressed.
     bool button(const UIRect&, const BitmapFont&, const char* label);
+
+    // Dialogue box (docs/10 §6): a panel with word-wrapped, fixed-advance text revealed
+    // typewriter-style — `reveal_t` ∈ [0,1] is the fraction of line `line`'s characters
+    // shown (drive it with (elapsed × chars_per_sec) / len, or feed 1 to show it all).
+    // Wraps whole words to the box width, honours '\n', draws the portrait when present,
+    // and blinks in a "continue" marker once the line is fully revealed. The reveal math
+    // is Q16 integer, so pacing is identical on both scalar tiers.
+    void dialogue(const UIRect& box, const BitmapFont&, const DialogueView&,
+                  int line, scalar reveal_t, uint8_t layer = kLayer);
+
+    // The frame profiler overlay (docs/08 §M6): three phase bars (update/render/present)
+    // scaled against the frame budget, with a budget tick and, when a font is supplied,
+    // a "U 2.1  R 5.3  P 0.4  F 16.6" millisecond readout. Bars-only with font == nullptr,
+    // so it runs on a bare GBA build with no font asset. A handful of sprites; zero alloc.
+    void profile_overlay(vec2 pos, const FrameProfile&, const BitmapFont* font = nullptr,
+                         uint8_t layer = kLayer);
 
     void end();
 

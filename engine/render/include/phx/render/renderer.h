@@ -92,6 +92,13 @@ public:
     // Tilemaps: retained handle uploaded once; scrolling is cheap (free on GBA).
     TilemapId upload_tilemap(const TilemapDesc&);
     void      set_tilemap_scroll(TilemapId, vec2 px);
+    // Parallax: layer `layer` of this map scrolls at `factor` × the camera, per axis.
+    // 1 = moves with the world (default), 0 = fixed to the screen (a sky layer), ½ = classic
+    // half-speed background. Applied in the front end through the scroll seam, so every
+    // backend inherits it — on GBA this is exactly the free per-BG HOFS/VOFS trick
+    // (docs/03 §4). Layers 0..3 only (the GBA 4-BG ceiling); higher layers draw at 1:1.
+    // All-integer Q16 math (like zoom), so both scalar tiers shift by the identical pixel.
+    void      set_tilemap_parallax(TilemapId, uint8_t layer, scalar fx, scalar fy);
     void      draw_tilemap(TilemapId, uint8_t layer);
 
     // Sprites: recorded, then sorted by (layer, z, tex) and drawn on top at end_frame.
@@ -110,9 +117,21 @@ private:
     Renderer() = default;
     friend class ArenaAllocator;   // so arena.make<Renderer>() can construct it
 
+    static constexpr uint16_t kMaxTilemaps   = 32;  // matches the backends' map-slot caps
+    static constexpr uint8_t  kParallaxLayers = 4;  // per-layer factor slots (GBA 4-BG ceiling)
+    static constexpr int32_t  kQ16One        = 1 << 16;
+    // Per-map scroll base + per-layer parallax factors (Q16). Lives in the front end so the
+    // backend seam stays unchanged — parallax compiles to plain set_scroll calls per draw.
+    struct MapScroll {
+        vec2    base{};
+        int32_t fx_q16[kParallaxLayers] = { kQ16One, kQ16One, kQ16One, kQ16One };
+        int32_t fy_q16[kParallaxLayers] = { kQ16One, kQ16One, kQ16One, kQ16One };
+    };
+
     IRenderBackend* be_      = nullptr;
     ArenaAllocator* arena_   = nullptr;
     Camera2D        cam_     {};
+    MapScroll       scroll_[kMaxTilemaps] {};
     DrawSprite*     sprites_ = nullptr;     // per-frame list (fixed, sized to caps.max_sprites)
     uint32_t        count_   = 0;
     uint32_t        cap_     = 0;
