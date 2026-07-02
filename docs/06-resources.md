@@ -81,6 +81,14 @@ auto map = ctx->res->tilemap("level1"_hash).unwrap();   // zero-copy view
 identical**; only the decoder behind `gpu_texture`/audio-upload differs, selected by
 the same capability tier. A game's code is byte-for-byte identical.
 
+> **As built:** the table above is the *target* encoding matrix. Implemented today:
+> textures ship RGBA8 (the GBA PPU backend quantizes to 4bpp tiles + palette at
+> upload); tilemaps carry `uint16` index layers **plus an optional per-layer Q16
+> parallax-factor table** (flag bit in `TilemapBlobHeader.flags`, 4-byte aligned,
+> imported from Tiled's `parallaxx`/`parallaxy`); sounds are mono 16-bit PCM, with
+> the **tier-0 (GBA) bake resampling to the 16384 Hz device rate** at encode time —
+> ADPCM, tracker music, and the remaining per-target texture codecs are future work.
+
 ## 4. Caching & memory policy
 
 ```

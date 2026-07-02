@@ -29,10 +29,14 @@ class Renderer {
 public:
     static Result<Renderer*> create(phx_gfx*, ArenaAllocator&, const phx_caps&);
 
-    void begin_frame(const Camera2D&);
+    void begin_frame(const Camera2D&);   // camera zoom + deterministic shake applied here
     // tilemaps: retained handle, uploaded once, scrolled cheaply
     TilemapId upload_tilemap(const TilemapDesc&);
     void      set_tilemap_scroll(TilemapId, vec2 px);
+    // per-layer camera factor (1 = world, ½ = half-speed background, 0 = fixed sky);
+    // implemented in the front end over the scroll seam with Q16 integer math, so every
+    // backend inherits it tier-exactly — on GBA it is the free per-BG HOFS/VOFS trick (§4)
+    void      set_tilemap_parallax(TilemapId, uint8_t layer, scalar fx, scalar fy);
     void      draw_tilemap(TilemapId, uint8_t layer);
     // sprites: immediate, batched & sorted by (layer, z, tex)
     void      draw_sprite(const DrawSprite&);
@@ -40,6 +44,7 @@ public:
     void      end_frame();     // flush → backend submit → present
 
     TextureId load_texture(const TextureDesc&);   // from resource cache blob
+    void      unload_texture(TextureId);          // slot recycling (drives the LRU cache)
     const RenderStats& stats() const;
 };
 } // namespace phx
@@ -146,7 +151,8 @@ which is how GBA games actually do text.
 
 ## 8. Conformance & golden images
 
-`tests/render_conformance/` renders a fixed scene (tilemap + sprites + text) through
+The render suite (`tests/render_test.cpp` + the ppu/gu suites; `make render ppu gu`,
+and `make gl-verify` on a real GPU) renders a fixed scene (tilemap + sprites + text) through
 the **software backend** and diffs against a checked-in golden PNG. GL/GU backends are
 spot-checked on hardware/emulator (mGBA, PPSSPP) in CI with perceptual tolerance. This
 catches "the GBA flips Y but GL doesn't" classes of bugs that otherwise ship.

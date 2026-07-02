@@ -52,14 +52,19 @@ seam** and a **C++17 systems layer** above it.
         │  ecs · scene · physics · anim · ui · resource · render(hi)    │
         ╞═════════════════════════════════════════════════════════════╡
         │                       PHX CORE  (C++17, freestanding-ish)     │
-        │  app loop · memory allocators · log · config · time · profile │
+        │  memory allocators · log · config · time · math · profile     │
         ╞═══════════════════════════ C ABI SEAM ══════════════════════╡
         │                    PLATFORM LAYER  (C interface)              │
-        │  window · gfx-device · input · audio-device · file · clock    │
+        │  window · gfx · input+pointer · audio · file · save · clock   │
         ├──────────┬──────────┬───────────────┬───────────────────────┤
-        │  win32   │  posix   │  gba (mmio)   │  psp (sceXxx)           │
+        │  null    │  sdl     │  gba (mmio)   │  psp (sceXxx)           │
         └──────────┴──────────┴───────────────┴───────────────────────┘
 ```
+
+(The App fixed-step loop itself lives one layer **above** the systems, in the
+`runtime` module — bundling it into core would create a module cycle, since the
+loop needs memory+platform while both depend on core's types. Core stays a
+closed, zero-out-edge foundation; `depcheck` enforces it.)
 
 **Why a C-ABI seam and not C++ polymorphism at the bottom?**
 - C++ vtables are fine on PC/PSP but the GBA backend is essentially register
@@ -78,32 +83,35 @@ seam** and a **C++17 systems layer** above it.
 
 ## 3. Module Map & Dependency Rules
 
+Each layer may depend only on layers **below** it (this is the exact layering
+`tools/common/depcheck.py` enforces):
+
 ```
-                         ┌───────────┐
-                         │   core    │  (depends on: platform, memory)
-                         └─────┬─────┘
-        ┌───────────┬─────────┼─────────┬───────────┬──────────┐
-        ▼           ▼         ▼         ▼           ▼          ▼
-    ┌───────┐  ┌────────┐ ┌───────┐ ┌────────┐ ┌────────┐ ┌────────┐
-    │ render│  │ input  │ │ audio │ │resource│ │  ecs   │ │ memory │
-    └───┬───┘  └────────┘ └───┬───┘ └───┬────┘ └───┬────┘ └────────┘
-        │                      │         │          │
-        ▼                      ▼         ▼          ▼
-    ┌───────┐             ┌─────────────────────────────┐
-    │  ui   │             │  scene · physics · anim     │  (gameplay systems)
-    └───────┘             └─────────────────────────────┘
+    L4  ┌─────────────────────────────────────────────┐
+        │                  runtime                     │  composition root: the App loop
+    L3  ├─────────────────────────────────────────────┤
+        │      scene · physics · anim · ui             │  gameplay systems
+    L2  ├─────────────────────────────────────────────┤
+        │  render · input · audio · resource · ecs     │  services
+    L1  ├─────────────────────────────────────────────┤
+        │            memory · platform                 │  allocators; the C-ABI seam
+    L0  ├─────────────────────────────────────────────┤
+        │                   core                       │  CLOSED foundation (zero out-edges)
+        └─────────────────────────────────────────────┘
 ```
 
 ### The dependency law (enforced, not aspirational)
 
-1. **Acyclic.** Dependencies point downward only. `core` may not include `ecs`.
-2. **`platform` is a leaf** with no dependency on any `phx` module except a handful
-   of fixed-width types in `phx/core/types.h` (which itself has zero dependencies).
+1. **Acyclic.** Dependencies point downward only. `core` is a **closed foundation**
+   with zero outgoing module edges — it may not include anything, and nothing below
+   it exists. (This is why the App loop lives in `runtime`, not core.)
+2. **`platform` depends only on `core`'s types** (`phx/core/types.h`, itself
+   dependency-free); OS/SDK headers appear nowhere else.
 3. **No module includes a sibling's `src/`** — only its public `include/phx/<mod>/`.
-4. **Gameplay systems** (scene/physics/anim/ui) may depend on `ecs`, `render`,
-   `resource`; they may **not** depend on each other except through the ECS data.
-5. Enforced in CI by a small script (`tools/common/depcheck.py`) that greps include
-   graphs and fails the build on a back-edge.
+4. **Gameplay systems** (scene/physics/anim/ui) may depend on the L2 services;
+   they may **not** depend on each other except through the ECS data.
+5. Enforced in CI by `tools/common/depcheck.py`, which parses the include graph
+   and fails the build on a back-edge or a layering violation.
 
 A dependency violation is a **build break**, treated like a compile error.
 
@@ -168,7 +176,7 @@ never raw `float`, so a game written on PC compiles unchanged for GBA.
 
 > **Risk:** silent precision divergence between fixed and float builds causing
 > different gameplay (e.g., jump heights). **Mitigation:** a determinism test suite
-> (`tests/determinism`) runs the same input log on both scalar types and asserts
+> (`make determinism`) runs the same suites on both scalar types and asserts
 > bounded divergence; physics tuning constants live in a fixed-friendly range.
 
 See `docs/01-core.md` §Math for the full fixed-point design.
@@ -312,7 +320,7 @@ identical. Full spec in `docs/06-resources.md` and `docs/08-tooling.md`.
 |---|---------------------------------------------------|-----------|--------|---------------------------------------------------------------------------|
 | R1| GBA RAM ceiling makes a real game impossible      | Med       | High   | Capability tiers + strict budgets enforced at boot; example game proves a vertical slice fits. |
 | R2| Fixed/float gameplay divergence                   | Med       | Med    | Determinism test suite; `phx::scalar` everywhere; tuned constants.        |
-| R3| Four backends rot at different rates              | High      | Med    | Shared conformance test (`tests/platform_conformance`) every backend must pass. |
+| R3| Four backends rot at different rates              | High      | Med    | Per-seam verification every backend must pass (render/audio/save smokes on real or emulated targets — see STATUS.md) + CI builds every target. |
 | R4| Renderer abstraction leaks PPU-isms into PC API   | Med       | Med    | API designed around *what* (draw sprite/tilemap) not *how*; PPU is the constraint that shapes the API, not an afterthought. |
 | R5| Toolchain drift (devkitPro/pspsdk breakage)       | Med       | Med    | Pin toolchain versions in `cmake/`; CI builds all four targets.           |
 | R6| Scope creep (the eternal engine killer)           | High      | High   | MVP gate in roadmap; "feature count is last pillar" enforced in review.   |
@@ -325,7 +333,7 @@ identical. Full spec in `docs/06-resources.md` and `docs/08-tooling.md`.
 | Doc | Title                          | Covers                                              |
 |-----|--------------------------------|-----------------------------------------------------|
 | 00  | **Master Architecture** (this) | Whole-engine style, seams, cross-cutting decisions  |
-| 01  | Core                           | App loop, memory root, log, config, time, math/fixed|
+| 01  | Core                           | Memory root, log, config, time, math/fixed, profile |
 | 02  | Platform Layer                 | The C seam, per-platform backends                   |
 | 03  | Rendering                      | Unified API, GL/GU/GBA backends, sprite/tile model  |
 | 04  | ECS                            | Entity/component/system model, archetypes, tradeoffs|

@@ -27,9 +27,11 @@ fenix/
 cmake -S . -B build/linux  -DPHX_TARGET=linux  -DCMAKE_BUILD_TYPE=Release
 cmake --build build/linux
 
-# Windows (host MSVC, or cross with mingw)
-cmake -S . -B build/win    -DPHX_TARGET=windows -G "Visual Studio 17 2022"
-cmake --build build/win --config Release
+# Windows (the PROVEN path: cross with MinGW-w64 — works from Linux and in CI,
+# verified by running the full suite under Wine; host MSVC also configures)
+cmake -S . -B build/windows -DPHX_TARGET=windows \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/mingw.toolchain.cmake
+cmake --build build/windows   # -> platformer.exe (or: make win for every host binary)
 
 # GBA    (cross, devkitARM)
 cmake -S . -B build/gba    -DPHX_TARGET=gba \
@@ -134,29 +136,31 @@ error — the architecture is *mechanically* enforced, not just documented.
 
 ## 7. CI matrix
 
-| Job        | Toolchain   | Output            | Tests run                          |
-|------------|-------------|-------------------|------------------------------------|
-| linux-gcc  | gcc         | ELF               | all (unit + conformance + golden)  |
-| linux-clang| clang       | ELF + sanitizers  | all + ASan/UBSan                   |
-| windows    | MSVC        | exe               | unit + conformance                 |
-| gba        | devkitARM   | .gba              | builds + mGBA headless smoke + size|
-| psp        | pspsdk      | EBOOT.PBP         | builds + PPSSPP headless smoke     |
-| tools      | host        | phxpack etc.      | pack round-trip                    |
+The matrix as implemented (`.github/workflows/ci.yml`):
 
-Console jobs assert a **size budget** (`.gba` ROM/IWRAM, PSP RAM) — a regression that
-blows the GBA budget fails CI, keeping pillar #2 honest.
+| Job        | Toolchain      | Output            | Gates run                                    |
+|------------|----------------|-------------------|----------------------------------------------|
+| host       | gcc            | ELF               | `make check` (all suites) + `make determinism` (both scalar tiers byte-identical) |
+| sanitize   | gcc            | ELF (instrumented)| `make sanitize` — full check suite under ASan+UBSan, no recover |
+| windows    | MinGW-w64 + Wine| static PE32+ exes| `make win` + the unit suite AND the full game run under Wine |
+| gba-size   | devkitARM      | .gba              | ROM build + `make size-gate` (ROM/IWRAM/EWRAM budgets) |
+| psp        | pspsdk         | EBOOT.PBP         | full-game EBOOT builds                       |
+
+The GBA job asserts the **size budget** — a regression that blows it fails CI,
+keeping pillar #2 honest.
 
 ## 8. Single-command developer ergonomics
 
-A top-level `Makefile`/`justfile` wraps the four configures:
+The top-level `Makefile` is the day-to-day driver (no CMake needed on the host):
 
 ```
-just build linux     # or: gba | psp | windows | all
-just run  linux       # launches the example
-just run  gba         # boots mGBA with the freshly built ROM
-just pack             # rebuild asset bundles only
-just test             # full host test suite
+make check            # THE gate: unit + integration + pipeline + tools + depcheck
+make determinism      # both scalar tiers, byte-compared
+make sanitize         # ASan+UBSan over the whole check suite
+make gba-platformer   # devkitARM ROM        make psp-platformer  # pspsdk EBOOT
+make win              # MinGW-w64 .exes      make sdl / make gl   # windowed example
 ```
 
-This is sugar over CMake; CMake remains the source of truth so IDEs and CI work
-unmodified.
+The Makefile compiles the engine directly (per-tier object dirs, so the float and
+fixed-point tiers coexist without cleans); CMake remains the canonical multi-target
+packaging path, so IDEs and toolchain-file-driven cross builds work unmodified.

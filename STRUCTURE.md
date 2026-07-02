@@ -5,16 +5,20 @@ only thing siblings may include) and a private `src/` with optional per-backend
 subfolders. The build links exactly one backend per module.
 
 ```
-fenix/
+phoenix/
 ├── README.md                     Engine identity + navigation
 ├── STRUCTURE.md                  (this file)
-├── CMakeLists.txt                Root build: target select, module registration, depcheck gate
+├── STATUS.md                     The running engineering log (numbered entries)
+├── CLAUDE.md                     Working-in-this-repo guidance (build gates, rules, gotchas)
+├── Makefile                      Host build + every suite/gate/cross target (day-to-day driver)
+├── CMakeLists.txt                Root build: target select, module registration (canonical multi-target)
 │
 ├── cmake/                        Build machinery (a new platform = a file here + a backend folder)
 │   ├── phx_module.cmake          phx_add_module(): one-backend-per-module helper
 │   ├── caps_select.cmake         PHX_TARGET -> compile defines + render tier
-│   ├── gba.toolchain.cmake       devkitARM cross toolchain (+ phx_gba_rom)
-│   └── psp.toolchain.cmake       pspsdk cross toolchain  (+ EBOOT.PBP packaging)
+│   ├── gba.toolchain.cmake       devkitARM cross toolchain (+ phx_gba_rom; sets PHX_GBA_HW)
+│   ├── psp.toolchain.cmake       pspsdk cross toolchain  (+ EBOOT.PBP packaging)
+│   └── mingw.toolchain.cmake     MinGW-w64 cross toolchain (Windows PE32+ from Linux/CI)
 │
 ├── docs/                         The technical design documentation (start at 00)
 │   ├── 00-architecture.md        Master architecture, seams, risk register
@@ -22,55 +26,76 @@ fenix/
 │   └── diagrams/                 Standalone UML / module / sequence diagrams
 │
 ├── engine/                       The engine. Acyclic dependency graph (enforced).
-│   ├── core/                     Closed foundation: types, assert, fixed, math, caps, log, config, time
-│   │   ├── include/phx/core/     types.h fixed.h math.h caps.h app.h log.h config.h time.h profile.h
-│   │   └── src/                  app.cpp fixed.cpp log.cpp profile.cpp ...
+│   ├── core/                     Closed foundation (zero outgoing module edges)
+│   │   ├── include/phx/core/     types.h assert.h fixed.h math.h caps.h pixel.h log.h config.h time.h profile.h
+│   │   └── src/                  assert.cpp fixed.cpp log.cpp
 │   ├── memory/                   Arena / Stack / Pool / Object allocators + MemoryRoot
 │   │   └── include/phx/memory/   allocators.h memory_root.h
 │   ├── platform/                 The C-ABI seam (the ONLY place OS/SDK headers appear)
-│   │   ├── include/phx/platform/ platform.h (C)  platform.hpp (thin C++ adapter)
-│   │   └── src/{null,sdl,gba,psp}/ one linked per build — null=headless, sdl=window+audio,
-│   │                                gba=Mode3+keypad (real ROM), psp=sceDisplay/Ctrl (real EBOOT)
+│   │   ├── include/phx/platform/ platform.h (C seam: gfx/input+pointer/audio/file/save/clock/log)
+│   │   └── src/{null,sdl,gba,psp}/ one linked per build — null=headless (scripted clock/input/pointer),
+│   │                                sdl=window+audio+mouse, gba=ROM+DirectSound+SRAM save,
+│   │                                psp=EBOOT+sceAudio+sceIo save (ms0:-anchored keys)
 │   ├── runtime/                  Composition root: the App fixed-step main loop (top layer)
-│   │   ├── include/phx/runtime/  app.h (App, Game hooks)
-│   │   └── src/                  app.cpp (boot -> loop -> teardown)
+│   │   ├── include/phx/runtime/  app.h (App, Game hooks, FrameProfile accessor)
+│   │   └── src/                  app.cpp (boot -> loop w/ per-phase profiling -> teardown)
 │   ├── render/                   One 2D-intent API; backends per render tier; LRU texture cache
-│   │   ├── include/phx/render/   renderer.h tilemap.h texture.h texture_cache.h
-│   │   └── src/{gl,gu,gba,soft}/  GL(tier2) · PSP GU(tier1: gu_backend.cpp + gu_model.h compositor) · GBA PPU(tier0: gba_ppu.cpp + ppu_model.h compositor) · software(ref/CI)
+│   │   ├── include/phx/render/   renderer.h texture_cache.h
+│   │   └── src/{soft,gl,gu,gba}/  software (the golden reference) · GL (tier 2) ·
+│   │                              PSP GU (tier 1: gu_backend.cpp + gu_model.h compositor) ·
+│   │                              GBA PPU (tier 0: gba_ppu.cpp + ppu_model.h; PHX_GBA_HW = real MMIO)
+│   │                              front end (renderer.cpp): sort/batch + camera zoom/shake +
+│   │                              per-layer parallax — Q16 tier-exact, inherited by every backend
 │   ├── ecs/                      Sparse-set World, components, systems
-│   ├── input/                    phx_input_raw -> semantic Button/edge/axis state
+│   ├── input/                    phx_input_raw -> semantic Button/edge/axis/pointer state
 │   ├── audio/                    Software mixer (mixer.h) + SPSC ring streaming (stream.h) + lock-free command queue (command_queue.h)
-│   ├── resource/                 .phxp bundle mount, mmap/zero-copy views, LZSS codec, LRU cache
+│   ├── resource/                 .phxp bundle mount, mmap/zero-copy views (incl. per-layer parallax), LZSS codec
 │   ├── scene/                    Scene stack, transitions, persistent blackboard
 │   ├── physics/                  AABB + swept tile collision; overlap queries
 │   ├── anim/                     Sprite-sheet frames + animation state machine
-│   └── ui/                       Immediate-mode menus/text/HUD/dialogue (-> sprite path)
+│   └── ui/                       Immediate-mode menus/text/HUD + typewriter dialogue + profiler overlay
 │
-├── tools/                        Host-only (C++17, STL allowed; never ships to console)
+├── tools/                        Host-only (C++17, STL allowed; never ships to console).
+│   │                             Every tool folder has an instructions.md (usage/formats/controls).
 │   ├── phxpack/                  Bundle ASSEMBLER: bakes sources directly OR merges .phx* intermediates -> assets.phxp.
 │   │                             builders.h = the ONE shared bake path (DEFLATE/PNG/JSON/Tiled/WAV importers);
-│   │                             bundle_reader.h merges pre-baked converter output.
+│   │                             bundle_writer.h does the per-target encode; bundle_reader.h merges.
 │   ├── phxsprite/                CONVERTER: PNG + .sprdef/json sidecar -> .phxspr (atlas + animation clips)
-│   ├── phxtile/                  CONVERTER: Tiled .tmj -> .phxtmap (layers + spawns; solid tiles = collision)
-│   ├── phxsnd/                   CONVERTER: WAV -> .phxsnd (mono16; per-target ADPCM/8-bit is future)
+│   ├── phxtile/                  CONVERTER: Tiled .tmj -> .phxtmap (layers + parallax + spawns; solid tiles = collision)
+│   ├── phxsnd/                   CONVERTER: WAV -> .phxsnd (mono16; tier 0 resamples to the GBA device
+│   │                             rate at bake time — ADPCM is future)
 │   ├── phxbin/                   CONVERTER: JSON -> .phxbin flat table (+ generated .gen.h accessor)
-│   ├── phxtmap/                  GUI tilemap editor (ImGui + engine GL backend) — M6, not yet built
-│   ├── phxentity/                GUI entity/prefab editor (reflection-driven) — M6, not yet built
-│   └── common/                   depcheck.py + shared tool utilities
+│   ├── phxtmap/                  GUI tilemap editor over the open Tiled .tmj — built on the ENGINE's own
+│   │                             window/renderer/UI (editor.h = headlessly-tested document model)
+│   ├── phxentity/                GUI entity/prefab TABLE editor over the phxbin author JSON — same
+│   │                             engine shell + doc-model split
+│   └── common/                   depcheck.py (layering gate) · size_gate.py (GBA budget gate) ·
+│                                 bin2s.py (portable asset embedding) · debug_font.h (shared tool font)
 │
 ├── examples/
-│   └── platformer/               The MVP gate: full slice using ONLY engine systems ✅
-│       ├── src/                  components.h (EngineCtx) · systems.cpp (logic+scenes) ·
-│       │                         main.cpp (entry) · bake.h (host demo-asset baker)
-│       └── assets/               hero.png tiles.png level1.tmj music.wav items.json ...
+│   ├── platformer/               The MVP gate: full game slice using ONLY engine systems ✅
+│   │   └── src/                  components.h (EngineCtx) · systems.cpp (logic+scenes) · main.cpp (PC) ·
+│   │                             gba_main.cpp/gba_ppu_main.cpp/psp_main.cpp (console entries) ·
+│   │                             bake.h + bake_main.cpp (host asset baker, per-target tier)
+│   ├── gba_smoke/ gba_ppu/       Console bring-up + verification smokes (one concern each):
+│   ├── gba_audio/ gba_save/      render, PPU hardware, Direct Sound, battery-SRAM save
+│   └── psp_smoke/ psp_gu/        PSP equivalents: render, sceGu display list,
+│       psp_audio/ psp_save/      sceAudio device, sceIo save (verdicts via PPSSPP log / GDB stub)
 │
-└── tests/                        Host test suites (the architecture's safety net)
-    ├── core/ memory/ ecs/        unit tests
-    ├── platform_conformance/     every backend must pass this to be "done"
-    ├── render_conformance/       golden-image diff via the software backend
-    ├── pack/                     bake -> load round-trip for every asset type/target
-    └── determinism/              fixed vs float scalar divergence bounds (release gate)
+└── tests/                        Host test suites (the architecture's safety net). Flat layout:
+    ├── phx_test.h · main.cpp     tiny in-house unit harness (PHX_TEST/CHECK) + runner
+    ├── test_*.cpp                unit suites (fixed, memory, ecs, time, input, physics, anim,
+    │                             scene, ui, audio, stream, lz, png, json, wav, cmdqueue)
+    ├── *_test.cpp                headless integration binaries — one per `make` suite target
+    │                             (smoke render ppu gu playable physics anim scene ui platformer
+    │                             audio texcache png sprite tiled resource pipeline)
+    └── window_verify.cpp ·       real-device verification (SDL window / GL readback / live
+        audio_device_verify.cpp   audio device) for the sdl-verify / gl-verify / audio-verify targets
 ```
+
+Release gates beyond `make check`: `make determinism` (both scalar tiers byte-identical),
+`make sanitize` (ASan+UBSan), `make size-gate` (GBA budgets), the Windows suite under Wine
+(`make win-verify`) — all CI jobs.
 
 ## The two rules that keep this clean
 
@@ -79,4 +104,6 @@ fenix/
    build break, caught by `tools/common/depcheck.py`.
 2. **One backend per module per build.** Platform/render backends live in `src/<name>/`
    subfolders; `phx_add_module(... BACKENDS ...)` links exactly the matching one. No
-   `#ifdef PLATFORM` in gameplay or systems code — ever.
+   `#ifdef PLATFORM` in gameplay or systems code — ever. (In per-tier backend code,
+   `PHX_TARGET_GBA` = the fixed-point scalar tier — also set by host `TIER=gba_sim` —
+   while `PHX_GBA_HW` = real silicon; guard MMIO with the latter.)

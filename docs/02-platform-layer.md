@@ -45,6 +45,15 @@ typedef struct phx_platform {
     const void* (*map)(phx_file*);                  // zero-copy view; ROM ptr on GBA
     void  (*close)(phx_file*);
 
+    /* persistent save storage — a tiny key->blob store. A file on PC; battery-backed
+     * SRAM at 0x0E000000 on GBA (single slot, byte-wise 8-bit bus, key ignored);
+     * sceIo on PSP (bare keys anchor at ms0:/PSP/SAVEDATA/PHX/ — a relative path has
+     * no cwd when an EBOOT is launched directly, and a UMD game can't write next to
+     * itself). The CALLER validates its own magic/version: uninitialised SRAM reads
+     * as garbage, so "no save present" is a failed magic check, not a seam state. */
+    int   (*save)(const char* key, const void* data, uint32_t size);
+    int   (*load)(const char* key, void* out, uint32_t cap, uint32_t* out_size);
+
     /* logging sink */
     void  (*log)(int level, const char* msg);
 } phx_platform;
@@ -77,11 +86,11 @@ The few calls that are genuinely hot (clock, input poll) are small enough to be
 
 ```
 engine/platform/src/
-├── sdl/      ← shared by windows + linux (SDL2: window, GL ctx, input, audio)
-├── windows/  ← win32 specifics (high-res timer, paths, optional non-SDL path)
-├── linux/    ← posix specifics (clock_gettime, mmap, XDG paths)
-├── gba/      ← devkitARM: MMIO registers, DMA, IRQ, ROM-mapped "files"
-└── psp/      ← pspsdk: sceDisplay/sceCtrl/sceAudio/sceIo, callbacks
+├── null/     ← headless: software framebuffer, virtual clock, scripted input/pointer
+│               (what the test suites run on — deterministic by construction)
+├── sdl/      ← shared by windows + linux (SDL2: window, GL ctx, input+mouse, audio)
+├── gba/      ← devkitARM: MMIO registers, DMA, IRQ, ROM-mapped "files", SRAM save
+└── psp/      ← pspsdk: sceDisplay/sceCtrl/sceAudio/sceIo (+ save), callbacks
 ```
 
 ### 3.1 PC (SDL2 backend) — `sdl/`
@@ -138,7 +147,8 @@ once** so a game's `Button::Jump` means the same thing everywhere.
 
 ## 5. Conformance: every backend passes the same tests
 
-`tests/platform_conformance/` is a backend-agnostic suite the CI runs against each
+Per-seam verification suites run against each backend (render smoke, audio-device
+smoke, save smoke — on mGBA/PPSSPP/a real window; see STATUS.md) — the CI runs them against each
 build:
 
 - clock monotonicity & resolution sanity,
@@ -156,7 +166,7 @@ the entire porting checklist — by design.
 2. Add a render backend under engine/render/src/<newplat or shared tier>/.
 3. Add cmake/<newplat>.toolchain.cmake (compiler, sysroot, flags).
 4. Add a phx_caps tier in phx/core/caps_<newplat>.h.
-5. Pass tests/platform_conformance.
+5. Pass the per-seam verification smokes (render, audio device, save) on the new target.
 ```
 
 No edits to `core`, `ecs`, `render` public API, or any gameplay code. This is the

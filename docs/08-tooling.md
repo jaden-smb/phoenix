@@ -83,14 +83,19 @@ Reads the open **Tiled** JSON/XML (so artists can use a mature editor) and bakes
 
 ## 5. `phxsnd` — audio bake
 
-| Target | Encoding                          | Why                                  |
+| Target | Encoding (target design)          | Why                                  |
 |--------|-----------------------------------|--------------------------------------|
 | GBA    | 8-bit signed PCM, downsampled     | DirectSound DMA wants raw 8-bit; RAM |
 | PSP    | ADPCM (4:1)                       | GE/audio-friendly, fits 32 MB        |
 | PC     | 16-bit PCM (SFX), OGG ref (music) | quality, ample RAM                   |
 
-Output `.phxsnd`: header (rate, channels, codec, loop points) + samples. Music can be
-flagged `stream` so the runtime streams instead of fully residing (`docs/06` §5).
+> **As built:** all targets store mono 16-bit PCM; the per-target step implemented so
+> far is the **tier-0 (GBA) bake-time downsample to the 16384 Hz device rate** (Q16
+> linear, deterministic) — the runtime downmixes 16→8-bit at the DMA buffer. ADPCM
+> and OGG music refs are future encoders behind the same `--target` switch.
+
+Output `.phxsnd`: header (rate, frames) + samples. Music can be streamed by the
+runtime instead of fully residing (`docs/06` §5).
 
 ## 6. `phxbin` — JSON/XML → binary tables
 
@@ -107,7 +112,11 @@ agree (versioned). XML path uses the same backend via a small XML→intermediate
 
 ## 7. `phxtmap` — Tilemap Editor (GUI)
 
-Lightweight desktop tool (Dear ImGui + the engine's own GL backend — dogfooding).
+Lightweight desktop tool built **on the engine itself** — the same App loop, SDL
+window, software renderer, and immediate-mode UI the games use (dogfooding; no
+external UI toolkit, not even ImGui, ended up necessary). The document model
+(`tools/phxtmap/editor.h`) is separated from the GUI shell and unit-tested
+headlessly; see `tools/phxtmap/instructions.md` for usage and controls.
 
 ```
  ┌──────────────────────────────────────────────────────────┐
@@ -120,9 +129,10 @@ Lightweight desktop tool (Dear ImGui + the engine's own GL backend — dogfoodin
  └──────────────────────────────────────────────────────────┘
 ```
 
-Features: multi-layer tile placement, fill/rect/picker tools, a dedicated
-**collision-paint** mode (paints the collision layer with shape ids), and an
-**object/entity placement** mode that drops prefab instances (refs into `phxentity`).
+Built today: multi-layer tile paint/erase (drag paints; parallax layer factors
+round-trip), a clickable tile palette, an **entity placement** mode dropping typed
+spawn objects, camera scroll, and save-with-dirty-flag. Planned on top: fill/rect/
+picker tools, collision-shape paint, and prefab refs into `phxentity`.
 Saves Tiled-compatible `.tmj` → `phxtile` bakes it. Compatibility with Tiled means
 users aren't locked into our editor.
 
@@ -140,13 +150,16 @@ users aren't locked into our editor.
  └─────────────────────┴────────────────────────────────────┘
 ```
 
-- Component schemas are **introspected** from a small reflection table the engine
-  registers (`PHX_REFLECT(Component, fields...)`) — the editor needs no per-component
-  UI code.
-- Outputs `.json` prefab definitions → `phxbin` bakes them into spawn tables → the
-  scene system instantiates them via the ECS.
-- Prefab = a named list of components + default values; placing one in `phxtmap` writes
-  a spawn record `{prefab_hash, x, y, overrides}`.
+- **Built today:** a keyboard-driven grid editor over the phxbin author JSON (typed
+  record tables): cell cursor, ±1/±10 stepping **clamped to each field's declared
+  type**, record clone/delete, save — on the same engine shell as `phxtmap`, with the
+  document model (`tools/phxentity/editor.h`) unit-tested headlessly and its output
+  proven to re-bake through the real `phxbin` builder. See
+  `tools/phxentity/instructions.md`.
+- **Planned on top:** component schemas **introspected** from a reflection table
+  (`PHX_REFLECT(Component, fields...)`) so prefabs become named component lists with
+  defaults, and placing one in `phxtmap` writes `{prefab_hash, x, y, overrides}`.
+- Outputs `.json` → `phxbin` bakes it into tables → the game reads them zero-copy.
 
 ## 9. Pipeline guarantees
 
@@ -156,5 +169,6 @@ users aren't locked into our editor.
   prefab ref → all fail the *bake*, never the *game*. The console build is incapable of
   malformed assets.
 - **Incremental:** content hashing → only changed assets re-bake; CI re-pack is fast.
-- **Round-trip tested:** `tests/pack/` bakes a fixture and asserts the runtime
+- **Round-trip tested:** the pipeline/resource suites (`make pipeline`, `make resource`,
+  `make tools`) bake fixtures and assert the runtime
   `ResourceCache` reads back identical views for every type, on every target encoding.

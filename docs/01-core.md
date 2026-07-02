@@ -1,20 +1,27 @@
 # Phoenix Engine — Core Module
 
 > `engine/core/` — the mandatory foundation every other module sits on.
-> Depends only on `memory` and `platform`. Compiles on all four tiers.
+> A **closed** module: zero outgoing dependencies. Compiles on all four tiers.
+>
+> **As built:** the App/main-loop described in §1 was lifted into the top-level
+> **`runtime`** module (`phx/runtime/app.h`) — the loop needs memory+platform, which
+> depend on core's types, so keeping it here would have formed a module cycle
+> (caught by `depcheck`). Likewise `MemoryRoot` lives in the `memory` module. The
+> *behavior* documented below is unchanged; only the home of those two headers moved.
 
 ## Responsibilities
 
 | Subsystem   | Header                       | Purpose                                              |
 |-------------|------------------------------|------------------------------------------------------|
-| App / loop  | `phx/core/app.h`             | Owns the fixed-timestep main loop & subsystem wiring |
-| Memory root | `phx/core/memory_root.h`     | Boots the root arena, hands out sub-allocators        |
+| App / loop  | `phx/runtime/app.h` (moved)  | Owns the fixed-timestep main loop & subsystem wiring |
+| Memory root | `phx/memory/memory_root.h` (moved) | Boots the root arena, hands out sub-allocators  |
 | Logging     | `phx/core/log.h`             | Leveled, zero-cost-when-disabled logging macros       |
 | Config      | `phx/core/config.h`          | Immutable boot config (budgets, sim rate, flags)      |
 | Time        | `phx/core/time.h`            | Monotonic clock, frame timing, fixed-step accumulator |
-| Profiling   | `phx/core/profile.h`         | Scoped CPU zones, frame markers, ring-buffer history  |
+| Profiling   | `phx/core/profile.h`         | Frame phase timings (see §6)                          |
 | Types       | `phx/core/types.h`           | Fixed-width ints, `Result`, `TypeId`, hashing         |
-| Math        | `phx/core/math.h`, `fixed.h` | `scalar`, `vec2`, `mat3`, `aabb`                      |
+| Pixel       | `phx/core/pixel.h`           | Shared `Rgba`/`PixelFormat` (render ↔ resource)       |
+| Math        | `phx/core/math.h`, `fixed.h` | `scalar`, `vec2`, `mat3`, `aabb`, Q16 helpers         |
 
 ## 1. Initialization sequence
 
@@ -182,6 +189,14 @@ The profiler keeps a fixed ring buffer of the last N frames of per-zone nanoseco
 On PC it can dump Chrome-tracing JSON; on PSP it draws an on-screen bar overlay; on
 GBA it is compiled out unless `enable_profiler` (it costs too much there to ship).
 
+> **As built:** a leaner shape shipped first. `phx/core/profile.h` holds a pure-data
+> `FrameProfile` (update/render/present/frame µs + budget — integer POD, so core stays
+> closed and tier-agnostic); the **runtime loop** stamps it each frame from the platform
+> clock (`App::profile()`), and **`UI::profile_overlay`** draws phase bars against the
+> frame budget on every tier (four clock reads per frame — cheap enough to keep on,
+> even on GBA). The scoped-zone/ring-buffer design above remains the plan for deeper
+> tooling if it's ever needed.
+
 ## 7. Result & assertions (`phx/core/types.h`)
 
 ```cpp
@@ -200,6 +215,8 @@ template <class T> struct Result { Status st; T val;
 
 ## Testing
 
-`tests/core/` covers: fixed-point ops vs. reference float (bounded error), the step
+The unit suite (`tests/test_fixed.cpp`, `test_memory.cpp`, `test_time.cpp`, ...; `make test`)
+covers: fixed-point ops vs. reference float (bounded error), the step
 accumulator (clamping, alpha), arena/pool semantics, and FNV hashing stability. The
-fixed-point determinism vectors are shared with `tests/determinism/`.
+fixed-point determinism is held by the `make determinism` gate (both scalar tiers,
+byte-compared) and by running the unit suite under `TIER=gba_sim`.

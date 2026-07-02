@@ -11,21 +11,33 @@
 **MVP = a playable 2D platformer vertical slice that builds and runs on all four
 targets from one codebase, using only engine systems.**
 
-Concretely, the MVP ships when:
+Concretely, the MVP ships when (**status: ALL MET** — see STATUS.md for the
+verification evidence behind each tick):
 
-- [ ] One CMake tree produces: Linux ELF, Windows exe, `.gba` ROM, PSP `EBOOT.PBP`.
-- [ ] Memory: root arena + arena/stack/pool/object allocators; **zero hot-path heap**.
-- [ ] Platform seam implemented for SDL(PC), GBA, PSP; passes `platform_conformance`.
-- [ ] Renderer: sprites + tilemap + parallax + bitmap text on GL, GU, and GBA PPU.
-- [ ] ECS: sparse-set world, fixed-step systems, deferred structural changes.
-- [ ] Resource: `.phxp` bundle baked by `phxpack`; mmap/zero-copy load; per-target encode.
-- [ ] Input/Audio/Scene/Physics/Anim/UI at the depth in `docs/10`.
-- [ ] Example game: player movement, jump, 2 enemy types, camera, HUD, save/load.
-- [ ] Fits GBA budget (ROM + IWRAM/EWRAM) — proven by the CI size gate.
+- [x] One CMake tree produces: Linux ELF, Windows exe (MinGW toolchain file; suite +
+      game verified under Wine), `.gba` ROM, PSP `EBOOT.PBP`.
+- [x] Memory: root arena + arena/stack/pool/object allocators; **zero hot-path heap**.
+- [x] Platform seam implemented for SDL(PC), GBA, PSP — every seam function (render,
+      audio device, save) verified on a real/emulated target.
+- [x] Renderer: sprites + tilemap + parallax + bitmap text on GL, GU, and GBA PPU
+      (plus camera zoom/shake beyond the checklist).
+- [x] ECS: sparse-set world, fixed-step systems, deferred structural changes.
+- [x] Resource: `.phxp` bundle baked by `phxpack`; mmap/zero-copy load; per-target
+      encode (tier-0 sound rate; further codecs post-MVP).
+- [x] Input/Audio/Scene/Physics/Anim/UI at the depth in `docs/10` (incl. dialogue).
+- [x] Example game: player movement, jump, 2 enemy types, camera, HUD, save/load
+      (plus a parallax backdrop).
+- [x] Fits GBA budget (ROM + IWRAM/EWRAM) — proven by the CI size gate.
 
 **Explicitly NOT in MVP:** Vulkan, job/threading system, particle system, lighting,
 networking, scripting, the GUI editors' full feature set (CLI converters suffice for
-MVP; editors land in M5).
+MVP; editor MVPs — `phxtmap` paint/entity modes, `phxentity` table editing — landed
+with M6; their full feature set remains 0.2 scope).
+
+**Beyond the MVP, also done:** the M6 profiler overlay + GUI editor MVPs and the M7
+determinism + ASan/UBSan release gates (named make targets, CI jobs). Remaining
+before 0.1: validation on physical hardware (real GBA cart incl. SRAM persistence
+across power cycles, physical PSP) and the license.
 
 ---
 
