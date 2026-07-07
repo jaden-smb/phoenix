@@ -114,7 +114,7 @@ inline bool bake_emberwing_assets(const char* path, uint8_t tier = 2) {
                     for (int dy = 0; dy < 2; ++dy)
                         for (int dx = 0; dx < 2; ++dx) {
                             const int px = x0 + 2 * x + dx, py = 2 * y + dy + 1;   // +1: center 14px glyphs in the 16px strip
-                            if (px < kCw) img[size_t(py) * kCw + px] = kGold;
+                            if (px < kCw && py < kCh) img[size_t(py) * kCw + px] = kGold;
                         }
                 }
         }
