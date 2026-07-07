@@ -9,6 +9,7 @@
 // 60 Hz fixed step, per-step displacement stays well under a tile, so a single
 // move-then-resolve pass per axis is exact (no tunnelling).
 #include "phx/physics/physics.h"
+#include "phx/core/hot.h"
 
 namespace phx {
 namespace {
@@ -17,7 +18,16 @@ inline bool gt0(scalar v) { return v > s_from_int(0); }
 inline bool lt0(scalar v) { return v < s_from_int(0); }
 
 // Tile index containing a pixel coordinate (truncation; world coords are non-negative).
-inline int tile_of(scalar coord, int size) { return s_to_int(coord) / size; }
+// The ARM7 has no divider, and this runs several times per body per axis per step — for the
+// (universal) power-of-two tile size and non-negative coordinate case, use a shift instead
+// of the soft-division call. Negative coords (a body poking past the map's left/top edge)
+// keep the exact truncating division so behaviour is unchanged.
+inline int tile_of(scalar coord, int size) {
+    const int v = s_to_int(coord);
+    if (v >= 0 && (size & (size - 1)) == 0)
+        return v >> __builtin_ctz(unsigned(size));
+    return v / size;
+}
 
 // Strict AABB overlap (touching edges do NOT count, so a body resting flush on a tile is
 // not perpetually re-resolved).
@@ -28,7 +38,7 @@ inline bool strict_overlap(scalar al, scalar at, scalar ar, scalar ab,
 
 } // namespace
 
-void PhysicsWorld::resolve_x(Transform& t, Body& b, const AABBColl& c) const {
+PHX_HOT_CODE void PhysicsWorld::resolve_x(Transform& t, Body& b, const AABBColl& c) const {
     if (!gt0(b.vel.x) && !lt0(b.vel.x)) return;     // no X motion → nothing to resolve
     const scalar top = t.pos.y - c.half.y, bot = t.pos.y + c.half.y;
     // Candidate tile span (±1 so out-of-bounds walls and shallow penetration are covered).
@@ -51,7 +61,7 @@ void PhysicsWorld::resolve_x(Transform& t, Body& b, const AABBColl& c) const {
         }
 }
 
-void PhysicsWorld::resolve_y(Transform& t, Body& b, const AABBColl& c) const {
+PHX_HOT_CODE void PhysicsWorld::resolve_y(Transform& t, Body& b, const AABBColl& c) const {
     if (!gt0(b.vel.y) && !lt0(b.vel.y)) return;
     const scalar left = t.pos.x - c.half.x, right = t.pos.x + c.half.x;
     const int tx0 = tile_of(left, grid_.tile_w) - 1;
@@ -73,7 +83,7 @@ void PhysicsWorld::resolve_y(Transform& t, Body& b, const AABBColl& c) const {
         }
 }
 
-uint32_t PhysicsWorld::step(ecs::World& w, scalar dt, Span<Hit> out_hits) {
+PHX_HOT_CODE uint32_t PhysicsWorld::step(ecs::World& w, scalar dt, Span<Hit> out_hits) {
     // 1+2+3: integrate and resolve every dynamic body against the tilemap.
     w.each<Body, Transform>([&](ecs::Entity e, Body& b, Transform& t) {
         if (b.flags & kBodyStatic) return;

@@ -3,9 +3,8 @@
 // sorts by (layer, z, tex), and dispatches to the one linked backend. Tilemaps are drawn
 // immediately as background; sprites are drawn on top after sorting.
 #include "phx/render/renderer.h"
+#include "phx/core/hot.h"
 #include "backend.h"
-
-#include <cstdlib>   // qsort — C, portable, no STL/heap-per-frame
 
 namespace phx {
 
@@ -13,11 +12,6 @@ namespace {
 // Sort key: layer (high) -> z -> texture, so batches of the same texture stay adjacent.
 inline uint32_t sort_key(const DrawSprite& s) {
     return (uint32_t(s.layer) << 24) | (uint32_t(s.z) << 16) | uint32_t(s.tex);
-}
-int cmp_sprite(const void* a, const void* b) {
-    uint32_t ka = sort_key(*static_cast<const DrawSprite*>(a));
-    uint32_t kb = sort_key(*static_cast<const DrawSprite*>(b));
-    return (ka > kb) - (ka < kb);
 }
 } // namespace
 
@@ -108,9 +102,19 @@ void Renderer::draw_sprite(const DrawSprite& s) {
     sprites_[count_++] = s;
 }
 
-void Renderer::end_frame() {
-    if (count_ > 1)
-        std::qsort(sprites_, count_, sizeof(DrawSprite), cmp_sprite);
+PHX_HOT_CODE void Renderer::end_frame() {
+    // STABLE insertion sort by (layer, z, tex). Replaces qsort for two reasons: games
+    // submit sprites nearly layer-ordered already, so this is ~O(n) with no per-compare
+    // callback (qsort's indirect compare + byte-wise swaps were measurable on GBA); and
+    // qsort is unstable with a libc-specific tie order — equal-key sprites must draw in
+    // submission order on every platform or golden frames diverge across toolchains.
+    for (uint32_t i = 1; i < count_; ++i) {
+        const DrawSprite s   = sprites_[i];
+        const uint32_t   key = sort_key(s);
+        uint32_t j = i;
+        for (; j > 0 && sort_key(sprites_[j - 1]) > key; --j) sprites_[j] = sprites_[j - 1];
+        sprites_[j] = s;
+    }
 
     be_->submit_sprites(sprites_, count_);
     be_->end();

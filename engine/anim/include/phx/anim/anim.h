@@ -42,6 +42,10 @@ struct Animator {
     uint16_t frame  = 0;             // frame WITHIN the current clip (0..count-1)
     scalar   timer  = scalar{};      // accumulates dt toward the next frame
     bool     finished = false;
+    // 1/fps of the current clip, cached by AnimationSystem::tick when `clip` changes
+    // (a scalar divide is a soft 64-bit division on GBA — too hot per entity per frame).
+    scalar   frame_dur = scalar{};
+    uint16_t dur_clip  = 0xFFFF;      // clip `frame_dur` was computed for (0xFFFF = none)
     // output (written by AnimationSystem::tick, read by the render side):
     int16_t  cur_sx = 0, cur_sy = 0, cur_sw = 0, cur_sh = 0;
 

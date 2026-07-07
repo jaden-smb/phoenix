@@ -56,22 +56,25 @@ int main() {
     void* arena_buf = malloc(kArena);
     if (!arena_buf) { phx_gba_audio_verdict = 0; for (;;) {} }
     ArenaAllocator arena; arena.init(arena_buf, kArena);
-    auto mr = AudioMixer::create(arena, caps(), 16384);
+    // 18157 Hz: the vblank-locked Direct Sound rate (exactly 304 samples per video frame —
+    // the per-frame double-buffer pump requires integer samples/frame; see gba_platform.cpp).
+    constexpr int kRate = 18157;
+    auto mr = AudioMixer::create(arena, caps(), kRate);
     if (!mr.ok()) { phx_gba_audio_verdict = 0; for (;;) {} }
     AudioMixer* mixer = mr.unwrap();
 
     static AudioCommand storage[16];
     AudioCommandQueue queue; queue.init(storage, 16);
 
-    // A 440 Hz-ish square tone (amplitude 9000) at 16384 Hz; the game "plays" it as an SFX.
-    const uint32_t nframes = 16384 / 4;            // 0.25 s
+    // A 450 Hz-ish square tone (amplitude 9000) at the device rate; the game "plays" it as an SFX.
+    const uint32_t nframes = kRate / 4;            // 0.25 s
     int16_t* tone = static_cast<int16_t*>(malloc(nframes * sizeof(int16_t)));
     if (!tone) { phx_gba_audio_verdict = 0; for (;;) {} }
-    for (uint32_t i = 0; i < nframes; ++i) tone[i] = ((i / 18) & 1) ? 9000 : -9000;
-    SoundView sfx{ tone, nframes, 16384 };
+    for (uint32_t i = 0; i < nframes; ++i) tone[i] = ((i / 20) & 1) ? 9000 : -9000;
+    SoundView sfx{ tone, nframes, uint32_t(kRate) };
 
     static FillState st; st.mixer = mixer; st.queue = &queue;
-    phx_gba_audio_start(16384, audio_fill, &st);
+    phx_gba_audio_start(kRate, audio_fill, &st);
     queue.play_sfx(sfx, 1.0f, 0.0f, true);          // loop so the device buffer stays populated
 
     for (int f = 0; f < 60; ++f) plat->present();   // ~1 s: each present pumps a sound buffer

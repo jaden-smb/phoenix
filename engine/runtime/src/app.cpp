@@ -109,10 +109,17 @@ int App::run(Game* game) {
         plat_->present();          // swap / vblank (no-op headless)
         const uint64_t t_end = plat_->clock_ns();
 
-        prof_.update_us  = uint32_t((t_ren - t_upd) / 1000u);
-        prof_.render_us  = uint32_t((t_pre - t_ren) / 1000u);
-        prof_.present_us = uint32_t((t_end - t_pre) / 1000u);
-        prof_.frame_us   = uint32_t((t_end - now) / 1000u);
+        // ns -> µs via multiply-shift (4295/2^32 ≈ 1e-3, +8ppm), rounded UP so any nonzero
+        // phase stamps at least 1 µs (the null clock ticks 1 µs/read; a truncating convert
+        // would report 0 for every phase there). Four u64 soft divisions per frame add up on
+        // a 16 MHz ARM7 with no divider, and these only feed the profiler display.
+        const auto ns_to_us = [](uint64_t ns) {
+            return uint32_t((ns * 4295u + 0xFFFFFFFFu) >> 32);
+        };
+        prof_.update_us  = ns_to_us(t_ren - t_upd);
+        prof_.render_us  = ns_to_us(t_pre - t_ren);
+        prof_.present_us = ns_to_us(t_end - t_pre);
+        prof_.frame_us   = ns_to_us(t_end - now);
     }
 
     // 6. teardown in reverse

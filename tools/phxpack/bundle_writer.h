@@ -90,7 +90,11 @@ public:
     // time — the ROM carries ~2.7× less sample data and the 16 MHz CPU mixes 1:1 instead
     // of resampling every voice. Q16 linear interpolation, all-integer (deterministic).
     // Tiers 1/2 keep the source rate: their mixers run at 44.1 kHz and resample cheaply.
-    static constexpr uint32_t kTier0Rate = 16384;   // == the GBA Direct Sound device rate
+    // == the GBA Direct Sound device rate. 18157 Hz is the vblank-locked rate (924 CPU
+    // cycles/sample; exactly 304 samples per 280896-cycle video frame) — the GBA backend's
+    // per-frame double-buffer pump needs integer samples/frame (16384 Hz gave 274.3125,
+    // i.e. a discontinuity every frame). Must match kGbaAudioRate in the GBA game entries.
+    static constexpr uint32_t kTier0Rate = 18157;
     void add_sound(const std::string& name, const int16_t* samples, uint32_t frames, uint32_t rate) {
         std::vector<int16_t> enc;
         if (target_ == 0 && rate > kTier0Rate && frames) {

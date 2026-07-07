@@ -43,8 +43,9 @@ add_subdirectory(engine/anim)
 add_subdirectory(engine/ui)
 add_subdirectory(engine/runtime)
 
-# ---- the example game ------------------------------------------------------
+# ---- the example games -----------------------------------------------------
 add_subdirectory(examples/platformer)
+add_subdirectory(examples/emberwing)
 
 # ---- host-only tools (always built for the host, even when cross-compiling) -
 # The asset pipeline (docs/08): per-format CONVERTERS bake author sources into intermediate

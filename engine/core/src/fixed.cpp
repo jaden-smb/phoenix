@@ -1,28 +1,50 @@
 // phx/core/fixed.cpp — Q16.16 transcendentals via small LUTs + Newton refinement.
 // On ARM7TDMI there is no FPU and no hardware divide, so these are the ONLY sanctioned
-// paths for sin/cos/sqrt/reciprocal. The tables are computed once at static-init on the
-// host; on GBA they are baked into ROM as `const` (see note at bottom).
+// paths for sin/cos/sqrt/reciprocal. The sine table is computed at COMPILE time
+// (constexpr) so it lives in .rodata — cartridge ROM on GBA. It used to be filled by a
+// static initializer calling libm sin(); on the GBA that meant 256 soft-double sin()
+// evaluations through newlib on a 16 MHz ARM7 — tens of SECONDS of black screen before
+// main() ran. Never compute at boot what the compiler can compute at build.
 #include "phx/core/fixed.h"
 
 namespace phx {
 
 // 256-entry sine table over one full turn [0,1). sin_lut[i] = sin(2*pi*i/256) in Q16.16.
-// Generated at startup here for clarity; on GBA this becomes a const array in ROM.
 namespace {
 constexpr int kSinBits = 8;
 constexpr int kSinSize = 1 << kSinBits;          // 256
-int32_t g_sin_lut[kSinSize];
 
-struct SinLutInit {
-    SinLutInit() {
-        // host-side double math is fine: this runs offline / at static init, never per-frame.
-        const double tau = 6.283185307179586476925286766559;
-        for (int i = 0; i < kSinSize; ++i) {
-            double s = __builtin_sin(tau * double(i) / double(kSinSize));
-            g_sin_lut[i] = int32_t(s * double(fixed16::kOne));
-        }
+// constexpr sine for x in [0, pi/2] (Taylor to x^19: error < 1e-15 on that range — far
+// below the Q16.16 quantum). Portable C++17 constant expression: no __builtin_sin
+// (clang/MinGW reject it in constexpr), just double arithmetic.
+constexpr double ct_sin_quarter(double x) {
+    const double x2 = x * x;
+    double term = x, sum = x;
+    for (int k = 1; k <= 9; ++k) {
+        term *= -x2 / double((2 * k) * (2 * k + 1));
+        sum += term;
     }
-} g_sin_lut_init;
+    return sum;
+}
+
+struct SinLut { int32_t v[kSinSize]; };
+
+constexpr SinLut make_sin_lut() {
+    SinLut l{};
+    constexpr double tau = 6.283185307179586476925286766559;
+    for (int i = 0; i < kSinSize; ++i) {
+        const double t = double(i) / double(kSinSize);   // fractional turn [0,1)
+        double s = 0.0;                                   // quadrant-reduce for accuracy
+        if      (t <= 0.25) s =  ct_sin_quarter(tau * t);
+        else if (t <= 0.50) s =  ct_sin_quarter(tau * (0.50 - t));
+        else if (t <= 0.75) s = -ct_sin_quarter(tau * (t - 0.50));
+        else                s = -ct_sin_quarter(tau * (1.0 - t));
+        l.v[i] = int32_t(s * double(fixed16::kOne));
+    }
+    return l;
+}
+
+constexpr SinLut g_sin_lut = make_sin_lut();     // .rodata: zero boot cost on every target
 } // namespace
 
 fixed16 fx_sin(fixed16 turns) {
@@ -32,8 +54,8 @@ fixed16 fx_sin(fixed16 turns) {
     int32_t i0 = idx_fp & (kSinSize - 1);
     int32_t i1 = (i0 + 1) & (kSinSize - 1);
     int32_t t  = (frac << kSinBits) & (fixed16::kOne - 1);       // sub-index fraction Q16.16
-    int32_t a  = g_sin_lut[i0];
-    int32_t b  = g_sin_lut[i1];
+    int32_t a  = g_sin_lut.v[i0];
+    int32_t b  = g_sin_lut.v[i1];
     int32_t lerp = a + int32_t((int64_t(b - a) * t) >> fixed16::kShift);
     return fixed16::from_raw(lerp);
 }

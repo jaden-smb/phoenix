@@ -5,10 +5,11 @@
 // the last frame and latch `finished`. Then write the current frame's source rect into the
 // Animator for the renderer to blit. Frame duration is `scalar`, so fixed/float agree.
 #include "phx/anim/anim.h"
+#include "phx/core/hot.h"
 
 namespace phx {
 
-void AnimationSystem::apply_rect(Animator& a) {
+PHX_HOT_CODE void AnimationSystem::apply_rect(Animator& a) {
     if (a.clip >= a.clips.size()) return;
     const AnimClip& c = a.clips[a.clip];
     const uint16_t  frame_in_clip = (c.count > 0 && a.frame >= c.count) ? uint16_t(c.count - 1) : a.frame;
@@ -20,13 +21,17 @@ void AnimationSystem::apply_rect(Animator& a) {
     a.cur_sh = int16_t(a.sheet.frame_h);
 }
 
-void AnimationSystem::tick(ecs::World& w, scalar dt) const {
+PHX_HOT_CODE void AnimationSystem::tick(ecs::World& w, scalar dt) const {
     w.each<Animator>([&](ecs::Entity, Animator& a) {
         if (a.clip >= a.clips.size()) { apply_rect(a); return; }
         const AnimClip& c = a.clips[a.clip];
 
         if (c.fps > 0 && c.count > 1 && !(a.finished && !c.loop)) {
-            const scalar frame_dur = s_from_int(1) / s_from_int(int(c.fps));
+            if (a.dur_clip != a.clip) {       // scalar divide is expensive on GBA: cache 1/fps
+                a.frame_dur = s_from_int(1) / s_from_int(int(c.fps));
+                a.dur_clip  = a.clip;
+            }
+            const scalar frame_dur = a.frame_dur;
             a.timer += dt;
             // consume whole frames; the while-loop handles dt spanning several frames
             while (a.timer >= frame_dur) {

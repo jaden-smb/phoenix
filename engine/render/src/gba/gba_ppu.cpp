@@ -1,19 +1,27 @@
 // engine/render/src/gba/gba_ppu.cpp — the GBA-native render backend (render tier 0, PPU).
 // Instead of CPU-rasterizing arbitrary 24-bit sprites like the software reference, this
-// backend speaks the GBA's actual hardware language: it quantizes each RGBA8 atlas into
-// 4bpp paletted 8x8 tiles sharing one 16-colour BGR555 palette, turns tilemaps into text-
-// BG screen entries, and turns sprites into OAM (OBJ) entries — honouring the real machine
-// limits (≤16 palette colours, 8x8 tile alignment, the 128-sprite ceiling). It then runs
-// `ppu_compose` (engine/render/src/gba/ppu_model.h) to produce the exact frame the PPU
-// would scan out, into the platform's RGBA8 framebuffer.
+// backend speaks the GBA's actual hardware language:
 //
-// Why this shape: the GBA-native visual model is fully exercised and verified HEADLESSLY
-// (every constraint that would bite on hardware — palette overflow, unaligned art, too
-// many sprites — surfaces here, on the host, in a test). Composing on the CPU also lets
-// this backend run today on ANY software-tier platform (null/sdl, and the GBA itself via
-// the Mode-3 blit). The remaining hardware step is to DMA this same tile/map/OAM/palette
-// data into VRAM/OAM/PALRAM and let the silicon PPU scan it out (see end()'s note); that
-// is an optimization, not a correctness change — `ppu_compose` is its golden oracle.
+//   · RGBA8 atlases are quantized into 4bpp tiles indexing 16-colour PALETTE BANKS
+//     (16 banks of 16, like PALRAM) — a whole texture shares one bank when its colours
+//     fit (required for OBJ use), otherwise each 8×8 tile gets its own bank (fine for
+//     BG tilesets). A single tile needing >15 opaque colours, or exhausting all banks,
+//     fails the upload — exactly what would make the art unshippable on hardware.
+//   · Tilemaps of ANY size are drawn by STREAMING the camera-visible window into one of
+//     the PPU's four 32×32-cell text backgrounds per draw call (slot 0 = furthest back),
+//     with the raw scroll in HOFS/VOFS — so a 320-tile level and per-layer parallax cost
+//     the same as the GBA's free BG scrolling, which is the whole point of the machine.
+//   · Sprites become OAM entries whose tiles are copied per frame into a CONTIGUOUS
+//     1D-mapped OBJ tile run (atlas sub-rects are scattered in the char store; OAM's 1D
+//     mapping cannot address that, so the visible sprites' tiles are re-packed each frame
+//     — bounded, ~40 tiles/frame in practice). Shapes the hardware has no OBJ size for
+//     are rejected in EVERY build, keeping the host model an honest golden oracle.
+//
+// The whole model is fully exercised and verified HEADLESSLY: `ppu_compose`
+// (engine/render/src/gba/ppu_model.h) produces the exact frame the PPU would scan out.
+// On real hardware (PHX_GBA_HW) end() pushes the same data into VRAM/OAM/PALRAM — tiles
+// and palette incrementally (they only grow at load time), windows/OAM/OBJ tiles per
+// frame — and the silicon rasterizes it.
 //
 // Exactly one render backend TU is linked; this one defines phx_make_render_backend()
 // (selected at link time instead of soft/gl/gu).
@@ -35,16 +43,20 @@ using namespace phx::gba;
 
 constexpr uint16_t kMaxTextures = 256;
 constexpr uint16_t kMaxTilemaps = 32;
-// char-store capacity (tiles): 256 4bpp tiles = 8 KB, fits BG charblock 0 (0x06000000) with the
-// map screenblock above it. The text BG is modelled (and submitted to hardware) as 32x32 cells —
-// the GBA's base text-BG size — so the map store is one screenblock. Both are sized to keep the
-// backend's arena footprint small enough for the GBA's 256 KB EWRAM (the platformer-PPU ROM).
-constexpr uint16_t kTileCap     = 256;           // char-store capacity (tiles) -> 16 KB tiles_
-constexpr uint16_t kMapCap      = 32 * 32;       // max BG screen entries we model -> one screenblock
+// BG char-store capacity. 512 4bpp tiles = 16 KB — half of BG charblocks 0–1, well clear of
+// the four screenblocks at blocks 24–27 (tile index 768+), and within the 10-bit screen-entry
+// tile field. The CPU-side store is the same packed 4bpp layout VRAM wants (32 B/tile).
+constexpr uint16_t kTileCap    = 512;
+// Per-frame OBJ tile run: 128 OBJs × a few tiles each in practice; 256 tiles (8 KB) is a
+// quarter of OBJ char VRAM. Sprites beyond it are dropped and counted (graceful overflow).
+constexpr uint16_t kObjTileCap = 256;
+constexpr uint8_t  kBankNone   = 0xFF;   // TexRec.bank: per-tile banks (BG-only texture)
 
 // A quantized texture: a contiguous run of tiles in the char store, addressed in 2D as a
 // `cols` x `rows` grid (so a sprite/tile source sub-rect maps to a tile rectangle).
-struct TexRec { uint16_t base, cols, rows; bool used; };
+// `bank` is the single palette bank the whole texture indexes, or kBankNone when its
+// colours spilled across per-tile banks (then tile_bank_[] holds each tile's bank).
+struct TexRec { uint16_t base, cols, rows; bool used; uint8_t bank; };
 struct MapRec {
     const uint16_t* idx;
     uint16_t w, h;
@@ -53,28 +65,48 @@ struct MapRec {
     int32_t  scroll_x, scroll_y;
 };
 
+// Floor division/modulo for tile coordinates (scroll can be negative in principle).
+inline int floor_div(int a, int b) { int q = a / b; return (a % b != 0 && (a ^ b) < 0) ? q - 1 : q; }
+
+// Map a w_tiles x h_tiles OBJ to a hardware (shape,size). Returns false if the GBA has no
+// such OBJ shape — those sprites are rejected in every build (honest hardware limit).
+bool obj_shape_size(uint8_t w, uint8_t h, uint16_t& shape, uint16_t& size) {
+    struct E { uint8_t w, h, shape, size; };
+    static const E kT[] = {
+        {1,1,0,0},{2,2,0,1},{4,4,0,2},{8,8,0,3},   // square
+        {2,1,1,0},{4,1,1,1},{4,2,1,2},{8,4,1,3},   // horizontal
+        {1,2,2,0},{1,4,2,1},{2,4,2,2},{4,8,2,3},   // vertical
+    };
+    for (const E& e : kT) if (e.w == w && e.h == h) { shape = e.shape; size = e.size; return true; }
+    return false;
+}
+
 class GbaPpuBackend final : public IRenderBackend {
 public:
     void init(phx_gfx* gfx, ArenaAllocator& a, const Caps& caps) {
-        gfx_     = gfx;
-        tiles_   = a.alloc_array<PpuTile>(kTileCap);
-        tex_     = a.alloc_array<TexRec>(kMaxTextures);
-        free_    = a.alloc_array<TextureId>(kMaxTextures);
-        maps_    = a.alloc_array<MapRec>(kMaxTilemaps);
-        bg_map_  = a.alloc_array<PpuScreenEntry>(kMapCap);
-        oam_     = a.alloc_array<PpuObj>(kObjMax);
+        gfx_       = gfx;
+        tiles_     = a.alloc_array<PpuTile>(kTileCap);
+        tile_bank_ = a.alloc_array<uint8_t>(kTileCap);
+        obj_tiles_ = a.alloc_array<PpuTile>(kObjTileCap);
+        tex_       = a.alloc_array<TexRec>(kMaxTextures);
+        free_      = a.alloc_array<TextureId>(kMaxTextures);
+        maps_      = a.alloc_array<MapRec>(kMaxTilemaps);
+        for (int s = 0; s < kBgSlots; ++s)
+            win_[s] = a.alloc_array<PpuScreenEntry>(kBgWin * kBgWin);
+        oam_       = a.alloc_array<PpuObj>(kObjMax);
 #if !defined(PHX_GBA_HW)
         scratch_ = a.alloc_array<uint32_t>(kScreenW * kScreenH);   // compose target (host/sw tier)
 #endif
 
         // Tile 0 is the reserved fully-transparent tile (BG "empty" cells point here).
-        for (auto& p : tiles_[0].px) p = 0;
+        for (auto& r : tiles_[0].row) r = 0;
+        tile_bank_[0] = 0;
         tile_count_ = 1;
 
-        // Palette index 0 is the backdrop AND the per-tile transparent colour. Match the
-        // software reference's clear colour so headless golden images line up.
+        // Palette bank 0, index 0 is the backdrop AND every bank's transparent slot. Match
+        // the software reference's clear colour so headless golden images line up.
+        for (auto& p : palette_) p = 0;
         palette_[0] = rgba8_to_bgr555(rgba(30, 30, 46));
-        pal_count_  = 1;
 
         // The hardware OBJ ceiling is 128; respect a tighter caps budget if one is set.
         obj_limit_ = caps.max_sprites && caps.max_sprites < kObjMax ? uint16_t(caps.max_sprites)
@@ -84,9 +116,9 @@ public:
 #endif
     }
 
-    // Quantize an RGBA8 atlas into 4bpp tiles + the shared 16-colour palette. Fails (kNo-
-    // Texture) on the honest GBA constraints: non-RGBA8, non-8px-aligned, char-store full,
-    // or a >16-colour palette — exactly what would make the art unshippable on hardware.
+    // Quantize an RGBA8 atlas into 4bpp tiles + palette banks. Fails (kNoTexture) on the
+    // honest GBA constraints: non-RGBA8, non-8px-aligned, char-store full, one tile needing
+    // >15 opaque colours, or all 16 banks exhausted.
     TextureId upload_tex(const TextureDesc& d) override {
         if (d.format != PixelFormat::RGBA8 || !d.pixels)      return kNoTexture;
         if (d.width == 0 || d.height == 0)                    return kNoTexture;
@@ -96,21 +128,59 @@ public:
         const uint32_t need = uint32_t(cols) * rows;
         if (tile_count_ + need > kTileCap)                    return kNoTexture;  // char store full
 
-        const uint16_t base = tile_count_;
         const uint32_t* src = static_cast<const uint32_t*>(d.pixels);
+
+        // Pass 1: gather the texture's unique opaque colours. If they fit one bank the whole
+        // texture shares it (a requirement for OBJ use, where one OAM entry = one bank);
+        // otherwise fall back to per-tile banks (fine for BG tilesets).
+        uint16_t uniq[kPalSize]; int uniq_n = 0;
+        bool one_bank = true;
+        for (uint32_t i = 0; i < uint32_t(d.width) * d.height && one_bank; ++i) {
+            if ((src[i] >> 24) == 0) continue;
+            const uint16_t c = rgba8_to_bgr555(src[i]);
+            bool found = false;
+            for (int k = 0; k < uniq_n; ++k) if (uniq[k] == c) { found = true; break; }
+            if (found) continue;
+            if (uniq_n >= kPalSize - 1) one_bank = false;      // >15: spill to per-tile banks
+            else uniq[uniq_n++] = c;
+        }
+        int tex_bank = -1;
+        if (one_bank) {
+            tex_bank = claim_bank(uniq, uniq_n);
+            if (tex_bank < 0) return kNoTexture;               // all 16 banks exhausted
+        }
+
+        // Pass 2: encode each 8×8 tile (per-tile bank claim when the texture spilled).
+        const uint16_t base = tile_count_;
         for (uint16_t tr = 0; tr < rows; ++tr) {
             for (uint16_t tc = 0; tc < cols; ++tc) {
                 PpuTile& t = tiles_[base + tr * cols + tc];
+                int bank = tex_bank;
+                if (bank < 0) {                                // per-tile: gather + claim
+                    uint16_t tu[kPalSize]; int tn = 0;
+                    for (int y = 0; y < kTile; ++y)
+                        for (int x = 0; x < kTile; ++x) {
+                            const uint32_t texel = src[(tr * kTile + y) * d.width + (tc * kTile + x)];
+                            if ((texel >> 24) == 0) continue;
+                            const uint16_t c = rgba8_to_bgr555(texel);
+                            bool found = false;
+                            for (int k = 0; k < tn; ++k) if (tu[k] == c) { found = true; break; }
+                            if (found) continue;
+                            if (tn >= kPalSize - 1) return kNoTexture;   // >15 colours in ONE tile
+                            tu[tn++] = c;
+                        }
+                    bank = claim_bank(tu, tn);
+                    if (bank < 0) return kNoTexture;
+                }
                 for (int y = 0; y < kTile; ++y) {
+                    t.row[y] = 0;
                     for (int x = 0; x < kTile; ++x) {
-                        uint32_t texel = src[(tr * kTile + y) * d.width + (tc * kTile + x)];
-                        int idx;
-                        if ((texel >> 24) == 0) idx = 0;             // alpha 0 -> transparent
-                        else if (!intern_colour(texel, idx))         // palette overflow
-                            return kNoTexture;
-                        t.px[y * kTile + x] = uint8_t(idx);
+                        const uint32_t texel = src[(tr * kTile + y) * d.width + (tc * kTile + x)];
+                        if ((texel >> 24) == 0) continue;      // alpha 0 -> nibble 0
+                        ppu_tile_set(t, x, y, bank_slot(uint8_t(bank), rgba8_to_bgr555(texel)));
                     }
                 }
+                tile_bank_[base + tr * cols + tc] = uint8_t(bank);
             }
         }
         tile_count_ += uint16_t(need);
@@ -119,7 +189,8 @@ public:
         if (free_n_ > 0)                    id = free_[--free_n_];
         else if (tex_n_ < kMaxTextures)    id = tex_n_++;
         else                               return kNoTexture;
-        tex_[id] = TexRec{ base, cols, rows, true };
+        tex_[id] = TexRec{ base, cols, rows, true,
+                           tex_bank >= 0 ? uint8_t(tex_bank) : kBankNone };
         return id;
     }
 
@@ -148,75 +219,130 @@ public:
         // deliberately NOT applied: a text-BG + plain OBJ can't scale, so zoom would need the
         // affine BG/OBJ path (Mode-1/2 + REG_BGxPA.., a per-scanline matrix) — the opt-in 2.5D
         // route in docs/03 §4, out of the MVP. The PPU renders 1:1; cam.zoom is ignored here.
-        cam_x_  = s_to_int(cam.pos.x);
-        cam_y_  = s_to_int(cam.pos.y);
-        obj_n_  = 0;
-        st_.bg_enabled = false;
-        stats_  = RenderStats{};
+        cam_x_ = s_to_int(cam.pos.x);
+        cam_y_ = s_to_int(cam.pos.y);
+        obj_n_ = 0;
+        obj_tile_n_ = 0;
+        slot_n_ = 0;
+        for (int s = 0; s < kBgSlots; ++s) st_.bg[s].enabled = false;
+        stats_ = RenderStats{};
     }
 
-    // A text-BG layer -> screen entries. The PPU's BG tiles are 8x8; tile_w/h must be 8
-    // (an honest hardware limit). Cell value is tileIndex+1 (0 = empty -> transparent
-    // tile 0). Only one BG layer is modelled (GBA has 4; multi-BG parallax is follow-up).
+    // One draw call = one of the PPU's four text backgrounds, in painter order (first call
+    // is the furthest back). The camera-visible part of the (arbitrarily large) source map
+    // is streamed into the slot's 32×32 screenblock window; the raw scroll goes to HOFS/VOFS
+    // and both the model and the silicon wrap at 256 px. Tiles must be 8×8 (hardware BG size);
+    // a fifth layer in one frame is ignored (the machine has four backgrounds — honest limit).
+    //
+    // DIRTY-TRACKED: the window content is a pure function of (layer cells, window tile
+    // origin) — fine scroll within a tile only moves HOFS/VOFS. Re-streaming all four layers
+    // every frame (~2800 cells + the matching VRAM push) was ~half the ARM7 frame budget, for
+    // windows that are byte-identical most frames (parallax layers shift origin only every
+    // 8/factor camera px). Skip the stream on a cache hit; `win_stamp_` tells the hardware
+    // push which screenblocks actually changed. Map cell data is immutable (baked assets), so
+    // the cells pointer + origin is a sound key.
     void draw_tilemap(TilemapId id, uint8_t layer) override {
         if (id >= map_n_) return;
         const MapRec& m = maps_[id];
         if (layer >= m.layers || m.tw != kTile || m.th != kTile) return;
         if (m.tileset >= tex_n_ || !tex_[m.tileset].used)        return;
-        if (uint32_t(m.w) * m.h > kMapCap)                       return;
+        if (slot_n_ >= kBgSlots)                                 return;
         const TexRec& ts = tex_[m.tileset];
         const uint16_t* cells = m.idx + size_t(layer) * size_t(m.w) * size_t(m.h);
+        const int slot = slot_n_++;
+        PpuScreenEntry* win = win_[slot];
 
-        for (uint32_t i = 0; i < uint32_t(m.w) * m.h; ++i) {
-            uint16_t c = cells[i];
-            if (c == 0) { bg_map_[i] = PpuScreenEntry{ 0, 0 }; continue; }  // empty -> clear
-            uint16_t tindex = uint16_t(c - 1);
-            if (tindex >= ts.cols * ts.rows) { bg_map_[i] = PpuScreenEntry{ 0, 0 }; continue; }
-            bg_map_[i] = PpuScreenEntry{ uint16_t(ts.base + tindex), 0 };
-            ++stats_.tiles_drawn;
+        const int eff_x = m.scroll_x + cam_x_;
+        const int eff_y = m.scroll_y + cam_y_;
+        // The screen samples at most 31×21 cells from the wrapped window; stream 32×22 so
+        // fine scroll never reads a stale edge. (kScreenW/kTile+1 = 31, kScreenH/kTile+1 = 21.)
+        const int tx0 = floor_div(eff_x, kTile), ty0 = floor_div(eff_y, kTile);
+        if (win_cells_[slot] == cells && win_tx0_[slot] == tx0 && win_ty0_[slot] == ty0
+            && win_base_[slot] == ts.base) {
+            stats_.tiles_drawn += win_tiles_[slot];   // same window content: stream skipped
+        } else {
+            uint32_t streamed = 0;
+            for (int ty = ty0; ty < ty0 + kScreenH / kTile + 2; ++ty) {
+                const bool yin = ty >= 0 && ty < int(m.h);
+                PpuScreenEntry* row = win + size_t(ty & (kBgWin - 1)) * kBgWin;
+                for (int tx = tx0; tx < tx0 + kBgWin; ++tx) {
+                    PpuScreenEntry e{ 0, 0, 0 };
+                    if (yin && tx >= 0 && tx < int(m.w)) {
+                        const uint16_t c = cells[size_t(ty) * m.w + tx];
+                        if (c != 0 && uint32_t(c - 1) < uint32_t(ts.cols) * ts.rows) {
+                            e.tile = uint16_t(ts.base + c - 1);
+                            e.bank = tile_bank_[e.tile];
+                            ++streamed;
+                        }
+                    }
+                    row[tx & (kBgWin - 1)] = e;
+                }
+            }
+            stats_.tiles_drawn += streamed;
+            win_cells_[slot] = cells; win_tx0_[slot] = tx0; win_ty0_[slot] = ty0;
+            win_base_[slot] = ts.base; win_tiles_[slot] = streamed;
+            ++win_stamp_[slot];
         }
-        st_.bg_map     = bg_map_;
-        st_.bg_w       = m.w;
-        st_.bg_h       = m.h;
-        st_.scroll_x   = m.scroll_x + cam_x_;
-        st_.scroll_y   = m.scroll_y + cam_y_;
-        st_.bg_enabled = true;
+        st_.bg[slot].win      = win;
+        st_.bg[slot].scroll_x = eff_x;
+        st_.bg[slot].scroll_y = eff_y;
+        st_.bg[slot].enabled  = true;
     }
 
-    // Sprites -> OAM (OBJ). Source rect must be 8px-aligned; dest scaling and per-channel
-    // tint are not expressible on plain OBJ (would need affine / there is no RGB tint on
-    // the GBA), so they are ignored here — honest hardware behaviour. Beyond the OBJ ceiling
-    // sprites are dropped and counted, matching the front-end's graceful-overflow contract.
+    // Sprites -> OAM (OBJ) + a contiguous per-frame OBJ tile run. Source rects must be
+    // 8px-aligned and map to a real hardware OBJ shape; each OBJ indexes ONE palette bank
+    // (per-tile-banked textures are BG-only). Dest scaling and per-channel tint are not
+    // expressible on plain OBJ, so they are ignored — honest hardware behaviour. Beyond the
+    // OBJ or tile-run ceilings sprites are dropped and counted (graceful overflow).
     void submit_sprites(const DrawSprite* s, uint32_t n) override {
         for (uint32_t i = 0; i < n; ++i) {
             const DrawSprite& d = s[i];
             if (d.tex >= tex_n_ || !tex_[d.tex].used)        continue;
             if ((d.sw % kTile) || (d.sh % kTile) || d.sw <= 0 || d.sh <= 0) continue;
-            if (obj_n_ >= obj_limit_) { ++stats_.sprites_dropped; continue; }
+            if ((d.sx % kTile) || (d.sy % kTile) || d.sx < 0 || d.sy < 0)   continue;
             const TexRec& t = tex_[d.tex];
+            const uint8_t wt = uint8_t(d.sw / kTile), ht = uint8_t(d.sh / kTile);
+            uint16_t shape, size;
+            if (!obj_shape_size(wt, ht, shape, size))        continue;  // no such OBJ shape
+            if (t.bank == kBankNone)                         continue;  // per-tile banks: BG-only
+            if (obj_n_ >= obj_limit_ || obj_tile_n_ + uint32_t(wt) * ht > kObjTileCap) {
+                ++stats_.sprites_dropped;
+                continue;
+            }
             const uint16_t tc = uint16_t(d.sx / kTile), tr = uint16_t(d.sy / kTile);
+            if (tr + ht > t.rows || tc + wt > t.cols)        continue;  // rect outside atlas
+
+            // Re-pack the sprite's atlas tiles into the 1D run OAM can address.
+            const uint16_t run = obj_tile_n_;
+            for (uint8_t ry = 0; ry < ht; ++ry)
+                for (uint8_t rx = 0; rx < wt; ++rx)
+                    obj_tiles_[run + ry * wt + rx] =
+                        tiles_[t.base + (tr + ry) * t.cols + (tc + rx)];
+            obj_tile_n_ = uint16_t(run + wt * ht);
+
             PpuObj& o = oam_[obj_n_++];
             o.x       = int16_t(s_to_int(d.pos.x) - cam_x_);
             o.y       = int16_t(s_to_int(d.pos.y) - cam_y_);
-            o.tile    = uint16_t(t.base + tr * t.cols + tc);
-            o.w_tiles = uint8_t(d.sw / kTile);
-            o.h_tiles = uint8_t(d.sh / kTile);
-            o.stride  = t.cols;
+            o.tile    = run;
+            o.w_tiles = wt;
+            o.h_tiles = ht;
             o.flip    = uint8_t(((d.flags & kFlipX) ? 1 : 0) | ((d.flags & kFlipY) ? 2 : 0));
+            o.bank    = t.bank;
         }
         ++stats_.batches;
     }
 
     void end() override {
         st_.tiles     = tiles_;
+        st_.obj_tiles = obj_tiles_;
         st_.palette   = palette_;
         st_.oam       = oam_;
         st_.obj_count = obj_n_;
 
 #if defined(PHX_GBA_HW)
-        // Real hardware: program the PPU (tiles->VRAM, palette->PALRAM, map->screenblock,
-        // OBJ->OAM, Mode-0 DISPCNT) and let the silicon scan it out. `ppu_compose` (the else
-        // branch) is the exact golden definition of the frame this must produce.
+        // Real hardware: program the PPU (tiles/palette incrementally, windows/OAM/OBJ tiles
+        // per frame) and let the silicon scan it out. `ppu_compose` (the else branch) is the
+        // exact golden definition of the frame this must produce.
         submit_hardware();
 #else
         // Headless / software-tier present: compose exactly what the PPU would scan out.
@@ -239,113 +365,147 @@ public:
 private:
 #if defined(PHX_GBA_HW)
     // Push the built model into the PPU's memory-mapped state. VRAM/PALRAM/OAM forbid 8-bit
-    // writes, so everything goes out as 16-/32-bit units. Layout: BG charblock 0 @0x06000000
-    // holds the 4bpp tiles; the same tiles are duplicated into OBJ tile VRAM @0x06010000
-    // (OBJ addressing is separate); the text BG map lives in screenblock 24 @0x0600C000 (well
-    // clear of the tile data for our scenes); one shared 16-colour palette goes to both the BG
-    // and OBJ palette banks (the model uses a single palette for tiles + sprites).
+    // writes, so everything goes out as 16-/32-bit units. Layout: BG charblocks 0–1
+    // @0x06000000 hold the (packed 4bpp) BG tiles; the four screenblock windows live in
+    // blocks 24–27 @0x0600C000 (tile index 768+, clear of kTileCap=512); the per-frame OBJ
+    // tile run goes to OBJ char VRAM @0x06010000; the 16 palette banks go to both the BG and
+    // OBJ palette RAM (the model shares one bank table for tiles and sprites).
     void submit_hardware() {
         volatile uint16_t* const PAL_BG   = reinterpret_cast<volatile uint16_t*>(0x05000000);
         volatile uint16_t* const PAL_OBJ  = reinterpret_cast<volatile uint16_t*>(0x05000200);
         volatile uint32_t* const CHAR_BG  = reinterpret_cast<volatile uint32_t*>(0x06000000);
         volatile uint32_t* const CHAR_OBJ = reinterpret_cast<volatile uint32_t*>(0x06010000);
-        volatile uint16_t* const SCRBLK   = reinterpret_cast<volatile uint16_t*>(0x0600C000);
         volatile uint16_t* const OAM      = reinterpret_cast<volatile uint16_t*>(0x07000000);
         volatile uint16_t* const DISPCNT  = reinterpret_cast<volatile uint16_t*>(0x04000000);
-        volatile uint16_t* const BG0CNT   = reinterpret_cast<volatile uint16_t*>(0x04000008);
-        volatile uint16_t* const BG0HOFS  = reinterpret_cast<volatile uint16_t*>(0x04000010);
-        volatile uint16_t* const BG0VOFS  = reinterpret_cast<volatile uint16_t*>(0x04000012);
-        constexpr uint16_t kScreenblock = 24;     // 0x0600C000 = VRAM base + 24*0x800
+        volatile uint16_t* const BGCNT    = reinterpret_cast<volatile uint16_t*>(0x04000008);
+        volatile uint16_t* const BGOFS    = reinterpret_cast<volatile uint16_t*>(0x04000010);
+        constexpr uint16_t kScreenblock0 = 24;    // 0x0600C000 = VRAM base + 24*0x800
 
-        // palette -> BG bank 0 + OBJ bank 0
-        for (int i = 0; i < kPalSize; ++i) { PAL_BG[i] = palette_[i]; PAL_OBJ[i] = palette_[i]; }
-
-        // tiles -> BG charblock 0 AND OBJ tile VRAM, packed 4bpp (2 px/byte, low nibble = left)
-        for (uint16_t t = 0; t < tile_count_; ++t) {
-            const uint8_t* px = tiles_[t].px;
-            for (int r = 0; r < kTile; ++r) {
-                uint32_t row = 0;
-                for (int c = 0; c < kTile; ++c) row |= uint32_t(px[r * kTile + c] & 0xF) << (c * 4);
-                CHAR_BG [t * 8 + r] = row;        // 8 words = 32 bytes per 4bpp tile
-                CHAR_OBJ[t * 8 + r] = row;
-            }
+        // palette + BG tiles grow only at load time: push just what's new since last frame.
+        if (pal_pushed_ < pal_stamp_) {
+            for (int i = 0; i < kPalTotal; ++i) { PAL_BG[i] = palette_[i]; PAL_OBJ[i] = palette_[i]; }
+            pal_pushed_ = pal_stamp_;
         }
+        for (; tiles_pushed_ < tile_count_; ++tiles_pushed_)
+            for (int r = 0; r < kTile; ++r)
+                CHAR_BG[tiles_pushed_ * 8 + r] = tiles_[tiles_pushed_].row[r];
 
-        // text BG map -> screenblock (32x32). Clear first; our scenes fit within 32x32 cells.
-        for (int i = 0; i < 32 * 32; ++i) SCRBLK[i] = 0;
-        if (st_.bg_enabled && bg_map_) {
-            const int w = st_.bg_w < 32 ? st_.bg_w : 32;
-            const int h = st_.bg_h < 32 ? st_.bg_h : 32;
-            for (int y = 0; y < h; ++y)
-                for (int x = 0; x < w; ++x) {
-                    const PpuScreenEntry& e = bg_map_[y * st_.bg_w + x];
-                    uint16_t se = uint16_t(e.tile & 0x3FF);
-                    if (e.flip & 1) se |= 1u << 10;          // H flip
-                    if (e.flip & 2) se |= 1u << 11;          // V flip
-                    SCRBLK[y * 32 + x] = se;                 // palbank 0
+        // per-frame OBJ tile run (packed 4bpp words, straight copy)
+        for (uint16_t t = 0; t < obj_tile_n_; ++t)
+            for (int r = 0; r < kTile; ++r)
+                CHAR_OBJ[t * 8 + r] = obj_tiles_[t].row[r];
+
+        // the four windows: pack entries into hardware screen entries. Slot 0 is furthest
+        // back -> lowest BG priority value wins in front, so slot s gets priority 3-s.
+        // Screenblocks are only rewritten when draw_tilemap actually re-streamed the window
+        // (win_stamp_ advanced) — VRAM retains the previous content, so an unchanged window
+        // costs zero writes. Scroll registers are per-frame (fine scroll moves every frame).
+        uint16_t bg_enable = 0;
+        for (int s = 0; s < kBgSlots; ++s) {
+            if (!st_.bg[s].enabled) continue;
+            bg_enable |= uint16_t(1u << (8 + s));
+            if (win_pushed_[s] != win_stamp_[s]) {
+                volatile uint16_t* blk =
+                    reinterpret_cast<volatile uint16_t*>(0x06000000 + (kScreenblock0 + s) * 0x800);
+                const PpuScreenEntry* w = win_[s];
+                for (int i = 0; i < kBgWin * kBgWin; ++i) {
+                    const PpuScreenEntry& e = w[i];
+                    blk[i] = uint16_t((e.tile & 0x3FF)
+                                      | ((e.flip & 1) ? (1u << 10) : 0)
+                                      | ((e.flip & 2) ? (1u << 11) : 0)
+                                      | (uint16_t(e.bank & 0xF) << 12));
                 }
+                win_pushed_[s] = win_stamp_[s];
+            }
+            // 4bpp, char base 0, 32×32, screenblock 24+s, priority 3-s
+            BGCNT[s]        = uint16_t(uint16_t(3 - s) | (uint16_t(kScreenblock0 + s) << 8));
+            BGOFS[s * 2]     = uint16_t(st_.bg[s].scroll_x);
+            BGOFS[s * 2 + 1] = uint16_t(st_.bg[s].scroll_y);
         }
 
         // OBJ -> OAM (4 halfwords/entry; 4th is affine, unused). Hide all, then emit ours.
+        // The model paints oam_[] in painter order (LATER entries on top), but the silicon
+        // gives LOWER OAM indices priority — so write the list reversed to match ppu_compose.
         for (int i = 0; i < kObjMax; ++i) OAM[i * 4 + 0] = 0x0200;   // attr0 bit9 = disabled
         for (uint16_t i = 0; i < obj_n_; ++i) {
             const PpuObj& o = oam_[i];
             uint16_t shape, size;
-            if (!obj_shape_size(o.w_tiles, o.h_tiles, shape, size)) continue;  // unmappable -> skip
-            if (o.h_tiles > 1 && o.stride != o.w_tiles)             continue;  // not 1D-contiguous
-            const uint16_t a0 = uint16_t((uint16_t(o.y) & 0xFF) | (shape << 14));      // 16-col, normal
+            if (!obj_shape_size(o.w_tiles, o.h_tiles, shape, size)) continue;  // pre-validated
+            const uint16_t a0 = uint16_t((uint16_t(o.y) & 0xFF) | (shape << 14));  // 16-col, normal
             const uint16_t a1 = uint16_t((uint16_t(o.x) & 0x1FF)
-                                         | ((o.flip & 1) ? (1u << 12) : 0)              // H flip
-                                         | ((o.flip & 2) ? (1u << 13) : 0)             // V flip
+                                         | ((o.flip & 1) ? (1u << 12) : 0)          // H flip
+                                         | ((o.flip & 2) ? (1u << 13) : 0)         // V flip
                                          | (size << 14));
-            const uint16_t a2 = uint16_t(o.tile & 0x3FF);          // priority 0, palbank 0
-            OAM[i * 4 + 0] = a0; OAM[i * 4 + 1] = a1; OAM[i * 4 + 2] = a2;
+            const uint16_t a2 = uint16_t((o.tile & 0x3FF)                          // priority 0
+                                         | (uint16_t(o.bank & 0xF) << 12));
+            const uint16_t slot = uint16_t(obj_n_ - 1 - i);
+            OAM[slot * 4 + 0] = a0; OAM[slot * 4 + 1] = a1; OAM[slot * 4 + 2] = a2;
         }
 
-        // BG0: charblock 0 (bits2-3=0), screenblock 24 (bits8-12), 4bpp, 32x32 (size 0).
-        *BG0HOFS = uint16_t(st_.scroll_x);
-        *BG0VOFS = uint16_t(st_.scroll_y);
-        *BG0CNT  = uint16_t(kScreenblock << 8);
-        // Mode 0 | BG0 on (bit8) | OBJ on (bit12) | 1D OBJ tile mapping (bit6).
-        *DISPCNT = uint16_t((1u << 8) | (1u << 12) | (1u << 6));
-    }
-
-    // Map a w_tiles x h_tiles OBJ to a hardware (shape,size). Returns false if the GBA has no
-    // such OBJ shape (those sprites are skipped — an honest hardware limit).
-    static bool obj_shape_size(uint8_t w, uint8_t h, uint16_t& shape, uint16_t& size) {
-        struct E { uint8_t w, h, shape, size; };
-        static const E kT[] = {
-            {1,1,0,0},{2,2,0,1},{4,4,0,2},{8,8,0,3},   // square
-            {2,1,1,0},{4,1,1,1},{4,2,1,2},{8,4,1,3},   // horizontal
-            {1,2,2,0},{1,4,2,1},{2,4,2,2},{4,8,2,3},   // vertical
-        };
-        for (const E& e : kT) if (e.w == w && e.h == h) { shape = e.shape; size = e.size; return true; }
-        return false;
+        // Mode 0 | enabled BGs | OBJ on (bit12) | 1D OBJ tile mapping (bit6).
+        *DISPCNT = uint16_t(bg_enable | (1u << 12) | (1u << 6));
     }
 #endif // PHX_GBA_HW
 
-    // Find `texel`'s BGR555 colour in the palette, or add it. Returns false if the palette
-    // is full (the >16-colour GBA limit). idx is set to the 1..15 palette slot on success.
-    bool intern_colour(uint32_t texel, int& idx) {
-        uint16_t c = rgba8_to_bgr555(texel);
-        for (int i = 1; i < pal_count_; ++i)
-            if (palette_[i] == c) { idx = i; return true; }
-        if (pal_count_ >= kPalSize) return false;     // > 16 colours: unshippable on GBA
-        palette_[pal_count_] = c;
-        idx = pal_count_++;
-        return true;
+    // Claim a palette bank able to hold all `n` colours (absorbing the missing ones), or -1
+    // when every bank is full — the honest 16×15-colour ceiling. Greedy first fit keeps
+    // similar textures sharing banks.
+    int claim_bank(const uint16_t* cols, int n) {
+        for (int b = 0; b < kPalBanks; ++b) {
+            int missing = 0;
+            for (int k = 0; k < n; ++k) {
+                bool found = false;
+                for (int s = 1; s <= bank_n_[b]; ++s)
+                    if (palette_[b * kPalSize + s] == cols[k]) { found = true; break; }
+                if (!found) ++missing;
+            }
+            if (bank_n_[b] + missing > kPalSize - 1) continue;
+            for (int k = 0; k < n; ++k) {                       // absorb the missing colours
+                bool found = false;
+                for (int s = 1; s <= bank_n_[b]; ++s)
+                    if (palette_[b * kPalSize + s] == cols[k]) { found = true; break; }
+                if (!found) { palette_[b * kPalSize + (++bank_n_[b])] = cols[k]; ++pal_stamp_; }
+            }
+            return b;
+        }
+        return -1;
+    }
+
+    // Slot of `c` within bank `b` (1..15). Colours were interned by claim_bank, so this hits.
+    uint8_t bank_slot(uint8_t b, uint16_t c) const {
+        for (int s = 1; s <= bank_n_[b]; ++s)
+            if (palette_[b * kPalSize + s] == c) return uint8_t(s);
+        return 0;   // unreachable for interned colours; 0 keeps it visibly transparent
     }
 
     phx_gfx*   gfx_ = nullptr;
-    PpuTile*   tiles_ = nullptr;  uint16_t tile_count_ = 0;
-    uint16_t   palette_[kPalSize] = {};  int pal_count_ = 0;
-    TexRec*    tex_ = nullptr;    uint16_t tex_n_ = 0;
+    PpuTile*   tiles_     = nullptr;  uint16_t tile_count_ = 0;
+    uint8_t*   tile_bank_ = nullptr;
+    PpuTile*   obj_tiles_ = nullptr;  uint16_t obj_tile_n_ = 0;
+    uint16_t   palette_[kPalTotal] = {};
+    uint8_t    bank_n_[kPalBanks]  = {};   // colours interned per bank (excluding slot 0)
+    uint32_t   pal_stamp_ = 1;             // bumped on every interned colour (dirty tracking)
+    TexRec*    tex_  = nullptr;   uint16_t tex_n_  = 0;
     TextureId* free_ = nullptr;   uint16_t free_n_ = 0;
-    MapRec*    maps_ = nullptr;   uint16_t map_n_ = 0;
-    PpuScreenEntry* bg_map_ = nullptr;
+    MapRec*    maps_ = nullptr;   uint16_t map_n_  = 0;
+    PpuScreenEntry* win_[kBgSlots] = {};
+    // Per-slot window cache: the layer streamed into the slot and its tile origin (the full
+    // key of the window's content), the non-empty cell count (for stats on a cache hit), and
+    // a change stamp the hardware push compares against to skip unchanged screenblocks.
+    const uint16_t* win_cells_[kBgSlots] = {};
+    int        win_tx0_[kBgSlots] = {}, win_ty0_[kBgSlots] = {};
+    uint16_t   win_base_[kBgSlots] = {};   // tileset char-store base (guards id recycling)
+    uint32_t   win_tiles_[kBgSlots] = {};
+    uint16_t   win_stamp_[kBgSlots] = { 1, 1, 1, 1 };
+    uint8_t    slot_n_ = 0;
     PpuObj*    oam_ = nullptr;    uint16_t obj_n_ = 0, obj_limit_ = kObjMax;
     uint32_t*  scratch_ = nullptr;
     int32_t    cam_x_ = 0, cam_y_ = 0;
+#if defined(PHX_GBA_HW)
+    uint16_t   tiles_pushed_ = 0;
+    uint32_t   pal_pushed_   = 0;
+    uint16_t   win_pushed_[kBgSlots] = {};   // last win_stamp_ written to each screenblock
+#endif
     PpuState   st_{};
     RenderStats stats_{};
 };

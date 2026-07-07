@@ -166,6 +166,46 @@ PLATGL_SRC := $(filter-out engine/platform/src/null/null_platform.cpp \
               engine/platform/src/sdl/sdl_platform.cpp \
               engine/render/src/gl/gl_backend.cpp
 
+# The emberwing binary: the SECOND full-game capstone (examples/emberwing — the Cinder
+# Hollow vertical slice), driven headlessly by a scripted controller. Exercises everything
+# the platformer does PLUS parallax layers, the audio command queue, three enemy behaviours,
+# checkpoints and the goal/clear flow. Its test includes the example's headers by relative
+# path (both examples define a `bake.h`, so the include-path order must not pick one).
+EMBERWING_SRC := $(APP_SRC) \
+                 engine/resource/src/cache.cpp \
+                 engine/audio/src/mixer.cpp \
+                 examples/emberwing/src/systems.cpp \
+                 examples/emberwing/src/scenes.cpp \
+                 tests/emberwing_test.cpp
+EMBERWING_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(EMBERWING_SRC))
+EMBERWING     := $(BUILD)/phx_emberwing
+
+# The same full game over the GBA-native PPU backend (quantize -> 4bpp palette banks, four
+# streamed text BGs, OAM) — the headless twin of the `gba-emberwing-ppu` ROM. Proves the
+# whole vertical slice composes on the GBA hardware model, not just the soft reference.
+EMBERWING_PPU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/gba/gba_ppu.cpp,$(EMBERWING_SRC))
+EMBERWING_PPU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(EMBERWING_PPU_SRC))
+EMBERWING_PPU     := $(BUILD)/phx_emberwing_ppu
+
+# The production emberwing binary (real main; loops on the null backend — link proof only).
+EWAPP_SRC := $(APP_SRC) \
+             engine/resource/src/cache.cpp \
+             engine/audio/src/mixer.cpp \
+             examples/emberwing/src/systems.cpp \
+             examples/emberwing/src/scenes.cpp \
+             examples/emberwing/src/main.cpp
+EWAPP_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(EWAPP_SRC))
+EWAPP     := $(BUILD)/emberwing_app
+
+# Windowed emberwing: SDL platform + the desktop entry that opens the REAL audio device
+# (the SDL audio thread drains the game's command queue — docs/10 §2 discipline).
+EWSDL_SRC := $(filter-out engine/platform/src/null/null_platform.cpp \
+                          examples/emberwing/src/main.cpp,$(EWAPP_SRC)) \
+             engine/platform/src/sdl/sdl_platform.cpp \
+             examples/emberwing/src/desktop_main.cpp
+EWGL_SRC  := $(filter-out engine/render/src/soft/soft_renderer.cpp,$(EWSDL_SRC)) \
+             engine/render/src/gl/gl_backend.cpp
+
 # The resource binary: bake a bundle -> mount through the seam -> render from it.
 RESOURCE_SRC := engine/core/src/assert.cpp \
                 engine/core/src/fixed.cpp \
@@ -291,16 +331,16 @@ GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/
             $(patsubst tests/render_test.cpp,tests/gu_test.cpp,$(RENDER_SRC)))
 GU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(GU_SRC))
 
-.PHONY: test smoke render ppu gu playable physics anim scene ui platformer sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu psp psp-platformer psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck
+.PHONY: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck
 
-# Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstone + audio + resource + dep gate.
-check: test smoke render ppu gu playable physics anim scene ui platformer audio texcache png sprite tiled resource phxpack pipeline tools depcheck
+# Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstones + audio + resource + dep gate.
+check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu audio texcache png sprite tiled resource phxpack pipeline tools depcheck
 
 # --- M7 release gates --------------------------------------------------------------------------
 # Determinism gate: the SAME suites under scalar=float (pc) and scalar=fixed16 (gba_sim) must
 # print identical outcomes AND render the byte-identical frame. Cheap to run: the per-tier
 # object dirs mean the second tier is mostly relinks. This is a named release gate (docs/09 §5).
-DET_SUITES := test render ppu gu physics anim scene ui platformer
+DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu
 determinism:
 	@echo "determinism gate: pc (scalar=float) vs gba_sim (scalar=fixed16)"
 	@$(MAKE) -s $(DET_SUITES) TIER=pc      | grep -aE "PASS|FAIL" > $(BUILD)/det-pc.log
@@ -353,6 +393,28 @@ ui: $(UI)
 
 platformer: $(PLATFORMER)
 	@./$(PLATFORMER)
+
+emberwing: $(EMBERWING)
+	@./$(EMBERWING)
+
+emberwing-ppu: $(EMBERWING_PPU)
+	@./$(EMBERWING_PPU)
+
+# Build the windowed Emberwing (SDL software render + live audio device). Not part of `check`.
+emberwing-sdl:
+	@command -v sdl2-config >/dev/null 2>&1 || { echo "SDL build needs SDL2 (sdl2-config not found). Install libsdl2-dev."; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
+	  $(EWSDL_SRC) `sdl2-config --libs` -o $(BUILD)/emberwing_sdl
+	@echo "built $(BUILD)/emberwing_sdl  —  run ./$(BUILD)/emberwing_sdl (arrows move, Z=jump, Enter=start)"
+
+# The same windowed Emberwing through the OpenGL backend. Needs SDL2 + libGL.
+emberwing-gl:
+	@command -v sdl2-config >/dev/null 2>&1 || { echo "GL build needs SDL2 + libGL (sdl2-config not found)."; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL -DPHX_HAVE_GL $(INCLUDES) `sdl2-config --cflags` \
+	  $(EWGL_SRC) `sdl2-config --libs` -lGL -o $(BUILD)/emberwing_gl
+	@echo "built $(BUILD)/emberwing_gl  —  GPU-rendered window (software backend stays the golden ref)"
 
 # Build the windowed SDL example (not run automatically — it opens a window).
 sdl:
@@ -526,6 +588,26 @@ GBA_PLAT_PPU_SRC := $(filter-out engine/render/src/soft/soft_renderer.cpp \
                     engine/render/src/gba/gba_ppu.cpp examples/platformer/src/gba_ppu_main.cpp
 GBA_PLAT_PPU_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GBA_PLAT_PPU_SRC))
 
+# Emberwing (examples/emberwing) as a GBA ROM: same engine set as the platformer ROM, the
+# game's own systems/scenes/entry swapped in. Software render tier — the PPU backend models
+# one 32x32-cell BG, and Cinder Hollow is a 320x20 4-layer parallax map (see the example's
+# README §1). Audio is real: gba_main starts the DirectSound pump at 18157 Hz (vblank-locked).
+GBA_EW_SRC := $(filter-out examples/platformer/src/systems.cpp \
+                           examples/platformer/src/gba_main.cpp,$(GBA_PLAT_SRC)) \
+              examples/emberwing/src/systems.cpp examples/emberwing/src/scenes.cpp \
+              examples/emberwing/src/gba_main.cpp
+GBA_EW_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GBA_EW_SRC))
+EWBAKE     := $(BUILD)/ewbake
+
+# Emberwing on the NATIVE PPU (the shipping GBA configuration): swap the soft rasterizer for
+# the PPU backend + the native-resolution entry. The CPU stops rasterizing entirely — the
+# silicon scans out four streamed text BGs + OAM — which restores the frame budget and, with
+# it, an unstarved 18157 Hz DirectSound stream.
+GBA_EW_PPU_SRC := $(filter-out engine/render/src/soft/soft_renderer.cpp \
+                               examples/emberwing/src/gba_main.cpp,$(GBA_EW_SRC)) \
+                  engine/render/src/gba/gba_ppu.cpp examples/emberwing/src/gba_ppu_main.cpp
+GBA_EW_PPU_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GBA_EW_PPU_SRC))
+
 gba: $(BUILD)/gba/phx-smoke.gba
 	@echo "built $<  —  load in mGBA (d-pad moves the sprite)"
 
@@ -544,6 +626,14 @@ gba-platformer: $(BUILD)/gba/phx-platformer.gba
 # The full platformer rendered by the native PPU hardware backend (Mode-0 tiles + OBJ).
 gba-platformer-ppu: $(BUILD)/gba/phx-platformer-ppu.gba
 	@echo "built $<  —  full game on the GBA PPU (Mode-0 tiles + OBJ); load in mGBA"
+
+# Bake the Emberwing bundle (tier 0), embed it in ROM, and build the playable ROM.
+gba-emberwing: $(BUILD)/gba/phx-emberwing.gba
+	@echo "built $<  —  SOFTWARE render tier (slow; kept as the rasterizer reference on-device)"
+
+# Emberwing on the PPU hardware backend — the GBA build to actually play.
+gba-emberwing-ppu: $(BUILD)/gba/phx-emberwing-ppu.gba
+	@echo "built $<  —  native PPU (Mode-0 BGs + OBJ); load in mGBA (arrows move, A/X jump, Start = pause)"
 
 # Enforce the GBA budget (docs/09 MVP gate): classify the ELF's static sections into IWRAM/EWRAM
 # and check the ROM file size, failing if any budget is exceeded. Builds the shippable PPU ROM.
@@ -577,6 +667,32 @@ $(BUILD)/gba/phx-platformer.gba: $(GBA_PLAT_OBJ) $(BUILD)/gba/bundle.o
 $(BUILD)/gba/phx-platformer-ppu.gba: $(GBA_PLAT_PPU_OBJ) $(BUILD)/gba/bundle.o
 	$(GBA_CXX) $(GBA_FLAGS) -specs=gba.specs $^ -o $(BUILD)/gba/platformer-ppu.elf
 	$(GBA_OBJCOPY) -O binary $(BUILD)/gba/platformer-ppu.elf $@
+	$(GBA_FIX) $@ >/dev/null
+	@echo "ROM: $@ ($$(stat -c%s $@) bytes, header fixed)"
+
+# host tool that bakes the Emberwing .phxp (same importers as the host game)
+$(EWBAKE): $(HOSTOBJ)/examples/emberwing/src/bake_main.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+$(BUILD)/gba/emberwing.phxp: $(EWBAKE)
+	@mkdir -p $(dir $@)
+	./$(EWBAKE) $@ 0    # tier 0: sounds resampled to the 18157 Hz GBA device rate
+
+$(BUILD)/gba/ew_bundle.o: $(BUILD)/gba/emberwing.phxp
+	@command -v $(BIN2S) >/dev/null 2>&1 || { echo "needs devkitPro bin2s ($(BIN2S))"; exit 1; }
+	$(BIN2S) $< > $(BUILD)/gba/ew_bundle.s
+	$(GBA_CXX) $(GBA_ARCH) -x assembler-with-cpp -c $(BUILD)/gba/ew_bundle.s -o $@
+
+$(BUILD)/gba/phx-emberwing.gba: $(GBA_EW_OBJ) $(BUILD)/gba/ew_bundle.o
+	$(GBA_CXX) $(GBA_FLAGS) -specs=gba.specs $^ -o $(BUILD)/gba/emberwing.elf
+	$(GBA_OBJCOPY) -O binary $(BUILD)/gba/emberwing.elf $@
+	$(GBA_FIX) $@ >/dev/null
+	@echo "ROM: $@ ($$(stat -c%s $@) bytes, header fixed)"
+
+$(BUILD)/gba/phx-emberwing-ppu.gba: $(GBA_EW_PPU_OBJ) $(BUILD)/gba/ew_bundle.o
+	$(GBA_CXX) $(GBA_FLAGS) -specs=gba.specs $^ -o $(BUILD)/gba/emberwing-ppu.elf
+	$(GBA_OBJCOPY) -O binary $(BUILD)/gba/emberwing-ppu.elf $@
 	$(GBA_FIX) $@ >/dev/null
 	@echo "ROM: $@ ($$(stat -c%s $@) bytes, header fixed)"
 
@@ -673,12 +789,24 @@ PSP_PLAT_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core
                 examples/platformer/src/systems.cpp examples/platformer/src/psp_main.cpp
 PSP_PLAT_OBJ := $(patsubst %.cpp,$(BUILD)/psp/%.o,$(PSP_PLAT_SRC))
 
+# Emberwing as a PSP EBOOT: the platformer's engine set with the game's own TUs + entry
+# (real sceAudio device thread draining the command queue).
+PSP_EW_SRC := $(filter-out examples/platformer/src/systems.cpp \
+                           examples/platformer/src/psp_main.cpp,$(PSP_PLAT_SRC)) \
+              examples/emberwing/src/systems.cpp examples/emberwing/src/scenes.cpp \
+              examples/emberwing/src/psp_main.cpp
+PSP_EW_OBJ := $(patsubst %.cpp,$(BUILD)/psp/%.o,$(PSP_EW_SRC))
+
 psp: $(BUILD)/psp/EBOOT.PBP
 	@echo "built $<  —  run in PPSSPP / on a PSP"
 
 # Bake the bundle on the host, embed it in the EBOOT, and build the playable platformer.
 psp-platformer: $(BUILD)/psp/platformer/EBOOT.PBP
 	@echo "built $<  —  run in PPSSPP / on a PSP (arrows move, X/triangle jump, Start = menu)"
+
+# Bake the Emberwing bundle (tier 1), embed it, and build the playable EBOOT.
+psp-emberwing: $(BUILD)/psp/emberwing/EBOOT.PBP
+	@echo "built $<  —  run in PPSSPP / on a PSP (arrows move, X jump — hold for height; Start = pause)"
 
 psp-gu: $(BUILD)/psp/gu/EBOOT.PBP
 	@echo "built $<  —  PSP GU hardware backend (sceGu display list); run in PPSSPP"
@@ -689,7 +817,7 @@ psp-audio: $(BUILD)/psp/audio/EBOOT.PBP
 $(BUILD)/psp/%.o: %.cpp
 	@command -v $(PSP_CXX) >/dev/null 2>&1 || { echo "PSP build needs pspsdk ($(PSP_CXX) not found)."; exit 1; }
 	@mkdir -p $(dir $@)
-	$(PSP_CXX) $(PSP_FLAGS) $(PSP_INC) -c $< -o $@
+	$(PSP_CXX) $(PSP_FLAGS) $(PSP_INC) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
 $(BUILD)/psp/EBOOT.PBP: $(PSP_OBJ)
 	$(PSP_CXX) $(PSP_FLAGS) $(PSP_OBJ) $(PSP_LDFLAGS) $(PSP_LIBS) -o $(BUILD)/psp/smoke.elf
@@ -718,6 +846,22 @@ $(BUILD)/psp/platformer/EBOOT.PBP: $(PSP_PLAT_OBJ) $(BUILD)/psp/bundle.o
 	$(PSP_MKSFO) "Phoenix Platformer" $(BUILD)/psp/platformer/PARAM.SFO
 	$(PSP_PACK) $@ $(BUILD)/psp/platformer/PARAM.SFO NULL NULL NULL NULL NULL $(BUILD)/psp/platformer/platformer.prx NULL
 	@echo "EBOOT: $@ ($$(stat -c%s $@) bytes)"
+
+$(BUILD)/psp/emberwing.phxp: $(EWBAKE)
+	@mkdir -p $(dir $@)
+	./$(EWBAKE) $@ 1    # tier 1 (PSP)
+
+$(BUILD)/psp/ew_bundle.o: $(BUILD)/psp/emberwing.phxp
+	python3 tools/common/bin2s.py $< > $(BUILD)/psp/ew_bundle.s
+	$(PSP_CXX) -x assembler-with-cpp -c $(BUILD)/psp/ew_bundle.s -o $@
+
+$(BUILD)/psp/emberwing/EBOOT.PBP: $(PSP_EW_OBJ) $(BUILD)/psp/ew_bundle.o
+	@mkdir -p $(dir $@)
+	$(PSP_CXX) $(PSP_FLAGS) $(PSP_EW_OBJ) $(BUILD)/psp/ew_bundle.o $(PSP_LDFLAGS) $(PSP_LIBS) -o $(BUILD)/psp/emberwing/emberwing.elf
+	$(PSP_FIXUP) $(BUILD)/psp/emberwing/emberwing.elf
+	$(PSP_PRXGEN) $(BUILD)/psp/emberwing/emberwing.elf $(BUILD)/psp/emberwing/emberwing.prx
+	$(PSP_MKSFO) "Emberwing" $(BUILD)/psp/emberwing/PARAM.SFO
+	$(PSP_PACK) $@ $(BUILD)/psp/emberwing/PARAM.SFO NULL NULL NULL NULL NULL $(BUILD)/psp/emberwing/emberwing.prx NULL
 	@echo "EBOOT: $@ ($$(stat -c%s $@) bytes)"
 
 $(BUILD)/psp/gu/EBOOT.PBP: $(PSP_GU_OBJ)
@@ -806,7 +950,7 @@ tools: pipeline $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXPACK)
 	@./$(PHXPACK)   --out $(BUILD)/c_assets.phxp $(BUILD)/c_hero.phxspr $(BUILD)/c_level.phxtmap $(BUILD)/c_tone.phxsnd $(BUILD)/c_items.phxbin
 	@head -c4 $(BUILD)/c_assets.phxp | grep -q PHXP && echo "TOOLS PASS (4 converters -> merged bundle)" || (echo "TOOLS FAIL"; exit 1)
 
-build: $(BIN) $(SMOKE) $(RENDER) $(PPU) $(GU) $(PLAYABLE) $(PHYSICS) $(ANIM) $(SCENE) $(UI) $(PLATFORMER) $(PLATAPP) $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) $(RESOURCE) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PIPELINE)
+build: $(BIN) $(SMOKE) $(RENDER) $(PPU) $(GU) $(PLAYABLE) $(PHYSICS) $(ANIM) $(SCENE) $(UI) $(PLATFORMER) $(PLATAPP) $(EMBERWING) $(EMBERWING_PPU) $(EWAPP) $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) $(RESOURCE) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PIPELINE)
 
 $(BIN): $(UNIT_OBJ)
 	@mkdir -p $(dir $@)
@@ -855,6 +999,18 @@ $(PLATFORMER): $(PLATFORMER_OBJ)
 $(PLATAPP): $(PLATAPP_OBJ)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(PLATAPP_OBJ) -o $@
+
+$(EMBERWING): $(EMBERWING_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(EMBERWING_OBJ) -o $@
+
+$(EMBERWING_PPU): $(EMBERWING_PPU_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(EMBERWING_PPU_OBJ) -o $@
+
+$(EWAPP): $(EWAPP_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(EWAPP_OBJ) -o $@
 
 $(RESOURCE): $(RESOURCE_OBJ)
 	@mkdir -p $(dir $@)
@@ -920,9 +1076,10 @@ $(TIERSTAMP):
 	@touch $@
 
 HOST_BINS := $(BIN) $(SMOKE) $(RENDER) $(PPU) $(GU) $(PLAYABLE) $(PHYSICS) $(ANIM) $(SCENE) \
-             $(UI) $(PLATFORMER) $(PLATAPP) $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) \
+             $(UI) $(PLATFORMER) $(PLATAPP) $(EMBERWING) $(EMBERWING_PPU) $(EWAPP) \
+             $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) \
              $(RESOURCE) $(PIPELINE) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) \
-             $(PLATBAKE)
+             $(PLATBAKE) $(EWBAKE)
 $(HOST_BINS): $(TIERSTAMP)
 
 # Header-dependency tracking: each compile emits a .d listing the headers it included, so a

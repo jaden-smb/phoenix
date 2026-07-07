@@ -59,7 +59,11 @@ private:
     friend class ArenaAllocator;
 
     static constexpr uint32_t kMusicVoice = 0;     // slot 0 is reserved for music
-    static constexpr uint32_t kBlock      = 512;   // mix accumulation block (frames)
+    // Mix accumulation block (frames). The accumulator lives on mix()'s STACK (2 KB) — on
+    // GBA the stack is in fast 32-bit IWRAM while the arena is 16-bit EWRAM, and the
+    // accumulator is the hottest memory in the mixer. Output is byte-identical for any
+    // block size, so this is purely a working-set choice.
+    static constexpr uint32_t kBlock      = 256;
 
     int32_t  find_free() const;                    // a free SFX slot (1..max-1), or -1
     bool     decode(VoiceId, uint32_t& idx) const; // validate handle -> slot index
@@ -75,7 +79,6 @@ private:
     int32_t*        gl_     = nullptr;             // Q8 left gain
     int32_t*        gr_     = nullptr;             // Q8 right gain
 
-    int32_t*  acc_      = nullptr;                 // kBlock*2 int32 mix accumulator
     uint32_t  max_      = 0;
     uint32_t  out_rate_ = 44100;
     int32_t   music_vol_ = 256;                    // Q8

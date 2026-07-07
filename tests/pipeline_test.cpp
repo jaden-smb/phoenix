@@ -136,8 +136,8 @@ int main() {
         check(s.samples && s.samples[1] == 1000 && s.samples[4] == -3000, "sound samples"); }
 
     // per-target encode: the SAME 22050 Hz WAV baked for tier 0 (GBA) is resampled at bake
-    // time to the 16384 Hz device rate (fewer ROM bytes, 1:1 runtime mixing); tier 2 kept
-    // the source rate above. First sample must survive; frame count scales by 16384/22050.
+    // time to the 18157 Hz device rate (fewer ROM bytes, 1:1 runtime mixing); tier 2 kept
+    // the source rate above. First sample must survive; frame count scales by 18157/22050.
     {
         phxtool::BundleWriter w0(0);
         check(phxtool::build_wav(w0, "build/p_tone.wav", "tone"), "phxsnd build (tier 0)");
@@ -147,9 +147,9 @@ int main() {
         auto s0 = c0->sound("tone"_hash);
         check(s0.ok(), "sound('tone') tier 0");
         if (s0.ok()) { SoundDataView s = s0.unwrap();
-            check(s.rate == 16384, "tier-0 sound resampled to the GBA device rate");
-            check(s.frames == uint32_t((uint64_t(8) << 16) / ((uint64_t(22050) << 16) / 16384)),
-                  "tier-0 frame count scaled by 16384/22050");
+            check(s.rate == 18157, "tier-0 sound resampled to the GBA device rate");
+            check(s.frames == uint32_t((uint64_t(8) << 16) / ((uint64_t(22050) << 16) / 18157)),
+                  "tier-0 frame count scaled by 18157/22050");
             check(s.samples && s.samples[0] == 0, "tier-0 first sample intact"); }
     }
 

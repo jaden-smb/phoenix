@@ -3,6 +3,7 @@
 // `scalar`, so fixed/float builds produce byte-identical audio.
 #include "phx/audio/mixer.h"
 #include "phx/audio/stream.h"
+#include "phx/core/hot.h"
 
 namespace phx {
 namespace {
@@ -34,8 +35,7 @@ Result<AudioMixer*> AudioMixer::create(ArenaAllocator& a, const Caps& caps, uint
     m->step_   = a.alloc_array<uint32_t>(m->max_);
     m->gl_     = a.alloc_array<int32_t>(m->max_);
     m->gr_     = a.alloc_array<int32_t>(m->max_);
-    m->acc_    = a.alloc_array<int32_t>(kBlock * 2);
-    if (!m->active_ || !m->acc_) return Result<AudioMixer*>::fail(Status::OutOfMemory);
+    if (!m->active_ || !m->gr_) return Result<AudioMixer*>::fail(Status::OutOfMemory);
 
     for (uint32_t i = 0; i < m->max_; ++i) { m->active_[i] = 0; m->gen_[i] = 0; }
     return Result<AudioMixer*>::good(m);
@@ -114,7 +114,8 @@ uint32_t AudioMixer::active_count() const {
     uint32_t n = 0; for (uint32_t i = 0; i < max_; ++i) n += active_[i]; return n;
 }
 
-void AudioMixer::mix(int16_t* out, uint32_t frames) {
+PHX_HOT_CODE void AudioMixer::mix(int16_t* out, uint32_t frames) {
+    int32_t acc_[kBlock * 2];   // stack: IWRAM on GBA (see kBlock note in the header)
     uint32_t done = 0;
     while (done < frames) {
         const uint32_t n = (frames - done) < kBlock ? (frames - done) : kBlock;
@@ -129,6 +130,24 @@ void AudioMixer::mix(int16_t* out, uint32_t frames) {
             int32_t gl = gl_[v], gr = gr_[v];
             if (v == kMusicVoice) { gl = (gl * music_vol_) >> 8; gr = (gr * music_vol_) >> 8; }
 
+            if (st == uint32_t(1) << 16) {
+                // 1:1 fast path: source rate == device rate (every tier-0-baked sound on GBA
+                // mixes here). Walks a 32-bit index instead of the Q16 64-bit cursor — sample
+                // reads and wraps are identical to the general path below, just cheaper.
+                uint32_t si = uint32_t(pos >> 16);
+                for (uint32_t f = 0; f < n; ++f) {
+                    if (si >= len) {
+                        if (loop_[v]) si %= len;
+                        else { active_[v] = 0; ++gen_[v]; break; }
+                    }
+                    int32_t s = d[si];
+                    acc_[f * 2 + 0] += (s * gl) >> 8;
+                    acc_[f * 2 + 1] += (s * gr) >> 8;
+                    ++si;
+                }
+                pos_[v] = (uint64_t(si) << 16) | (pos & 0xFFFF);
+                continue;
+            }
             for (uint32_t f = 0; f < n; ++f) {
                 uint32_t si = uint32_t(pos >> 16);
                 if (si >= len) {

@@ -77,6 +77,14 @@ phoenix/
 │   │   └── src/                  components.h (EngineCtx) · systems.cpp (logic+scenes) · main.cpp (PC) ·
 │   │                             gba_main.cpp/gba_ppu_main.cpp/psp_main.cpp (console entries) ·
 │   │                             bake.h + bake_main.cpp (host asset baker, per-target tier)
+│   ├── emberwing/                Emberwing: Cinder Hollow — the polished vertical slice ✅ (README.md
+│   │   └── src/                  = engine analysis + level design). game.h (EngineCtx/components) ·
+│   │                             systems.cpp + scenes.cpp (game) · art.h (ASCII-grid pixel art) ·
+│   │                             audio_gen.h (SFX + chiptune synth) · level.h (ASCII sections -> .tmj) ·
+│   │                             bake.h/bake_main.cpp · main/desktop_main/gba_main/gba_ppu_main/
+│   │                             psp_main entries (`make emberwing[-ppu|-sdl|-gl]`,
+│   │                             `gba-emberwing[-ppu]` — the PPU ROM is the shipping GBA build —
+│   │                             and `psp-emberwing`)
 │   ├── gba_smoke/ gba_ppu/       Console bring-up + verification smokes (one concern each):
 │   ├── gba_audio/ gba_save/      render, PPU hardware, Direct Sound, battery-SRAM save
 │   └── psp_smoke/ psp_gu/        PSP equivalents: render, sceGu display list,

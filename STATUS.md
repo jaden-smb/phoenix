@@ -719,6 +719,168 @@ exercised by an end-to-end CLI bake (both raw and `--compress`). All green on bo
       on PPSSPP (`GU_VERIFY_PASS`, 0 faults — zoom=1 unchanged on silicon). Host suite unchanged
       (`make check`, 120336 checks; depcheck 28 edges); all console ROMs/EBOOTs rebuild clean.
 
+36. **Emberwing: Cinder Hollow — a SECOND full game (`examples/emberwing`), the polished
+    vertical slice** proving the engine carries a real, designed level rather than a test map.
+    An original SMB-1-1-philosophy platformer (safe start → teach by placement → risk/reward
+    split → stair valley → final ascent): a 320×20-tile, 4-layer parallax level authored as
+    ASCII sections that bake through the REAL Tiled importer; all pixel art authored as ASCII
+    grids in `src/art.h`; SFX + a 2-section chiptune loop synthesized in `src/audio_gen.h`;
+    three enemy behaviours (patroller / spiny "don't stomp" / bobbing flyer), frame-timed
+    geysers, lava hazards, waystone checkpoints, heart/shard pickups, a goal gate with a
+    score tally, and best-run persistence through the save seam. Design decisions the engine
+    forced (documented in the example's README §1): the **GBA target is the software render
+    tier** (`make gba-emberwing`) because the PPU backend models one 32×32-cell BG — a
+    2560-px 4-BG parallax level doesn't fit it; pickups/triggers are collected game-side so
+    only ~30 bodies ride the O(n²) physics overlap pass; **UI draws camera-anchored** (world
+    coords + camera) because the sprite path has no screen-space channel and this game's
+    camera actually scrolls; all gameplay timers/velocities are integer-frame/`s_from_int`
+    so both scalar tiers simulate identically. **Verified:** `make emberwing` (3 scripted
+    runs: opening playthrough with stomps/death/respawn + HUD/audio framebuffer asserts;
+    a goal run through the clear scene; save round-trip) green on BOTH tiers and inside
+    `make check`, `make determinism` (now 10 suites), `make sanitize`; ROM/EBOOT built and
+    **booted on emulators** — mGBA (VRAM screenshot via the GDB stub matches the host
+    layout; beware the `.ss0` auto-resume trap) and PPSSPP (module boots, `phx_audio`
+    device thread running). Audio runs the SPSC command-queue discipline on every device
+    path (SDL/PSP threads, the GBA per-frame pump at the 16384 Hz device rate, headless
+    drain in tests). New targets: `emberwing`, `emberwing-sdl`, `emberwing-gl`,
+    `gba-emberwing`, `psp-emberwing`.
+
+37. **The GBA PPU backend became the real thing — and Emberwing ships on it.** The GBA build
+    of Emberwing was unplayable (software rasterizer eating the whole ARM7 frame, DirectSound
+    starving, plus tens of seconds of black screen at boot). Fixes, engine-first:
+    - **PPU backend rewrite** (`render/src/gba/gba_ppu.cpp` + `ppu_model.h`): four text BGs
+      (draw order = depth; priorities 3-s), arbitrary map sizes STREAMED through per-slot
+      32×32 screenblock windows (~700 halfword writes/layer/frame; HOFS/VOFS carry the raw
+      scroll, wrap at 256 px — so the front end's per-layer parallax works unchanged),
+      16 palette **banks** of 16 colours (whole texture shares one bank when it fits — an OBJ
+      requirement — else per-tile banks for BG tilesets; per-tile >15 colours or bank
+      exhaustion honestly fails the upload), tiles stored packed 4bpp exactly as VRAM wants,
+      and OBJ tiles RE-PACKED per frame into a contiguous 1D run (OAM's 1D mapping cannot
+      address atlas sub-rects; ~40 tiles/frame in practice). Hardware push is incremental
+      (palette/char only when grown; windows/OAM/OBJ run per frame). Hardware-unmappable OBJ
+      shapes are rejected in EVERY build so `ppu_compose` stays an honest golden oracle.
+      Found+fixed en route: OAM priority is LOWEST-index-wins on silicon, so the hardware
+      path writes the model's painter-ordered list reversed.
+    - **Boot stall killed in core**: `fixed.cpp`'s Q16 sine LUT was built by a static
+      initializer calling libm `sin()` — 256 soft-double evaluations through newlib on a
+      16 MHz ARM7 ≈ tens of seconds of black screen before `main()` on EVERY GBA ROM. Now a
+      constexpr (compile-time) table in .rodata: zero boot cost, portable C++17 (Taylor +
+      quadrant reduction; no `__builtin_sin`, which clang rejects in constexpr).
+    - **Emberwing made PPU-clean**: every sprite frame is a real OBJ shape (waystone art
+      16×24→16×32, spark 4×4→8×8); HUD lost-heart/uncollected-shard states are ART frames
+      and the i-frame blink is skip-draw (OBJs cannot tint); `gba_ppu_main.cpp` pre-sets
+      `phx_gba_set_direct(1)` BEFORE boot (the backend's init is too late — the platform
+      would try to allocate a 240×160 soft framebuffer and die; diagnosed on-emulator via a
+      GDB breakpoint on `log_emit` catching "platform init failed" looping).
+    - **Audio de-fizzed**: bake-time 3-tap lowpass on the music (and the loud sweep SFX) —
+      the 22050→16384 Hz tier-0 encode was folding square-wave harmonics into aliasing.
+      The underrun half of "awful sound" is gone with the CPU freed from rasterizing.
+    - **Verified**: `make ppu` rewritten/extended (42 checks: multi-BG layering, big-map
+      window streaming, atlas-sub-rect OBJs, palette-bank exhaustion, invalid shapes);
+      NEW `make emberwing-ppu` runs the full scripted playthrough over the PPU model (in
+      `check` + the determinism gate — now 11 suites, both scalar tiers identical);
+      `make sanitize` + `size-gate` green. On-emulator: mGBA hardware state (PALRAM/VRAM/
+      OAM/IO) dumped via the GDB stub and reconstructed by an INDEPENDENT GBATEK-rules
+      script — the `gba-ppu` smoke checkerboard, the Emberwing title, AND the in-level
+      frame (Start injected by forging one pressed frame in `phx_input_raw` through a GDB
+      breakpoint on `gba_poll_input`) all come back pixel-faithful from real (emulated)
+      silicon state: four parallax BGs + OBJ sprites + the art-frame HUD, exactly as the
+      host model composes them. New targets: `emberwing-ppu`,
+      `gba-emberwing-ppu` (the shipping GBA ROM; `gba-emberwing` soft build kept as the
+      on-device rasterizer reference). PSP untouched and rebuilt green.
+
+38. **GBA "runs slow + awful sound" root-caused: TWO platform-seam bugs, both fixed.** The PPU
+    rewrite (#37) freed the rasterizer budget but Emberwing-PPU still dragged and crackled.
+    - **The clock stepped a full frame per READ.** `gba_clock_ns()` advanced 16.67 ms on every
+      call — but `App::run` reads the clock five times per frame (accumulator + four profiler
+      stamps), so the accumulator saw ~83 ms/frame, saturating the spiral-of-death clamp at
+      **5 fixed updates every frame** — ~5× the sim cost on the 16.78 MHz ARM7, blowing the
+      vblank budget (the profiler numbers were garbage for the same reason, hiding it). This
+      is exactly the per-read-stepping trap the null backend was already cured of; the GBA
+      clock now follows the same convention (one step per `pump_events()`, +1 µs per read).
+      A missed vblank also starves the audio pump (below), so the slowness WAS the noise.
+    - **16384 Hz is not a vblank-locked rate.** DMA1 consumes 280896/1024 = 274.3125 samples
+      per video frame, but the pump supplied `rate/60` = 273 and re-kicked the DMA source
+      every vblank: a guaranteed discontinuity — a 60 Hz crackle — even at full frame rate.
+      Device rate is now **18157 Hz** (924 cycles/sample → exactly **304 samples/frame**),
+      the platform derives samples-per-frame from timer cycles instead of `rate/60`, and
+      `kTier0Rate`/both GBA entries/`gba_audio` moved with it (tier-0 bundles ~11% larger;
+      `size-gate` still green). Anything pumping per-frame double buffers MUST use a rate
+      where cycles-per-sample divides 280896 (GBATEK: 5734/10512/13379/**18157**/31536/…).
+    - **Verified**: `make check` (all suites; pipeline asserts the new tier-0 rate) +
+      `determinism` (11 suites, both tiers) + `sanitize` + `size-gate` green. On mGBA (GDB
+      stub): `gba-audio` ROM verdict==1 with frames=18848=**62×304 exactly** (60 pumps + 2
+      primed buffers — the spf math on silicon); the Emberwing-PPU ROM boots to title with
+      Timer0 running + DMA1 streaming (0xB640) + SOUNDCNT_H live. PSP untouched: EBOOT
+      rebuilt AND booted on PPSSPP (module loads, `sceAudioChReserve` ok, `phx_audio`
+      thread streaming). Stale `gba_audio()` "future work" comment corrected en route.
+
+39. **Emberwing-PPU: 15 → 60 fps in-level on ARM7, and audio made frame-rate-proof.** After
+    #38 the menu ran clean but gameplay still dragged (~15 fps) with garbled music. Root-caused
+    by MEASUREMENT on mGBA (GDB-stub PC sampling + VCOUNT-at-present-entry — the stub's halts
+    bias samples toward vblank code, so cross-check with VCOUNT), then fixed engine-first:
+    - **PPU window streaming dirty-tracked** (`gba_ppu.cpp`): all four BG windows were
+      re-streamed (~2800 cells EWRAM) AND re-packed/pushed (4096 halfwords to VRAM) every
+      frame. Window content is a pure function of (layer cells, tile origin, tileset base) —
+      now cached per slot; unchanged windows cost zero (HOFS/VOFS still move every frame).
+      15 → 30 fps by itself.
+    - **Soft-division/multiply diet**: Thumb ARM7 has no divider AND no long multiply, so
+      every scalar divide is a ~300-cycle libcall. Killed the per-frame offenders: Animator
+      caches 1/fps per clip switch; physics `tile_of` shifts for pow-2 tile sizes;
+      the mixer walks a 32-bit index when src rate == device rate (every tier-0 sound);
+      profiler ns→µs by multiply-shift (round-up, so the ui test's "profile stamped" holds).
+    - **PHX_HOT_CODE (`core/hot.h`)**: measured hot functions (mixer mix, physics
+      resolve_x/y/step, anim tick/apply_rect, renderer end_frame, the present worker) now run
+      as ARM from IWRAM on GBA (empty macro elsewhere; IWRAM 15.4/28 KB, size-gate green).
+      GCC quirk: a target("arm") definition placed before a Thumb TU's static initializer
+      breaks the build ("invalid conversion void(*)() → void(*)()") — keep seam pointers on
+      Thumb shims and define ARM workers after the initializer.
+    - **ecs::World::each hoists its stores**: store<C>() (type-id static + lazy-init branch)
+      ran twice per entity per extra component — ~25% of the busy frame. Resolved once per
+      each() call now (`do_each`). This was the final push over 60 fps.
+    - **qsort → stable insertion sort** (`renderer.cpp` end_frame): faster on the
+      nearly-sorted lists games submit AND removes a latent cross-libc determinism hazard
+      (qsort tie order is implementation-defined; equal-key sprites must draw in submission
+      order everywhere).
+    - **present() pacing de-cliffed** (`gba_platform.cpp`): the old vblank_wait (exit current
+      vblank, then wait for the next) hard-quantized a 3%-over-budget frame to 30 fps.
+      present now treats arriving inside vblank as having made it and returns at vblank END
+      (draw start) — one return per frame when fast, graceful degradation when slow.
+    - **Audio pump moved into a VBlank ISR**: the DMA double-buffer swap+refill now runs at a
+      hard 60 Hz regardless of the game loop — the GBA's stand-in for the SDL/PSP audio
+      thread, same SPSC discipline (game pushes intents, ISR drains into the mixer). The
+      BIOS IRQ stack is ~160 bytes, so the IWRAM/ARM dispatcher stub switches to SYSTEM mode
+      (borrowing the interrupted main stack) before calling the C pump. Music quality is now
+      decoupled from frame drops BY CONSTRUCTION.
+    - **Title credit**: "BY JADEN HAIWYRE" in 2× gold type on the menu — pre-baked as a
+      224×16 strip (28 char-store tiles vs 256 for a full 2× font atlas; gold baked into
+      texels since OBJs cannot tint) drawn in 32×16 chunks (the widest OBJ-mappable slice).
+      Skipped below 224 px view width (the 120×80 soft build).
+    - **Verified**: `make check` + `determinism` (11 suites) + `sanitize` + `size-gate`
+      green; all GBA ROMs + PSP EBOOT rebuilt; PPSSPP boots with `phx_audio` streaming. On
+      mGBA in-level (Start forged via the GDB stub): **60.6 fps sustained** (present enters
+      at VCOUNT ~141 → ~38% headroom), IRQ pump live (IE/IME/DMA1 verified), `gba-audio`
+      verdict==1 with frames = 62×304 exactly, and the title frame — including the credit —
+      reconstructed pixel-faithful from dumped PALRAM/VRAM/OAM/IO.
+
+40. **PSP regression from #39 root-caused: STALE OBJECTS, not code.** The rebuilt Emberwing
+    EBOOT played distorted music and ignored input — while the same sources were green on
+    host, GBA, and sanitizers. Cause: the PSP compile rule was the only one WITHOUT
+    `-MMD` dependency generation, and #39 changed **class layouts in headers** (`mixer.h`
+    lost a 4 KB member, `anim.h` grew the frame-duration cache, `world.h` reshaped `each()`).
+    An incremental `make psp-emberwing` relinked 20 stale + 7 fresh objects disagreeing on
+    `AudioMixer`/`Animator` sizes — classic silent memory corruption that still "compiles
+    correctly and runs". Fixed the rule (`-MMD -MP -MF`, picked up by the existing global
+    `-include`), wiped `build/psp/`, rebuilt; user-confirmed working (and the GBA ROM
+    user-confirmed on VisualBoy — no ROM change was needed). Lesson: every cross rule must
+    emit dep files; a layout-changing header edit + a rule without them = corruption that no
+    gate catches, because every gate builds elsewhere.
+    Also fixed the **title credit centering**: the bake rendered 190 px of glyphs into the
+    224 px strip left-aligned, so TitleScene's strip-centering draw showed the text ~17 px
+    left of the (text-centered) title lines. The bake now centers the glyphs inside the
+    strip (H and V); verified pixel-level on the soft golden AND the headless PPU model at
+    240×160, `make check` green, GBA ROM + PSP EBOOT rebuilt with the re-baked bundle.
+
 ## Next steps (ordered — pick up here)
 
 Done so far: ✅ null backend (framebuffer + scripted input + file I/O) · ✅ runtime/app

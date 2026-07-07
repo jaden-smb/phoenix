@@ -3,9 +3,11 @@
 // PPU backend (engine/render/src/gba/gba_ppu.cpp): RGBA8 atlases are quantized into 4bpp
 // paletted tiles + OAM, then `ppu_compose` rasterizes the frame exactly as the silicon
 // would. We read the framebuffer back and assert tile colours, transparency (palette index
-// 0), sprite compositing, H/V flips, scrolled wrap, the >16-colour palette limit, 8px tile
-// alignment, and the 128-sprite OAM ceiling — every constraint that would bite on hardware,
-// caught here on the host. The compositor is also unit-tested directly via ppu_model.h.
+// 0), sprite compositing, H/V flips, scrolled wrap, MULTI-BG layering, big-map window
+// streaming, atlas-sub-rect OBJs (the 1D re-pack), the per-tile 16-colour limit, palette-
+// BANK exhaustion, 8px tile alignment, invalid OBJ shapes, and the 128-sprite OAM ceiling
+// — every constraint that would bite on hardware, caught here on the host. The compositor
+// is also unit-tested directly via ppu_model.h.
 #include "phx/platform/platform.h"
 #include "phx/platform/gfx_soft.h"
 #include "phx/render/renderer.h"
@@ -75,6 +77,17 @@ int main() {
     TextureDesc ld{}; ld.pixels = spr_lr; ld.width = 8; ld.height = 8;
     TextureId lr_tex = r->load_texture(ld);
     check(lr_tex != kNoTexture, "lr sprite upload");
+
+    // a 24x16 atlas of 16x16 frames: frame 0 all white, frame 1 (at sx=8.. no — 16px)…
+    // two 8x8 frames side by side in a 16x16 atlas is enough: use a 16x16 texture whose
+    // RIGHT 8x8 quarter is green — an OBJ drawn from that sub-rect proves the 1D re-pack.
+    static uint32_t atlas[16 * 16];
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x)
+            atlas[y * 16 + x] = (x >= 8 && y < 8) ? kGreen : kWhite;
+    TextureDesc ad{}; ad.pixels = atlas; ad.width = 16; ad.height = 16;
+    TextureId atlas_tex = r->load_texture(ad);
+    check(atlas_tex != kNoTexture, "atlas upload");
 
     // a 4x3 tilemap, checkerboard of tiles 1/2, last cell EMPTY (0 -> backdrop)
     static const uint16_t indices[4 * 3] = {
@@ -151,7 +164,68 @@ int main() {
     }
     r->set_tilemap_scroll(map, vec2{ s_from_int(0), s_from_int(0) });
 
-    // === frame 5: the 128-OBJ hardware ceiling (drop + count, no overrun) ==============
+    // === frame 5: an OBJ from an atlas SUB-RECT (16x16 frame grid -> 1D re-pack) =======
+    r->begin_frame(cam);
+    {
+        // the atlas' top-right 8x8 (green) — its tile is NOT contiguous with tile 0 in the
+        // char store, so this exercises the per-frame contiguous OBJ tile run
+        DrawSprite s{}; s.tex = atlas_tex; s.sx = 8; s.sy = 0; s.sw = 8; s.sh = 8;
+        s.pos = vec2{ s_from_int(100), s_from_int(100) }; s.layer = 1;
+        r->draw_sprite(s);
+        // and the whole 16x16 (2x2 tiles, a real multi-tile OBJ shape)
+        DrawSprite w{}; w.tex = atlas_tex; w.sx = 0; w.sy = 0; w.sw = 16; w.sh = 16;
+        w.pos = vec2{ s_from_int(140), s_from_int(100) }; w.layer = 1;
+        r->draw_sprite(w);
+    }
+    r->end_frame();
+    {
+        phx_soft_fb fb = phx_gfx_soft_lock(plat->gfx());
+        expect_px(fb, 104, 104, kGreen, "atlas sub-rect OBJ shows the right frame");
+        expect_px(fb, 143, 103, kWhite, "16x16 OBJ top-left quarter white");
+        expect_px(fb, 153, 103, kGreen, "16x16 OBJ top-right quarter green");
+        expect_px(fb, 153, 113, kWhite, "16x16 OBJ bottom-right quarter white");
+    }
+
+    // === frame 6: MULTI-BG — a second layer with an empty cell shows the first through ==
+    {
+        // full-screen-ish back map: every cell tile 1 (blue); front map: tile 2 with a hole
+        static uint16_t back_idx[4 * 3], front_idx[4 * 3];
+        for (int i = 0; i < 12; ++i) { back_idx[i] = 1; front_idx[i] = 2; }
+        front_idx[0] = 0;                                   // hole at cell (0,0)
+        TilemapDesc bd{}; bd.indices = back_idx; bd.width = 4; bd.height = 3; bd.layers = 1;
+        bd.tile_w = 8; bd.tile_h = 8; bd.tileset = ts_tex;
+        TilemapId back = r->upload_tilemap(bd);
+        TilemapDesc fd = bd; fd.indices = front_idx;
+        TilemapId front = r->upload_tilemap(fd);
+        r->begin_frame(cam);
+        r->draw_tilemap(back, 0);                           // slot 0 (behind)
+        r->draw_tilemap(front, 0);                          // slot 1 (in front)
+        r->end_frame();
+        phx_soft_fb fb = phx_gfx_soft_lock(plat->gfx());
+        expect_px(fb, 3,  3, kBlue,  "front hole -> back BG (blue) shows through");
+        expect_px(fb, 11, 3, kGreen, "front layer (green) covers the back");
+    }
+
+    // === frame 7: BIG map — wider than one screenblock, streamed through the window ====
+    {
+        // 64x3 map: all tile 1 (blue) except column 40 = tile 2 (green). Scroll so that
+        // column 40 lands at screen x 0..7: the old 32x32-cap backend could not show this.
+        static uint16_t big[64 * 3];
+        for (int i = 0; i < 64 * 3; ++i) big[i] = 1;
+        big[0 * 64 + 40] = 2; big[1 * 64 + 40] = 2; big[2 * 64 + 40] = 2;
+        TilemapDesc gd{}; gd.indices = big; gd.width = 64; gd.height = 3; gd.layers = 1;
+        gd.tile_w = 8; gd.tile_h = 8; gd.tileset = ts_tex;
+        TilemapId bigmap = r->upload_tilemap(gd);
+        r->set_tilemap_scroll(bigmap, vec2{ s_from_int(40 * 8), s_from_int(0) });
+        r->begin_frame(cam);
+        r->draw_tilemap(bigmap, 0);
+        r->end_frame();
+        phx_soft_fb fb = phx_gfx_soft_lock(plat->gfx());
+        expect_px(fb, 3,  3, kGreen, "big map: streamed window shows column 40");
+        expect_px(fb, 11, 3, kBlue,  "big map: column 41 blue");
+    }
+
+    // === frame 8: the 128-OBJ hardware ceiling (drop + count, no overrun) ==============
     r->begin_frame(cam);
     for (int i = 0; i < 130; ++i) {
         DrawSprite s{}; s.tex = red_tex; s.sx = 0; s.sy = 0; s.sw = 8; s.sh = 8;
@@ -161,7 +235,7 @@ int main() {
     r->end_frame();
     check(r->stats().sprites_dropped == 2, "130 sprites -> 2 dropped at the 128 ceiling");
 
-    // === a SEPARATE renderer (fresh palette): >16-colour + tile-alignment limits =======
+    // === a SEPARATE renderer (fresh palette banks): the honest hardware limits =========
     {
         auto rr2 = Renderer::create(plat->gfx(), arena, caps());
         Renderer* r2 = rr2.unwrap();
@@ -170,19 +244,51 @@ int main() {
         static uint32_t ok15[8 * 8];
         for (int i = 0; i < 64; ++i) ok15[i] = rgba(uint8_t(((i % 15) + 1) * 8), 0, 0);
         TextureDesc o{}; o.pixels = ok15; o.width = 8; o.height = 8;
-        check(r2->load_texture(o) != kNoTexture, "15-colour texture fits the palette");
+        check(r2->load_texture(o) != kNoTexture, "15-colour texture fits one palette bank");
 
-        // 16 distinct opaque colours needs a 17th palette slot: rejected
+        // 16 distinct opaque colours in ONE tile can't index a 4bpp bank: rejected
         static uint32_t over[8 * 8] = {};
         for (int i = 0; i < 16; ++i) over[i] = rgba(uint8_t((i + 1) * 8), 0, 0);
         for (int i = 16; i < 64; ++i) over[i] = rgba(8, 0, 0);
         TextureDesc ov{}; ov.pixels = over; ov.width = 8; ov.height = 8;
-        check(r2->load_texture(ov) == kNoTexture, ">16 colours rejected (GBA palette limit)");
+        check(r2->load_texture(ov) == kNoTexture, ">15 colours in one tile rejected");
 
         // a non-8px-aligned atlas can't be tiled: rejected
         static uint32_t mis[8 * 7] = {};
         TextureDesc mt{}; mt.pixels = mis; mt.width = 8; mt.height = 7;
         check(r2->load_texture(mt) == kNoTexture, "non-8px-aligned texture rejected");
+
+        // an OBJ shape the hardware doesn't have (16x24 = 2x3 tiles) is not drawn
+        static uint32_t tall[16 * 24];
+        for (auto& p : tall) p = kRed;
+        TextureDesc td{}; td.pixels = tall; td.width = 16; td.height = 24;
+        TextureId tall_tex = r2->load_texture(td);
+        check(tall_tex != kNoTexture, "16x24 texture uploads (BG use would be fine)");
+        r2->begin_frame(cam);
+        DrawSprite s{}; s.tex = tall_tex; s.sx = 0; s.sy = 0; s.sw = 16; s.sh = 24;
+        s.pos = vec2{ s_from_int(0), s_from_int(0) }; s.layer = 1;
+        r2->draw_sprite(s);
+        r2->end_frame();
+        phx_soft_fb fb = phx_gfx_soft_lock(plat->gfx());
+        expect_px(fb, 2, 2, kBack, "invalid OBJ shape (2x3 tiles) rejected");
+
+        // PALETTE-BANK exhaustion: bank 0 is full of the red ramp, bank 1 holds the 16x24
+        // texture's red; 14 more textures of 15 FRESH colours each (distinct at 5 bits!)
+        // fill banks 2..15; one more full bank's worth must then be rejected.
+        static uint32_t fill[8 * 8];
+        TextureId last_ok = kNoTexture, overflow = kNoTexture;
+        for (int t = 0; t < 14; ++t) {
+            for (int i = 0; i < 64; ++i)
+                fill[i] = rgba(uint8_t(((i % 15) + 1) * 8), uint8_t((t + 1) * 16), 0);
+            TextureDesc f{}; f.pixels = fill; f.width = 8; f.height = 8;
+            last_ok = r2->load_texture(f);
+        }
+        check(last_ok != kNoTexture, "all 16 palette banks claimable");
+        for (int i = 0; i < 64; ++i)
+            fill[i] = rgba(uint8_t(((i % 15) + 1) * 8), 200, 100);
+        TextureDesc f{}; f.pixels = fill; f.width = 8; f.height = 8;
+        overflow = r2->load_texture(f);
+        check(overflow == kNoTexture, "a 17th bank's worth of colours rejected (PALRAM full)");
     }
 
     // === direct unit checks on the compositor + colour conversion ======================
@@ -192,27 +298,40 @@ int main() {
         check(bgr555_to_rgba8(rgba8_to_bgr555(kGreen)) == kGreen, "BGR555 exact: green");
         check(bgr555_to_rgba8(rgba8_to_bgr555(kBlue))  == kBlue,  "BGR555 exact: blue");
 
-        // hand-built 1-tile BG + 1 OBJ: transparency + overdraw order
-        PpuTile tiles[2];
-        for (auto& p : tiles[0].px) p = 0;          // tile 0: transparent
-        for (auto& p : tiles[1].px) p = 1;          // tile 1: solid palette idx 1
-        tiles[1].px[0] = 0;                          // ...except its top-left texel (clear)
-        uint16_t pal[16] = {};
-        pal[0] = rgba8_to_bgr555(rgba(10, 20, 30)); // backdrop
-        pal[1] = rgba8_to_bgr555(kRed);
-        PpuScreenEntry mapent{ 1, 0 };
-        PpuObj obj{ 0, 0, 1, 1, 1, 1, 0 };          // one 8x8 OBJ at origin, tile 1
+        // hand-built window + 1 OBJ: transparency, overdraw order, palette banks
+        static PpuTile tiles[2];
+        for (auto& r_ : tiles[0].row) r_ = 0;                // tile 0: transparent
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 8; ++x) ppu_tile_set(tiles[1], x, y, 1);   // solid idx 1
+        ppu_tile_set(tiles[1], 0, 0, 0);                     // ...except top-left (clear)
+        static PpuTile objt[1];
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 8; ++x) ppu_tile_set(objt[0], x, y, 1);
+
+        static uint16_t pal[kPalTotal] = {};
+        pal[0]              = rgba8_to_bgr555(rgba(10, 20, 30));   // backdrop
+        pal[1]              = rgba8_to_bgr555(kRed);               // bank 0 slot 1
+        pal[1 * kPalSize + 1] = rgba8_to_bgr555(kGreen);           // bank 1 slot 1
+
+        static PpuScreenEntry win[kBgWin * kBgWin] = {};
+        for (auto& e : win) e = PpuScreenEntry{ 1, 0, 0 };          // tile 1, bank 0
+
+        PpuObj obj{ 0, 0, 0, 1, 1, 0, 1 };   // one 8x8 OBJ at origin, obj tile 0, BANK 1
         static uint32_t out[kScreenW * kScreenH];
         PpuState s{};
-        s.tiles = tiles; s.palette = pal;
-        s.bg_map = &mapent; s.bg_w = 1; s.bg_h = 1; s.bg_enabled = true;
+        s.tiles = tiles; s.obj_tiles = objt; s.palette = pal;
+        s.bg[0].win = win; s.bg[0].enabled = true;
         s.oam = &obj; s.obj_count = 1;
         ppu_compose(s, out);
-        check(out[0] == bgr555_to_rgba8(pal[0]), "compose: clear texel -> backdrop");
-        check(out[1] == bgr555_to_rgba8(pal[1]), "compose: opaque OBJ texel drawn");
-        // the 1x1 BG wraps across the whole screen, so distant pixels show its solid texel
+        check(out[0] == bgr555_to_rgba8(pal[1 * kPalSize + 1]),
+              "compose: OBJ drawn from its own palette bank");
+        check(out[9] == bgr555_to_rgba8(pal[1]),
+              "compose: BG texel from bank 0 beside the OBJ");
+        // every tile's local (0,0) texel is clear: screen (16,0) is one, outside the OBJ
+        check(out[16] == bgr555_to_rgba8(pal[0]),
+              "compose: clear texel -> backdrop");
         check(out[kScreenW * 100 + 100] == bgr555_to_rgba8(pal[1]),
-              "compose: BG wraps to fill the screen");
+              "compose: window wraps at 256 px to fill the screen");
     }
 
     plat->shutdown();
