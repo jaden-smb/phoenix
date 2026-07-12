@@ -11,8 +11,8 @@
 **MVP = a playable 2D platformer vertical slice that builds and runs on all four
 targets from one codebase, using only engine systems.**
 
-Concretely, the MVP ships when (**status: ALL MET** — see STATUS.md for the
-verification evidence behind each tick):
+Concretely, the MVP ships when (**status: ALL MET** — each tick is backed by a suite or
+gate in `make check`):
 
 - [x] One CMake tree produces: Linux ELF, Windows exe (MinGW toolchain file; suite +
       game verified under Wine), `.gba` ROM, PSP `EBOOT.PBP`.

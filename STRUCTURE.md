@@ -8,8 +8,7 @@ subfolders. The build links exactly one backend per module.
 phoenix/
 ├── README.md                     Engine identity + navigation
 ├── STRUCTURE.md                  (this file)
-├── STATUS.md                     The running engineering log (numbered entries)
-├── CLAUDE.md                     Working-in-this-repo guidance (build gates, rules, gotchas)
+├── LICENSE                       MIT
 ├── Makefile                      Host build + every suite/gate/cross target (day-to-day driver)
 ├── CMakeLists.txt                Root build: target select, module registration (canonical multi-target)
 │

@@ -78,8 +78,8 @@ make gba-platformer-ppu   # full game on real PPU hardware (Mode-0 BGs + OAM)
 make psp / make psp-gu    # PSP EBOOT: software / native sceGu display list
 ```
 
-Load the ROM in mGBA or the EBOOT in PPSSPP. Verification recipes (mGBA GDB-stub VRAM
-inspection, PPSSPP `GU_VERIFY_PASS`) are logged in `STATUS.md`.
+Load the ROM in mGBA or the EBOOT in PPSSPP. The backends are verified by mGBA GDB-stub VRAM/OAM
+inspection and a PPSSPP on-device readback (`GU_VERIFY_PASS`) against the software golden.
 
 ---
 
@@ -359,5 +359,3 @@ from the nearest tier's backend, and validate against the soft golden before any
 - [docs/00-architecture.md](00-architecture.md) — layering, seams, determinism law
 - [docs/05-memory.md](05-memory.md) — the arena model the renderer allocates from
 - [docs/06-resources.md](06-resources.md) — how baked textures/tilemaps reach the renderer
-- `STATUS.md` — the engineering log: zoom/shake implementation notes (#35), PPU hardware
-  bring-up (#29–30), GU verification (#32), GL/SDL verification (#33)

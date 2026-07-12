@@ -320,7 +320,7 @@ identical. Full spec in `docs/06-resources.md` and `docs/08-tooling.md`.
 |---|---------------------------------------------------|-----------|--------|---------------------------------------------------------------------------|
 | R1| GBA RAM ceiling makes a real game impossible      | Med       | High   | Capability tiers + strict budgets enforced at boot; example game proves a vertical slice fits. |
 | R2| Fixed/float gameplay divergence                   | Med       | Med    | Determinism test suite; `phx::scalar` everywhere; tuned constants.        |
-| R3| Four backends rot at different rates              | High      | Med    | Per-seam verification every backend must pass (render/audio/save smokes on real or emulated targets — see STATUS.md) + CI builds every target. |
+| R3| Four backends rot at different rates              | High      | Med    | Per-seam verification every backend must pass (render/audio/save smokes on real or emulated targets) + CI builds every target. |
 | R4| Renderer abstraction leaks PPU-isms into PC API   | Med       | Med    | API designed around *what* (draw sprite/tilemap) not *how*; PPU is the constraint that shapes the API, not an afterthought. |
 | R5| Toolchain drift (devkitPro/pspsdk breakage)       | Med       | Med    | Pin toolchain versions in `cmake/`; CI builds all four targets.           |
 | R6| Scope creep (the eternal engine killer)           | High      | High   | MVP gate in roadmap; "feature count is last pillar" enforced in review.   |

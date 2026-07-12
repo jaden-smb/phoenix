@@ -9,6 +9,7 @@ CMakeFiles/
 cmake_install.cmake
 Makefile.cmake
 *CLAUDE.md
+*STATUS.md
 
 # Build artifacts
 *.o

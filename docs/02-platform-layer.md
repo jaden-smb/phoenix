@@ -148,7 +148,7 @@ once** so a game's `Button::Jump` means the same thing everywhere.
 ## 5. Conformance: every backend passes the same tests
 
 Per-seam verification suites run against each backend (render smoke, audio-device
-smoke, save smoke — on mGBA/PPSSPP/a real window; see STATUS.md) — the CI runs them against each
+smoke, save smoke — on mGBA/PPSSPP/a real window) — the CI runs them against each
 build:
 
 - clock monotonicity & resolution sanity,
