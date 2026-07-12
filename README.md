@@ -122,7 +122,7 @@ phoenix/
 ├── engine/     ← the engine modules (core, memory, platform, render, ecs, ...)
 ├── tools/      ← host-only asset pipeline + GUI editors (instructions.md in each)
 ├── examples/   ← Emberwing (the game) + the reference platformer + per-target smokes
-├── tests/      ← unit · integration · golden-image · determinism suites
+├── tests/      ← unit · integration · device-verify suites (see tests/README.md)
 └── cmake/      ← toolchains (gba, psp, mingw) + module helpers
 ```
 

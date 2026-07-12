@@ -9,7 +9,7 @@
 #include "phx/core/caps.h"
 #include "bundle_writer.h"
 #include "png.h"
-#include "png_fixtures.h"
+#include "fixtures/png_fixtures.h"
 
 #include <cstdio>
 #include <vector>

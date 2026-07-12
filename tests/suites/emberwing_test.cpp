@@ -7,8 +7,8 @@
 //      Sungate: clear scene pushed, tally saved),
 //   3. a fresh boot that must restore the saved best run.
 // Counters are deterministic; assertions are invariants that hold on BOTH scalar tiers.
-#include "../examples/emberwing/src/game.h"
-#include "../examples/emberwing/src/bake.h"
+#include "../../examples/emberwing/src/game.h"
+#include "../../examples/emberwing/src/bake.h"
 #include "phx/platform/platform.h"
 #include "phx/platform/gfx_soft.h"
 

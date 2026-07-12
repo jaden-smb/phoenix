@@ -19,10 +19,11 @@ set(_test_wd ${CMAKE_BINARY_DIR})
 
 # ---- unit suite (foundation) ----------------------------------------------
 add_executable(phx_tests
-  main.cpp
-  test_fixed.cpp test_memory.cpp test_ecs.cpp test_time.cpp test_input.cpp
-  test_physics.cpp test_anim.cpp test_scene.cpp test_ui.cpp test_audio.cpp
-  test_stream.cpp test_lz.cpp test_png.cpp test_json.cpp test_wav.cpp test_cmdqueue.cpp
+  unit/main.cpp
+  unit/test_fixed.cpp unit/test_memory.cpp unit/test_ecs.cpp unit/test_time.cpp
+  unit/test_input.cpp unit/test_physics.cpp unit/test_anim.cpp unit/test_scene.cpp
+  unit/test_ui.cpp unit/test_audio.cpp unit/test_stream.cpp unit/test_lz.cpp
+  unit/test_png.cpp unit/test_json.cpp unit/test_wav.cpp unit/test_cmdqueue.cpp
 )
 target_include_directories(phx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${_phxpack_inc})
 target_link_libraries(phx_tests PRIVATE
@@ -60,10 +61,12 @@ foreach(spec ${_itests})
   string(REPLACE ":" ";" parts ${spec})
   list(GET parts 0 tname)
   list(GET parts 1 tsrc)
-  add_executable(it_${tname} ${tsrc}.cpp)
+  add_executable(it_${tname} suites/${tsrc}.cpp)
   target_include_directories(it_${tname} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${_phxpack_inc}
+    ${CMAKE_SOURCE_DIR}/tools/common                # bake.h -> debug_font.h
+    ${CMAKE_SOURCE_DIR}/tools/phxtmap               # pipeline_test: the phxtmap editor model
     ${CMAKE_SOURCE_DIR}/examples/platformer/src)   # platformer_test: components.h / bake.h
   target_link_libraries(it_${tname} PRIVATE ${_game_libs})
   add_test(NAME ${tname} COMMAND it_${tname} WORKING_DIRECTORY ${_test_wd})
@@ -101,7 +104,7 @@ foreach(spec ppu:gba/gba_ppu gu:gu/gu_backend)
     ${CMAKE_SOURCE_DIR}/engine/platform/src/null/null_platform.cpp
     ${_render_src}/renderer.cpp
     ${_render_src}/${bsrc}.cpp
-    ${tname}_test.cpp)
+    suites/${tname}_test.cpp)
   target_include_directories(it_${tname} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/engine/core/include

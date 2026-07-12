@@ -53,23 +53,23 @@ RENDER := $(BUILD)/phx_render
 PPU    := $(BUILD)/phx_ppu
 GU     := $(BUILD)/phx_gu
 
-TEST_SRC   := tests/main.cpp \
-              tests/test_fixed.cpp \
-              tests/test_memory.cpp \
-              tests/test_ecs.cpp \
-              tests/test_time.cpp \
-              tests/test_input.cpp \
-              tests/test_physics.cpp \
-              tests/test_anim.cpp \
-              tests/test_scene.cpp \
-              tests/test_ui.cpp \
-              tests/test_audio.cpp \
-              tests/test_stream.cpp \
-              tests/test_lz.cpp \
-              tests/test_png.cpp \
-              tests/test_json.cpp \
-              tests/test_wav.cpp \
-              tests/test_cmdqueue.cpp
+TEST_SRC   := tests/unit/main.cpp \
+              tests/unit/test_fixed.cpp \
+              tests/unit/test_memory.cpp \
+              tests/unit/test_ecs.cpp \
+              tests/unit/test_time.cpp \
+              tests/unit/test_input.cpp \
+              tests/unit/test_physics.cpp \
+              tests/unit/test_anim.cpp \
+              tests/unit/test_scene.cpp \
+              tests/unit/test_ui.cpp \
+              tests/unit/test_audio.cpp \
+              tests/unit/test_stream.cpp \
+              tests/unit/test_lz.cpp \
+              tests/unit/test_png.cpp \
+              tests/unit/test_json.cpp \
+              tests/unit/test_wav.cpp \
+              tests/unit/test_cmdqueue.cpp
 
 # The unit-test binary does not link the App/loop entry (no main collision).
 UNIT_ENGINE := engine/core/src/assert.cpp \
@@ -101,31 +101,31 @@ APP_SRC := engine/core/src/assert.cpp \
            engine/runtime/src/app.cpp
 
 # The smoke binary: the loop + its own main.
-SMOKE_SRC := $(APP_SRC) tests/smoke_app.cpp
+SMOKE_SRC := $(APP_SRC) tests/suites/smoke_app.cpp
 SMOKE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(SMOKE_SRC))
 
 # The playable binary: full stack (memory+ecs+input+render+loop) driven by scripted input.
-PLAYABLE_SRC := $(APP_SRC) tests/playable_test.cpp
+PLAYABLE_SRC := $(APP_SRC) tests/suites/playable_test.cpp
 PLAYABLE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PLAYABLE_SRC))
 PLAYABLE     := $(BUILD)/phx_playable
 
 # The physics binary: full stack with PhysicsWorld driving a falling body onto a tile floor.
-PHYSICS_SRC := $(APP_SRC) tests/physics_test.cpp
+PHYSICS_SRC := $(APP_SRC) tests/suites/physics_test.cpp
 PHYSICS_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PHYSICS_SRC))
 PHYSICS     := $(BUILD)/phx_physics
 
 # The anim binary: full stack with AnimationSystem driving a sprite-sheet frame on screen.
-ANIM_SRC := $(APP_SRC) tests/anim_test.cpp
+ANIM_SRC := $(APP_SRC) tests/suites/anim_test.cpp
 ANIM_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(ANIM_SRC))
 ANIM     := $(BUILD)/phx_anim
 
 # The scene binary: full stack with a SceneStack driving a gameplay scene + menu overlay.
-SCENE_SRC := $(APP_SRC) tests/scene_test.cpp
+SCENE_SRC := $(APP_SRC) tests/suites/scene_test.cpp
 SCENE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(SCENE_SRC))
 SCENE     := $(BUILD)/phx_scene
 
 # The ui binary: full stack with the immediate-mode UI drawing text/bar/menu + focus nav.
-UI_SRC := $(APP_SRC) tests/ui_test.cpp
+UI_SRC := $(APP_SRC) tests/suites/ui_test.cpp
 UI_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(UI_SRC))
 UI     := $(BUILD)/phx_ui
 
@@ -136,7 +136,7 @@ PLATFORMER_SRC := $(APP_SRC) \
                   engine/resource/src/cache.cpp \
                   engine/audio/src/mixer.cpp \
                   examples/platformer/src/systems.cpp \
-                  tests/platformer_test.cpp
+                  tests/suites/platformer_test.cpp
 PLATFORMER_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PLATFORMER_SRC))
 PLATFORMER     := $(BUILD)/phx_platformer
 
@@ -176,7 +176,7 @@ EMBERWING_SRC := $(APP_SRC) \
                  engine/audio/src/mixer.cpp \
                  examples/emberwing/src/systems.cpp \
                  examples/emberwing/src/scenes.cpp \
-                 tests/emberwing_test.cpp
+                 tests/suites/emberwing_test.cpp
 EMBERWING_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(EMBERWING_SRC))
 EMBERWING     := $(BUILD)/phx_emberwing
 
@@ -215,7 +215,7 @@ RESOURCE_SRC := engine/core/src/assert.cpp \
                 engine/render/src/renderer.cpp \
                 engine/render/src/soft/soft_renderer.cpp \
                 engine/resource/src/cache.cpp \
-                tests/resource_test.cpp
+                tests/suites/resource_test.cpp
 RESOURCE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(RESOURCE_SRC))
 RESOURCE     := $(BUILD)/phx_resource
 
@@ -228,7 +228,7 @@ TEXCACHE_SRC := engine/core/src/assert.cpp \
                 engine/render/src/renderer.cpp \
                 engine/render/src/soft/soft_renderer.cpp \
                 engine/render/src/texture_cache.cpp \
-                tests/texcache_test.cpp
+                tests/suites/texcache_test.cpp
 TEXCACHE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(TEXCACHE_SRC))
 TEXCACHE     := $(BUILD)/phx_texcache
 
@@ -241,7 +241,7 @@ PNG_SRC := engine/core/src/assert.cpp \
            engine/render/src/renderer.cpp \
            engine/render/src/soft/soft_renderer.cpp \
            engine/resource/src/cache.cpp \
-           tests/png_test.cpp
+           tests/suites/png_test.cpp
 PNG_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PNG_SRC))
 PNG     := $(BUILD)/phx_png
 
@@ -256,7 +256,7 @@ SPRITE_SRC := engine/core/src/assert.cpp \
               engine/render/src/renderer.cpp \
               engine/render/src/soft/soft_renderer.cpp \
               engine/resource/src/cache.cpp \
-              tests/sprite_test.cpp
+              tests/suites/sprite_test.cpp
 SPRITE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(SPRITE_SRC))
 SPRITE     := $(BUILD)/phx_sprite
 
@@ -269,7 +269,7 @@ TILED_SRC := engine/core/src/assert.cpp \
              engine/render/src/renderer.cpp \
              engine/render/src/soft/soft_renderer.cpp \
              engine/resource/src/cache.cpp \
-             tests/tiled_test.cpp
+             tests/suites/tiled_test.cpp
 TILED_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(TILED_SRC))
 TILED     := $(BUILD)/phx_tiled
 
@@ -282,7 +282,7 @@ AUDIO_SRC := engine/core/src/assert.cpp \
              engine/resource/src/cache.cpp \
              engine/audio/src/mixer.cpp \
              engine/audio/src/stream.cpp \
-             tests/audio_test.cpp
+             tests/suites/audio_test.cpp
 AUDIO_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(AUDIO_SRC))
 AUDIO     := $(BUILD)/phx_audio
 
@@ -302,7 +302,7 @@ PIPELINE_SRC := engine/core/src/assert.cpp \
                 engine/memory/src/memory_root.cpp \
                 engine/platform/src/null/null_platform.cpp \
                 engine/resource/src/cache.cpp \
-                tests/pipeline_test.cpp
+                tests/suites/pipeline_test.cpp
 PIPELINE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PIPELINE_SRC))
 PIPELINE     := $(BUILD)/phx_pipeline
 
@@ -314,21 +314,21 @@ RENDER_SRC := engine/core/src/assert.cpp \
               engine/platform/src/null/null_platform.cpp \
               engine/render/src/renderer.cpp \
               engine/render/src/soft/soft_renderer.cpp \
-              tests/render_test.cpp
+              tests/suites/render_test.cpp
 RENDER_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(RENDER_SRC))
 
 # The PPU smoke links the SAME front end + null platform, but swaps the software backend
 # for the GBA-native PPU backend (quantize -> 4bpp tiles + OAM -> ppu_compose). It proves
 # the GBA hardware render model headlessly (palette/alignment/sprite-ceiling limits + all).
 PPU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/gba/gba_ppu.cpp,\
-             $(patsubst tests/render_test.cpp,tests/ppu_test.cpp,$(RENDER_SRC)))
+             $(patsubst tests/suites/render_test.cpp,tests/suites/ppu_test.cpp,$(RENDER_SRC)))
 PPU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PPU_SRC))
 
 # The GU smoke: the SAME front end + null platform, swapping in the PSP-native GU backend
 # (record GU sprite quads -> gu_compose). The GU is full-colour, so its output is bit-
 # identical to the software reference — this renders the render_test scene and matches it.
 GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/gu/gu_backend.cpp,\
-            $(patsubst tests/render_test.cpp,tests/gu_test.cpp,$(RENDER_SRC)))
+            $(patsubst tests/suites/render_test.cpp,tests/suites/gu_test.cpp,$(RENDER_SRC)))
 GU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(GU_SRC))
 
 .PHONY: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck
@@ -439,7 +439,7 @@ gl:
 SDLVER_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
               engine/memory/src/memory_root.cpp engine/render/src/renderer.cpp \
               engine/render/src/soft/soft_renderer.cpp \
-              engine/platform/src/sdl/sdl_platform.cpp tests/window_verify.cpp
+              engine/platform/src/sdl/sdl_platform.cpp tests/verify/window_verify.cpp
 GLVER_SRC  := $(filter-out engine/render/src/soft/soft_renderer.cpp,$(SDLVER_SRC)) \
               engine/render/src/gl/gl_backend.cpp
 
@@ -461,7 +461,7 @@ gl-verify:
 # queue from the audio thread, confirm the callback fires and produces non-silent SFX output.
 AUDIOVER_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
                 engine/memory/src/memory_root.cpp engine/audio/src/mixer.cpp \
-                engine/platform/src/sdl/sdl_platform.cpp tests/audio_device_verify.cpp
+                engine/platform/src/sdl/sdl_platform.cpp tests/verify/audio_device_verify.cpp
 audio-verify:
 	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found)."; exit 1; }
 	@mkdir -p $(BUILD)

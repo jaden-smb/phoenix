@@ -89,15 +89,19 @@ phoenix/
 │   └── psp_smoke/ psp_gu/        PSP equivalents: render, sceGu display list,
 │       psp_audio/ psp_save/      sceAudio device, sceIo save (verdicts via PPSSPP log / GDB stub)
 │
-└── tests/                        Host test suites (the architecture's safety net). Flat layout:
-    ├── phx_test.h · main.cpp     tiny in-house unit harness (PHX_TEST/CHECK) + runner
-    ├── test_*.cpp                unit suites (fixed, memory, ecs, time, input, physics, anim,
-    │                             scene, ui, audio, stream, lz, png, json, wav, cmdqueue)
-    ├── *_test.cpp                headless integration binaries — one per `make` suite target
-    │                             (smoke render ppu gu playable physics anim scene ui platformer
-    │                             audio texcache png sprite tiled resource pipeline)
-    └── window_verify.cpp ·       real-device verification (SDL window / GL readback / live
-        audio_device_verify.cpp   audio device) for the sdl-verify / gl-verify / audio-verify targets
+└── tests/                        Host test suites (the architecture's safety net). See tests/README.md.
+    ├── README.md                 the test layout, the harness API, how to add a test
+    ├── phx_test.h                tiny in-house unit harness (PHX_TEST / CHECK*) — no GoogleTest
+    ├── unit/                     main.cpp (runner) + test_*.cpp — ALL linked into one binary
+    │                             (build/phx_tests): fixed, memory, ecs, time, input, physics,
+    │                             anim, scene, ui, audio, stream, lz, png, json, wav, cmdqueue
+    ├── suites/                   *_test.cpp — headless integration binaries, one per `make`
+    │                             suite target, each with its own main() (smoke render ppu gu
+    │                             playable physics anim scene ui platformer emberwing audio
+    │                             texcache png sprite tiled resource pipeline)
+    ├── verify/                   real-device verification (SDL window / GL readback / live audio
+    │                             device) — the sdl-verify / gl-verify / audio-verify targets
+    └── fixtures/                 shared test data (png_fixtures.h: in-source PNG byte blobs)
 ```
 
 Release gates beyond `make check`: `make determinism` (both scalar tiers byte-identical),

@@ -12,9 +12,9 @@
 #include "builders.h"        // the converter bake logic
 #include "bundle_reader.h"   // the assembler's merge logic
 #include "editor.h"                        // phxtmap's document model (load/edit/save .tmj)
-#include "../tools/phxentity/editor.h"     // phxentity's document model (phxbin JSON tables)
+#include "../../tools/phxentity/editor.h"     // phxentity's document model (phxbin JSON tables)
 
-#include "png_fixtures.h"
+#include "fixtures/png_fixtures.h"
 
 #include <cstdio>
 #include <string>
