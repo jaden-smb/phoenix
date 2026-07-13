@@ -10,7 +10,9 @@
 #include "bundle_writer.h"
 
 #include <cstdio>
+#include <cstring>
 #include <string>
+#include <vector>
 
 using namespace phx;
 
@@ -56,6 +58,26 @@ long file_size(const char* path) {
     long n = std::ftell(f);
     std::fclose(f);
     return n;
+}
+
+// ---- byte-level helpers for the negative-path (corruption/truncation) tests below ----------
+std::vector<uint8_t> read_file(const char* path) {
+    std::vector<uint8_t> v;
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return v;
+    std::fseek(f, 0, SEEK_END);
+    long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (n > 0) { v.resize(size_t(n)); size_t got = std::fread(v.data(), 1, v.size(), f); (void)got; }
+    std::fclose(f);
+    return v;
+}
+bool write_file(const char* path, const uint8_t* data, size_t n) {
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return false;
+    std::fwrite(data, 1, n, f);
+    std::fclose(f);
+    return true;
 }
 } // namespace
 
@@ -127,6 +149,102 @@ int main() {
     check(px(11, 3)  == kYellow, "tile(1,0) yellow from bundle");
     check(px(3, 11)  == kYellow, "tile(0,1) yellow (checker) from bundle");
     check(px(40, 28) == kClear,  "background clear");
+
+    // ---- validation: mount() must reject a structurally bad or corrupt bundle -------------
+    {
+        std::vector<uint8_t> good = read_file(raw_bundle);   // uncompressed: easy byte surgery
+        check(!good.empty(), "read back the raw bundle for corruption tests");
+
+        // bit-rot in a blob: same size/shape, one flipped byte -> checksum must catch it.
+        std::vector<uint8_t> corrupt = good;
+        corrupt.back() ^= 0xFF;
+        const char* p_corrupt = "build/test_assets_corrupt.phxp";
+        write_file(p_corrupt, corrupt.data(), corrupt.size());
+
+        auto cr1 = ResourceCache::create(arena);
+        check(cr1.ok() && cr1.unwrap()->mount(plat, p_corrupt) == Status::Corrupt,
+              "flipped blob byte -> Status::Corrupt");
+        // ...but is still readable with the checksum pass skipped (opt-out, e.g. fast boot).
+        check(cr1.unwrap()->mount(plat, p_corrupt, /*verify_checksum*/false) == Status::Ok,
+              "verify_checksum=false loads the same corrupt bundle anyway");
+
+        // truncated file (e.g. an interrupted write/flash) -> IoError, not an OOB read.
+        std::vector<uint8_t> truncated(good.begin(), good.begin() + good.size() / 2);
+        const char* p_trunc = "build/test_assets_truncated.phxp";
+        write_file(p_trunc, truncated.data(), truncated.size());
+        auto cr2 = ResourceCache::create(arena);
+        check(cr2.ok() && cr2.unwrap()->mount(plat, p_trunc) == Status::IoError,
+              "truncated bundle -> Status::IoError");
+
+        // bad magic (wrong file entirely) -> IoError.
+        std::vector<uint8_t> bad_magic = good;
+        bad_magic[0] ^= 0xFF;
+        const char* p_magic = "build/test_assets_badmagic.phxp";
+        write_file(p_magic, bad_magic.data(), bad_magic.size());
+        auto cr3 = ResourceCache::create(arena);
+        check(cr3.ok() && cr3.unwrap()->mount(plat, p_magic) == Status::IoError,
+              "bad magic -> Status::IoError");
+
+        // version from the future -> Unsupported (refuse a newer major, never guess).
+        std::vector<uint8_t> bad_version = good;
+        bad_version[4] = 0xFF; bad_version[5] = 0xFF;   // BundleHeader.version (u16 @ offset 4)
+        const char* p_ver = "build/test_assets_badversion.phxp";
+        write_file(p_ver, bad_version.data(), bad_version.size());
+        auto cr4 = ResourceCache::create(arena);
+        check(cr4.ok() && cr4.unwrap()->mount(plat, p_ver) == Status::Unsupported,
+              "bundle version newer than the reader -> Status::Unsupported");
+
+        // a TOC entry pointing outside the bundle (corrupt offset) -> rejected structurally,
+        // BEFORE the checksum pass even runs (which would also fail, but for the wrong reason).
+        std::vector<uint8_t> bad_toc = good;
+        BundleHeader hdr; std::memcpy(&hdr, bad_toc.data(), sizeof(hdr));
+        TocEntry first; std::memcpy(&first, bad_toc.data() + hdr.toc_offset, sizeof(first));
+        first.offset = 0x7FFFFFFFu;   // absurd — well past total_size
+        std::memcpy(bad_toc.data() + hdr.toc_offset, &first, sizeof(first));
+        const char* p_toc = "build/test_assets_badtoc.phxp";
+        write_file(p_toc, bad_toc.data(), bad_toc.size());
+        auto cr5 = ResourceCache::create(arena);
+        check(cr5.ok() && cr5.unwrap()->mount(plat, p_toc) == Status::IoError,
+              "out-of-range TOC entry -> Status::IoError (caught before the checksum)");
+
+        // host/PC builds don't enforce a console `target` byte — a tool inspecting a
+        // GBA- or PSP-targeted bundle must still be able to mount it.
+        for (uint8_t tier = 0; tier <= 2; ++tier) {
+            phxtool::BundleWriter tw(tier);
+            tw.add_blob("x", "y", 1);
+            char path[64]; std::snprintf(path, sizeof(path), "build/test_tier%u.phxp", tier);
+            check(tw.write(path), "wrote a tier-specific bundle");
+            auto crt = ResourceCache::create(arena);
+            check(crt.ok() && crt.unwrap()->mount(plat, path) == Status::Ok,
+                  "host mounts any target tier's bundle");
+        }
+    }
+
+    // ---- lifecycle: idempotent mount + unmount/unmount_all --------------------------------
+    {
+        auto cr = ResourceCache::create(arena);
+        check(cr.ok(), "ResourceCache::create (lifecycle)");
+        ResourceCache* lc = cr.unwrap();
+
+        check(lc->mount(plat, bundle) == Status::Ok, "lifecycle: first mount");
+        check(lc->mount_count() == 1 && lc->asset_count() == 3, "lifecycle: one mount, 3 assets");
+        check(lc->mount(plat, bundle) == Status::Ok, "lifecycle: re-mounting the same path is a no-op");
+        check(lc->mount_count() == 1 && lc->asset_count() == 3,
+              "lifecycle: idempotent mount didn't duplicate the slot/assets");
+
+        check(lc->unmount(plat, bundle) == Status::Ok, "lifecycle: unmount");
+        check(lc->mount_count() == 0 && lc->asset_count() == 0, "lifecycle: unmount frees the slot");
+        check(!lc->texture("tiles"_hash).ok(), "lifecycle: assets gone after unmount");
+        check(lc->unmount(plat, bundle) == Status::NotFound, "lifecycle: double-unmount -> NotFound");
+
+        check(lc->mount(plat, bundle) == Status::Ok, "lifecycle: remount after unmount reuses the slot");
+        check(lc->texture("tiles"_hash).ok(), "lifecycle: assets found again after remount");
+        check(lc->mount(plat, raw_bundle) == Status::Ok, "lifecycle: mount a second, distinct bundle");
+        check(lc->mount_count() == 2, "lifecycle: two distinct mounts coexist");
+
+        check(lc->unmount_all(plat) == Status::Ok, "lifecycle: unmount_all");
+        check(lc->mount_count() == 0 && lc->asset_count() == 0, "lifecycle: unmount_all clears everything");
+    }
 
     plat->shutdown();
 

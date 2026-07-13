@@ -3,8 +3,23 @@
 #include "phx/resource/cache.h"
 #include "phx/resource/lz.h"
 #include "phx/platform/platform.h"
+#include "phx/core/crc32.h"
 
 namespace phx {
+
+namespace {
+// The bundle `target` tier this BINARY expects, or 0xFF to skip the check entirely. Gated on
+// the HARDWARE macros, never PHX_TARGET_GBA/PHX_TARGET_PSP alone: `TIER=gba_sim` (the host
+// fixed-point-scalar simulation, see CLAUDE.md) sets PHX_TARGET_GBA but still runs the soft
+// renderer against ordinary tier-2 test bundles, so it must NOT be held to the GBA-tier target.
+#if defined(PHX_GBA_HW)
+constexpr uint8_t kExpectedTarget = 0;
+#elif defined(PHX_TARGET_PSP)
+constexpr uint8_t kExpectedTarget = 1;
+#else
+constexpr uint8_t kExpectedTarget = 0xFF;   // host/PC: any target may be mounted (tools, tests)
+#endif
+} // namespace
 
 Result<ResourceCache*> ResourceCache::create(ArenaAllocator& a) {
     ResourceCache* c = a.make<ResourceCache>();
@@ -13,7 +28,11 @@ Result<ResourceCache*> ResourceCache::create(ArenaAllocator& a) {
     return Result<ResourceCache*>::good(c);
 }
 
-Status ResourceCache::mount(const phx_platform* plat, const char* path) {
+Status ResourceCache::mount(const phx_platform* plat, const char* path, bool verify_checksum) {
+    const NameHash path_hash = fnv1a(path);
+    for (uint32_t i = 0; i < mount_count_; ++i)
+        if (mounts_[i].path_hash == path_hash) return Status::Ok;   // idempotent re-mount
+
     if (mount_count_ >= kMaxMounts) return Status::OutOfMemory;
 
     size_t size = 0;
@@ -26,19 +45,64 @@ Status ResourceCache::mount(const phx_platform* plat, const char* path) {
     const BundleHeader* h = reinterpret_cast<const BundleHeader*>(base);
     if (h->magic != kBundleMagic) { plat->close(f); return Status::IoError; }       // wrong format / endianness
     if (h->version > kBundleVersion) { plat->close(f); return Status::Unsupported; } // newer major
-    if (h->toc_offset + h->asset_count * sizeof(TocEntry) > size) { plat->close(f); return Status::IoError; }
+    if (h->total_size > size) { plat->close(f); return Status::IoError; }           // truncated file
+    // toc_offset arithmetic below can't overflow uint32: asset_count is bounded by total_size
+    // (each TocEntry is >= 1 byte of blob), and total_size <= the mapped file size.
+    const uint64_t toc_end = uint64_t(h->toc_offset) + uint64_t(h->asset_count) * sizeof(TocEntry);
+    if (h->toc_offset < sizeof(BundleHeader) || toc_end > h->total_size) {
+        plat->close(f); return Status::IoError;
+    }
+
+    const TocEntry* toc = reinterpret_cast<const TocEntry*>(base + h->toc_offset);
+    for (uint32_t i = 0; i < h->asset_count; ++i) {
+        const uint64_t blob_end = uint64_t(toc[i].offset) + toc[i].size;
+        if (toc[i].offset < toc_end || blob_end > h->total_size || toc[i].usize < toc[i].size) {
+            plat->close(f); return Status::IoError;   // an asset points outside the bundle
+        }
+    }
+
+    if (verify_checksum && h->blob_crc32 != 0) {
+        const uint32_t got = crc32_of(base + h->toc_offset, h->total_size - h->toc_offset);
+        if (got != h->blob_crc32) { plat->close(f); return Status::Corrupt; }
+    }
+
+    if (kExpectedTarget != 0xFF && h->target != kExpectedTarget) {
+        plat->close(f); return Status::Unsupported;   // baked for a different console target
+    }
 
     Mounted& m = mounts_[mount_count_++];
     m.plat  = plat;
     m.file  = f;
     m.base  = base;
-    m.toc   = reinterpret_cast<const TocEntry*>(base + h->toc_offset);
+    m.toc   = toc;
     m.count = h->asset_count;
+    m.path_hash = path_hash;
     // Lazy-decompression cache: one pointer per asset, null until first touched. Only
     // compressed assets ever populate a slot; uncompressed ones stay zero-copy into the map.
     m.decoded = m.count ? arena_->alloc_array<const uint8_t*>(m.count) : nullptr;
     for (uint32_t i = 0; i < m.count; ++i) m.decoded[i] = nullptr;
     total_assets_ += m.count;
+    return Status::Ok;
+}
+
+Status ResourceCache::unmount(const phx_platform* plat, const char* path) {
+    const NameHash path_hash = fnv1a(path);
+    for (uint32_t i = 0; i < mount_count_; ++i) {
+        if (mounts_[i].path_hash != path_hash) continue;
+        (plat ? plat : mounts_[i].plat)->close(mounts_[i].file);
+        total_assets_ -= mounts_[i].count;
+        for (uint32_t j = i + 1; j < mount_count_; ++j) mounts_[j - 1] = mounts_[j];
+        --mount_count_;
+        return Status::Ok;
+    }
+    return Status::NotFound;
+}
+
+Status ResourceCache::unmount_all(const phx_platform* plat) {
+    for (uint32_t i = 0; i < mount_count_; ++i)
+        (plat ? plat : mounts_[i].plat)->close(mounts_[i].file);
+    mount_count_ = 0;
+    total_assets_ = 0;
     return Status::Ok;
 }
 

@@ -49,6 +49,7 @@ set(_itests
   scene:scene_test
   ui:ui_test
   platformer:platformer_test
+  emberwing:emberwing_test
   audio:audio_test
   texcache:texcache_test
   png:png_test
@@ -76,6 +77,15 @@ endforeach()
 # example's gameplay translation unit compiled in (the rest of the example is header-only).
 target_sources(it_platformer PRIVATE ${CMAKE_SOURCE_DIR}/examples/platformer/src/systems.cpp)
 target_include_directories(it_platformer PRIVATE ${CMAKE_SOURCE_DIR}/engine/resource/include)
+
+# Same deal for Emberwing: the test drives the real EmberwingGame, so its systems/scenes TUs
+# (the rest of the example is header-only) must be compiled in too. Mirrors `EMBERWING_SRC` in
+# the Makefile, minus the render backend (this target uses the default soft/null build, same
+# as every other headless integration test above).
+target_sources(it_emberwing PRIVATE
+  ${CMAKE_SOURCE_DIR}/examples/emberwing/src/systems.cpp
+  ${CMAKE_SOURCE_DIR}/examples/emberwing/src/scenes.cpp)
+target_include_directories(it_emberwing PRIVATE ${CMAKE_SOURCE_DIR}/engine/resource/include)
 
 # pipeline_test is in-process; it also drops author-source fixtures into build/. The CLI smoke
 # below then runs the REAL converter + assembler binaries over those fixtures (proving the
@@ -114,3 +124,49 @@ foreach(spec ppu:gba/gba_ppu gu:gu/gu_backend)
     ${_render_src} ${_render_src}/gba ${_render_src}/gu)   # ppu_model.h / gu_model.h
   add_test(NAME ${tname} COMMAND it_${tname} WORKING_DIRECTORY ${_test_wd})
 endforeach()
+
+# ---- Emberwing on the native PPU backend (the shipping GBA render path) ---
+# `make emberwing-ppu` re-links EMBERWING_SRC with gba_ppu.cpp swapped in for the soft
+# rasterizer — the SAME headless game/test TU, just proving it renders identically through
+# the PPU model. That backend swap is incompatible with linking phx_render (soft by default),
+# so — like ppu/gu above — this compiles every module directly from source instead of linking
+# the phx_* libs, guaranteeing the PPU backend (not whatever phx_render/phx_platform would
+# otherwise select) is the one under test.
+add_executable(it_emberwing_ppu
+  ${CMAKE_SOURCE_DIR}/engine/core/src/assert.cpp
+  ${CMAKE_SOURCE_DIR}/engine/core/src/fixed.cpp
+  ${CMAKE_SOURCE_DIR}/engine/core/src/log.cpp
+  ${CMAKE_SOURCE_DIR}/engine/memory/src/memory_root.cpp
+  ${CMAKE_SOURCE_DIR}/engine/ecs/src/world.cpp
+  ${_render_src}/renderer.cpp
+  ${_render_src}/gba/gba_ppu.cpp
+  ${CMAKE_SOURCE_DIR}/engine/physics/src/physics.cpp
+  ${CMAKE_SOURCE_DIR}/engine/anim/src/anim.cpp
+  ${CMAKE_SOURCE_DIR}/engine/scene/src/scene.cpp
+  ${CMAKE_SOURCE_DIR}/engine/ui/src/ui.cpp
+  ${CMAKE_SOURCE_DIR}/engine/platform/src/null/null_platform.cpp
+  ${CMAKE_SOURCE_DIR}/engine/runtime/src/app.cpp
+  ${CMAKE_SOURCE_DIR}/engine/resource/src/cache.cpp
+  ${CMAKE_SOURCE_DIR}/engine/audio/src/mixer.cpp
+  ${CMAKE_SOURCE_DIR}/examples/emberwing/src/systems.cpp
+  ${CMAKE_SOURCE_DIR}/examples/emberwing/src/scenes.cpp
+  suites/emberwing_test.cpp)
+target_include_directories(it_emberwing_ppu PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${_phxpack_inc}
+  ${CMAKE_SOURCE_DIR}/tools/common
+  ${CMAKE_SOURCE_DIR}/engine/core/include
+  ${CMAKE_SOURCE_DIR}/engine/memory/include
+  ${CMAKE_SOURCE_DIR}/engine/ecs/include
+  ${CMAKE_SOURCE_DIR}/engine/input/include
+  ${CMAKE_SOURCE_DIR}/engine/audio/include
+  ${CMAKE_SOURCE_DIR}/engine/platform/include
+  ${CMAKE_SOURCE_DIR}/engine/render/include
+  ${_render_src} ${_render_src}/gba
+  ${CMAKE_SOURCE_DIR}/engine/resource/include
+  ${CMAKE_SOURCE_DIR}/engine/physics/include
+  ${CMAKE_SOURCE_DIR}/engine/anim/include
+  ${CMAKE_SOURCE_DIR}/engine/scene/include
+  ${CMAKE_SOURCE_DIR}/engine/ui/include
+  ${CMAKE_SOURCE_DIR}/engine/runtime/include)
+add_test(NAME emberwing-ppu COMMAND it_emberwing_ppu WORKING_DIRECTORY ${_test_wd})

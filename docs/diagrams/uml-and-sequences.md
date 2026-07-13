@@ -127,10 +127,12 @@ EngineCtx is the POD bag of non-owning pointers threaded into gameplay.
 
 ```
    assets/*.png/.wav/.tmj/.json
-        │ phxsprite / phxsnd / phxtile / phxbin   (per-target encoders)
+        │ phxsprite / phxsnd / phxtile / phxbin
+        │ (phxsnd is the one converter with a real per-target step: GBA-rate resample —
+        │  docs/08-tooling.md §5; the others emit the same bytes for every --target today)
         ▼
    *.phxspr / *.phxsnd / *.phxtmap / *.phxbin
-        │ phxpack  (FNV-1a names -> sorted TOC, optional LZ77, .phxp.lock)
+        │ phxpack  (FNV-1a names -> sorted TOC, optional LZ77 — no lock file yet)
         ▼
    assets.phxp  ──(GBA: bin2o into ROM | PSP/PC: shipped alongside)──►  runtime
         │ ResourceCache::mount  =  mmap (PC) / load-once (PSP) / ROM ptr (GBA)

@@ -17,8 +17,14 @@ single codebase:
 |----------|---------------------------|---------------------|----------------------|--------------------|
 | GBA      | ARM7TDMI @ 16.78 MHz      | 256 KB + 32 KB IWRAM| Tile/sprite PPU      | devkitARM          |
 | PSP      | MIPS Allegrex @ 222–333 MHz| 32 MB (24 MB usable)| Graphics Engine (GU)| pspsdk / devkitPSP |
-| Linux    | x86-64 / ARM64            | GBs                 | OpenGL 3.3 / Vulkan  | GCC / Clang        |
-| Windows  | x86-64                    | GBs                 | OpenGL 3.3 / Vulkan  | MSVC / Clang / GCC |
+| Linux    | x86-64 / ARM64            | GBs                 | OpenGL 1.1¹          | GCC / Clang        |
+| Windows  | x86-64                    | GBs                 | OpenGL 1.1¹          | MSVC / Clang / GCC |
+
+¹ The original design target for the PC tier was a GL 3.3 core / optional-Vulkan backend
+(docs/03 §6 sketches it); the implemented `render/src/gl/` backend deliberately chose maximum
+compatibility instead — immediate-mode `glBegin`/`glVertex` against a GL 1.1 context, with the
+software rasterizer staying the golden reference every backend is diffed against. No Vulkan
+backend exists. Revisit GL 3.3/Vulkan only if PC/Windows batching becomes a real bottleneck.
 
 The central engineering tension is the **17,000× RAM gap** between the GBA and a
 modern PC. Phoenix resolves this not by lowest-common-denominator design, but by a
@@ -280,8 +286,9 @@ for all four. Full strategy in `docs/07-build-system.md`.
 ## 9. Asset Pipeline (offline → packed → mmap)
 
 Assets are **never parsed at runtime** in their authoring format. The host tools
-convert PNG/WAV/JSON/XML into a packed, platform-specialized binary that the engine
-memory-maps (PC/PSP) or links into ROM (GBA).
+convert PNG/WAV/JSON/Tiled `.tmj` into a packed binary that the engine memory-maps
+(PC/PSP) or links into ROM (GBA). (No XML input anywhere — Tiled maps are read as `.tmj`,
+its JSON export, not `.tmx`.)
 
 ```
  author/         host tools (tools/)            runtime (engine/resource)
@@ -293,10 +300,14 @@ memory-maps (PC/PSP) or links into ROM (GBA).
  └──────┘             └──────────┘
 ```
 
-Bundle format `.phxp`: header → TOC (hashed names → offset/size/type) → blobs.
-Per-platform specialization: GBA gets 4bpp paletted tiles & ROM-aligned data; PSP
-gets swizzled textures; PC gets RGBA8. The TOC is identical so the resource API is
-identical. Full spec in `docs/06-resources.md` and `docs/08-tooling.md`.
+Bundle format `.phxp`: header → TOC (hashed names → offset/size/type) → blobs. Textures are
+**RGBA8 in the bundle on every target** — there is no bake-time GBA 4bpp/paletted or PSP
+swizzled texture encoding today; the GBA PPU backend quantizes RGBA8 to 4bpp tiles + a
+palette at *upload* time instead (per-target texture baking is future work, tracked as such
+in `docs/06-resources.md` §4). Sound is the one asset type with a real bake-time per-target
+encode (`--target 0` resamples to the GBA's 18157 Hz device rate). The TOC layout is
+identical across targets so the resource API is identical. Full spec in
+`docs/06-resources.md` and `docs/08-tooling.md`.
 
 ---
 

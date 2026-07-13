@@ -1,6 +1,10 @@
 # Phoenix Engine — Rendering
 
-> `engine/render/` — one public API, three backends (GBA PPU, PSP GU, PC GL/Vulkan).
+> `engine/render/` — one public API, four backends as implemented today: GBA PPU, PSP GU,
+> PC GL, and a software rasterizer (the golden reference every other backend is diffed
+> against; see `docs/graphics-engine.md` §5 for the as-built version of this document —
+> in particular, §6 below describes a GL 3.3/Vulkan design that was never built; the
+> implemented PC backend is GL 1.1 immediate mode, no Vulkan).
 > The hard part: the GBA has **no framebuffer-blit model** in its fast path — it has a
 > tile/sprite *PPU* with 128 hardware sprites and 4 background layers. The API is
 > therefore shaped around **sprites and tilemaps**, which map *up* to GL/GU trivially
@@ -55,14 +59,26 @@ decides how those become reality.
 
 ## 2. Backend mapping table
 
-| API concept       | GBA PPU backend                 | PSP GU backend            | PC GL/VK backend         |
+The PC column below is the *original design target* (§6 goes into more detail on why it
+wasn't built that way). What's actually implemented is a GL 1.1 immediate-mode port of the
+software rasterizer's geometry — `glBegin(GL_QUADS)` per sprite/tile, no instancing, no
+shaders, no VAOs. It is pixel-verified against the software golden (`make gl-verify`) and
+that's the bar that matters; revisit the instanced/shader design only if PC/Windows draw
+call count becomes a real bottleneck (it hasn't at the scene sizes this engine targets).
+
+| API concept       | GBA PPU backend                 | PSP GU backend            | PC GL backend (design target — see note above) |
 |-------------------|----------------------------------|---------------------------|--------------------------|
 | `Tilemap` layer   | hardware BG layer (REG_BGxCNT), map+tiles in VRAM | textured grid mesh, GE display list | instanced quads / tile shader |
 | `set_scroll`      | `REG_BGxHOFS/VOFS` write (free!) | uniform/matrix offset     | uniform offset           |
 | `draw_sprite`     | OAM entry (≤128) + VRAM tile     | `sceGuDrawArray` triangle pair | batched instanced quad |
-| `Texture`         | 4bpp paletted tiles in VRAM/ROM  | swizzled CLUT/RGBA in VRAM | RGBA8 / paletted sampler |
+| `Texture`         | RGBA8 in ROM; quantized to 4bpp paletted tiles in VRAM at *upload*, not bake time — see §5 | RGBA8 (no swizzle today — see §5) | RGBA8 |
 | sort & batch      | priority bits + OAM order        | sort then one display list | sort, instance buffer    |
 | blend             | PPU blend regs (limited modes)   | GE blend                  | full blend pipeline      |
+
+As implemented today, the PC backend's actual row would read: `Tilemap`/`draw_sprite` →
+one `glBegin(GL_QUADS)`/`glVertex2f` pair per draw; `Texture` → RGBA8 via `glTexImage2D`,
+no sampler-side palette; sort & batch → `std::sort` then one draw call per sprite (no
+instance buffer yet); blend → fixed-function `glBlendFunc`.
 
 The **sprite ceiling is the API's honest limit**: `phx_caps::max_sprites` is 128 on
 GBA. `draw_sprite` past the ceiling on GBA drops the lowest-priority sprite and
@@ -126,21 +142,40 @@ The PPU is the engine here. Notes that shape the design:
 ## 5. PSP backend specifics (`src/gu/`)
 
 - `sceGuInit`, double-buffered VRAM, depth/dither off for pure 2D (2.5D enables them).
-- Textures **swizzled** at pack time (`phxpack` does it) for GE cache efficiency.
+- Textures are RGBA8, same as every other target — **not swizzled**. Swizzling at pack
+  time for GE cache efficiency was the original design (`phxpack --target psp`) but isn't
+  implemented; `engine/render/src/gu/gu_backend.cpp` rejects any format that isn't RGBA8
+  rather than unswizzling one. Revisit if GE texture-fetch cost actually shows up in a
+  profile — it hasn't needed to yet at this engine's texture sizes.
 - One display list per frame built into the frame stack; `sceGuFinish`/`sceGuSync`.
 - 2.5D: the same sprite quads but with real Z and a perspective/ortho `sceGumMatrix`,
   enabling billboards, layered parallax with depth, and simple textured 3D props.
 
-## 6. PC backend specifics (`src/gl/`, optional `src/vk/`)
+## 6. PC backend specifics (`src/gl/` as implemented; `src/vk/` was the design, never built)
 
-- **GL 3.3 core** baseline (maximum portability across old Linux/Win GPUs — fits the
-  "low-resource" ethos). One static-geometry tile shader + an instanced sprite shader.
+**As implemented:** `engine/render/src/gl/gl_backend.cpp` is a deliberate **GL 1.1
+immediate-mode** port of the software rasterizer's geometry — `glBegin(GL_QUADS)` /
+`glTexCoord2f` / `glVertex2f` per sprite or tile, nearest filtering, fixed-function alpha
+blend. No GL loader (glad/glew) — it links straight against libGL, which is enough for a
+1.1 context on every desktop GL driver, current or ancient. Chosen for maximum
+compatibility over throughput (fits the "low-resource" ethos in spirit, if not in the GPU
+API generation), since this engine's 2D scene sizes never came close to making draw-call
+count the bottleneck. Pixel-verified against the software golden on a real GPU
+(`make gl-verify`).
+
+**The original design (below), not built — revisit only if PC/Windows batching becomes a
+real bottleneck (docs/09 v0.4 tracks it):**
+
+- **GL 3.3 core** baseline (maximum portability across old Linux/Win GPUs). One
+  static-geometry tile shader + an instanced sprite shader.
 - Sprites drawn via **instanced quads**: one VBO of unit quad, per-instance buffer of
   `{pos, src-rect, flags}`; a single `glDrawArraysInstanced` per (layer,texture) batch.
 - **Vulkan optional** (`PHX_ENABLE_VULKAN`): same front end, a backend that pre-records
-  command buffers. Off by default — GL meets the bar; Vulkan is for users who want it.
-- A **software fallback** (`src/soft/`) exists for headless CI / extreme low-end and
-  doubles as the reference image for backend conformance tests.
+  command buffers. No `src/vk/` folder or Vulkan symbol exists in the repo today.
+
+A **software fallback** (`src/soft/`) exists for headless CI / extreme low-end and
+doubles as the reference image for backend conformance tests — this one IS built, and is
+the golden reference every backend (including the GL 1.1 one above) is diffed against.
 
 ## 7. Text & UI share the sprite path
 

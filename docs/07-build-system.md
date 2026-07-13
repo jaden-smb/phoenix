@@ -49,6 +49,27 @@ cmake --build build/psp     # -> EBOOT.PBP
 2. which `phx_caps` tier header is active (`-DPHX_CAPS_HEADER=...`),
 3. platform compile flags (no-exceptions/no-rtti on console, etc.).
 
+### Debug vs. release (`PHX_BUILD_RELEASE`)
+
+`PHX_BUILD_RELEASE` strips `PHX_ASSERT` to `((void)0)` and raises the log floor to `Info` (see
+`engine/core/include/phx/core/assert.h` / `log.h`). It is wired differently per target because
+"release" means different things on a dev host vs. a shipping console:
+
+- **GBA / PSP**: always on, unconditionally — set in the root `CMakeLists.txt`'s console block
+  and in the Makefile's `GBA_FLAGS`/`PSP_FLAGS`. These builds only ever run on real hardware or
+  an emulator standing in for it; a debug `PHX_ASSERT` trap hangs a console instead of dropping
+  a developer into a debugger, and every Trace/Debug log format string is dead weight against
+  the GBA size gate (docs/09 MVP gate). There is no "GBA debug build".
+- **Linux / Windows**: opt-in, matching the Makefile's default. `make check` / `ctest` stay in
+  debug (asserts live) unless requested otherwise:
+  - Makefile: `make check RELEASE=1` (or the dedicated `make release` gate, which runs the whole
+    check suite under `RELEASE=1` in its own build root — this is where a variable that's only
+    referenced inside `PHX_ASSERT` would surface as an `-Wunused-variable` warning once the
+    macro compiles away, instead of only showing up in a devkitARM/pspsdk cross build).
+  - CMake: `-DCMAKE_BUILD_TYPE=Release` (or `RelWithDebInfo`/`MinSizeRel`). These already define
+    `NDEBUG`, which `assert.h`/`log.h` treat as a synonym for `PHX_BUILD_RELEASE` — no extra
+    `add_compile_definitions` needed for the host/Windows path.
+
 ## 3. `phx_add_module` helper (keeps every module identical)
 
 ```cmake
@@ -102,10 +123,14 @@ set(CMAKE_CXX_FLAGS_INIT "-G0 -fno-exceptions -fno-rtti -O2")
 Post-build: `psp-fixup-imports` → `mksfo` (param.sfo) → `pack-pbp` → `EBOOT.PBP`,
 runnable in PPSSPP or on a CFW PSP.
 
-## 5. Asset build integration
+## 5. Asset build integration (design sketch — not what's actually wired today)
 
-Assets are a CMake target too — bundles are built by host tools before the runtime
-binary that consumes them. Cross-target builds still build tools for the **host**:
+Assets *could* be a CMake target — bundles built by host tools before the runtime binary
+that consumes them, with cross-target builds still building tools for the **host** — but
+`examples/platformer/CMakeLists.txt` doesn't do this today; see its own comment: "A real
+project bakes authored assets offline with `phxpack` into assets.phxp; this demo [does
+something simpler]." The actual GBA/PSP asset bake is Makefile-driven (`GBA_PLAT_SRC`'s
+`bake_main.cpp` step, `bin2s`). What CMake asset integration *would* look like:
 
 ```cmake
 # tools always build for host, even in a GBA/PSP configure (via ExternalProject/host build)
@@ -120,7 +145,11 @@ add_dependencies(platformer assets)
 # GBA: assets.phxp is bin2o'd into the ROM; PSP/PC: shipped alongside EBOOT/exe.
 ```
 
-Incremental: only changed source assets re-encode (the `.phxp.lock` tracks hashes).
+Even in this sketch, "incremental: only changed source assets re-encode" would need a
+`.phxp.lock`-style hash file that doesn't exist yet (`docs/08-tooling.md` §2/§9) — as
+written, CMake's own `DEPENDS` list already forces a full re-run of `phxpack` on any
+input change; there's no partial/incremental re-encode inside `phxpack` itself to exploit
+either way.
 
 ## 6. Dependency enforcement in CI
 
@@ -157,6 +186,7 @@ The top-level `Makefile` is the day-to-day driver (no CMake needed on the host):
 make check            # THE gate: unit + integration + pipeline + tools + depcheck
 make determinism      # both scalar tiers, byte-compared
 make sanitize         # ASan+UBSan over the whole check suite
+make release          # the whole check suite built+run with PHX_BUILD_RELEASE=1
 make gba-platformer   # devkitARM ROM        make psp-platformer  # pspsdk EBOOT
 make win              # MinGW-w64 .exes      make sdl / make gl   # windowed example
 ```

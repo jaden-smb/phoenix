@@ -9,12 +9,16 @@
 | Tool        | Input → Output                         | Role                                  |
 |-------------|----------------------------------------|---------------------------------------|
 | `phxsprite` | PNG (+ slice json) → `.phxspr`         | sprite/atlas + animation slicing      |
-| `phxtile`   | Tiled `.tmj`/`.tmx` → `.phxtmap`       | tilemap + layers + collision baking   |
-| `phxsnd`    | WAV → `.phxsnd`                        | audio: PCM/ADPCM/8-bit per target     |
-| `phxbin`    | JSON/XML → `.phxbin`                   | data tables → optimized binary         |
-| `phxpack`   | the above `+` → `assets.phxp`          | bundle assembler (per-target encode)  |
+| `phxtile`   | Tiled `.tmj` → `.phxtmap`               | tilemap + layers + collision baking   |
+| `phxsnd`    | WAV → `.phxsnd`                        | audio: mono 16-bit PCM (GBA resampled at bake, see §5) |
+| `phxbin`    | JSON → `.phxbin`                       | data tables → optimized binary         |
+| `phxpack`   | the above `+` → `assets.phxp`          | bundle assembler (sorted TOC, optional LZ77; see §2 for what's actually per-target) |
 | `phxtmap`   | GUI tilemap editor → `.tmj`            | authoring (wraps Tiled-compatible fmt)|
 | `phxentity` | GUI entity/prefab editor → `.json`     | component/prefab authoring             |
+
+(No tool accepts XML/`.tmx` input today, despite some of the design language below — Tiled
+maps are `.tmj`/JSON only. ADPCM/8-bit-at-bake for `phxsnd` is target design, not built either
+— see §5's "As built" note.)
 
 `phxsprite/phxtile/phxsnd/phxbin` are the **converters**; `phxpack` is the
 **assembler**; `phxtmap/phxentity` are the **editors**. Editors output author formats
@@ -36,11 +40,18 @@ bake path single and testable).
 
 Responsibilities:
 - Resolve names → FNV-1a hashes, build the **sorted TOC** (§`docs/06`).
-- Invoke the right per-target encoder (4bpp tiles for GBA, swizzle for PSP, RGBA8 PC).
 - Apply compression where it pays (`--compress auto` measures and keeps the smaller).
-- Write `assets.phxp.lock` (source hashes + tool versions) for reproducible/incremental
-  rebuilds.
-- Emit `manifest.txt` (hash↔path) for dev-build debugging.
+- Stamp the bundle `target` byte for the mount-time tier check (`docs/06` §2) —
+  **implemented**, and today it's the *only* real per-target divergence for most asset
+  types: textures/tilemaps/bin tables are byte-identical across `--target 0|1|2`.
+
+**Designed, not implemented:** the original design called for `phxpack` to invoke a
+per-target texture encoder (4bpp tiles for GBA, swizzle for PSP, RGBA8 PC), write an
+`assets.phxp.lock` (source hashes + tool versions, for reproducible/incremental rebuilds),
+and emit a `manifest.txt` (hash↔path) for dev-build debugging. None of the three exist in
+`tools/phxpack/` — every invocation is a full, non-incremental re-bake, and the only
+per-target *asset* encode implemented anywhere in the pipeline is `phxsnd`'s GBA sound
+resample (§5). See §9 for the full list of pipeline guarantees this affects.
 
 ## 3. `phxsprite` — sprites, atlases, animation
 
@@ -59,20 +70,50 @@ Input: a PNG plus an optional sidecar describing slices/animations:
 }
 ```
 
-Output `.phxspr` blob: atlas pixels (target-encoded) + a frame table + an animation
-table consumed directly by `engine/anim`. For GBA it also **quantizes to ≤16 colors**
-and emits the palette, failing loudly if the art exceeds the palette budget (caught
-offline, not on hardware).
+Output `.phxspr` blob: RGBA8 atlas pixels (same bytes regardless of `--target` — no
+per-target texture encode is implemented anywhere in the pipeline yet, see §2) + a frame
+table + an animation table consumed directly by `engine/anim`.
+
+**Designed, not implemented:** bake-time GBA palette quantization (≤16 colors, failing
+loudly offline if the art exceeds the budget). Today that quantization happens instead at
+*upload* time in the GBA PPU render backend (`engine/render/src/gba/gba_ppu.cpp`), on every
+run, not just at bake — so a too-large palette is currently a runtime/test-time failure,
+not a bake-time one. Moving it to bake time (catching it offline, before it ever reaches a
+console) is open work.
 
 ## 4. `phxtile` — tilemaps & collision
 
-Reads the open **Tiled** JSON/XML (so artists can use a mature editor) and bakes:
+Reads the open **Tiled JSON export** (`.tmj` — so artists can use a mature editor) and
+bakes:
 - tile index layers (one per BG layer; GBA caps at 4),
-- a **collision layer** → a packed bitset / per-tile collision-shape id,
+- an optional per-layer Q16 parallax factor (imported from Tiled's `parallaxx`/`parallaxy`),
 - object layer → entity spawn list (positions + prefab refs for `phxentity`).
+
+There is **no separate collision layer or per-tile collision-shape/bitset field** — the
+convention (enforced by convention, not the file format) is that **the last tile layer IS
+the collision layer**: `engine/physics` treats any index `>= solid_from` in that last layer
+as solid (`docs/10-gameplay-systems.md`; `examples/platformer/src/systems.cpp` and
+`examples/emberwing/src/systems.cpp` both set `solid_from = 1`). A dedicated collision
+bitset/shape-id field, and `.tmx`/XML input, were the original design (below) — neither
+is built.
 
 ```
  Tiled .tmj                     .phxtmap
+ ┌─────────────┐                ┌──────────────────────────────┐
+ │ layer: bg    │               │ hdr: w,h,tilew,tileh,layers   │
+ │ layer: main  │  phxtile ──►  │ layer[i]: u16 indices         │
+ │ layer: coll  │ (as built:    │ (+ optional per-layer parallax│
+ │ objects      │  last layer   │    factor table)              │
+ │              │  = solid)     │ spawns: {prefab_hash, x,y}    │
+ └─────────────┘                └──────────────────────────────┘
+```
+
+The design sketch below (a dedicated `collision: bitset/shapeids` blob field, independent
+of layer order) is not implemented — it would let a level keep a visible-but-non-solid
+top layer after the solid one, which the current "last layer wins" convention can't do:
+
+```
+ Tiled .tmj/.tmx (design)       .phxtmap (design)
  ┌─────────────┐                ┌────────────────────────────┐
  │ layer: bg    │               │ hdr: w,h,tilew,tileh,layers │
  │ layer: main  │  phxtile ──►  │ layer[i]: u16 indices       │
@@ -90,17 +131,19 @@ Reads the open **Tiled** JSON/XML (so artists can use a mature editor) and bakes
 | PC     | 16-bit PCM (SFX), OGG ref (music) | quality, ample RAM                   |
 
 > **As built:** all targets store mono 16-bit PCM; the per-target step implemented so
-> far is the **tier-0 (GBA) bake-time downsample to the 16384 Hz device rate** (Q16
+> far is the **tier-0 (GBA) bake-time downsample to the 18157 Hz vblank-locked device rate** (Q16
 > linear, deterministic) — the runtime downmixes 16→8-bit at the DMA buffer. ADPCM
 > and OGG music refs are future encoders behind the same `--target` switch.
 
 Output `.phxsnd`: header (rate, frames) + samples. Music can be streamed by the
 runtime instead of fully residing (`docs/06` §5).
 
-## 6. `phxbin` — JSON/XML → binary tables
+## 6. `phxbin` — JSON → binary tables
 
-Game data (item stats, dialogue, tuning) authored as JSON/XML, baked to a flat binary
-the engine reads as a `BlobView` with a generated accessor struct:
+Game data (item stats, dialogue, tuning) authored as **JSON only** (an XML input path was
+part of the original design — "the same backend via a small XML→intermediate step" — but
+was never built; `tools/phxbin/main.cpp` takes a `.json` argument, full stop), baked to a
+flat binary the engine reads as a `BlobView` with a generated accessor struct:
 
 ```
  items.json ──► phxbin ──► items.phxbin   (array<ItemRecord>, fixed stride)
@@ -108,7 +151,7 @@ the engine reads as a `BlobView` with a generated accessor struct:
 ```
 
 No runtime JSON parser ships. The generated header guarantees the struct and the blob
-agree (versioned). XML path uses the same backend via a small XML→intermediate step.
+agree (versioned).
 
 ## 7. `phxtmap` — Tilemap Editor (GUI)
 
@@ -163,12 +206,23 @@ users aren't locked into our editor.
 
 ## 9. Pipeline guarantees
 
-- **Determinism:** same sources + same tool versions → byte-identical bundle (lock
-  file asserts it). Enables reproducible builds and meaningful binary diffs.
-- **Offline validation:** palette overflow, oversized atlas, missing tile, broken
-  prefab ref → all fail the *bake*, never the *game*. The console build is incapable of
-  malformed assets.
-- **Incremental:** content hashing → only changed assets re-bake; CI re-pack is fast.
+**True today:**
+- **Determinism, informally:** the bake path is a pure function of its inputs (no clock
+  reads, no nondeterministic ordering) — same sources in, same bundle bytes out — but
+  nothing *asserts* this; there's no lock file, and the pipeline suites don't diff two
+  independent bakes of the same fixtures byte-for-byte to prove it.
+- **Offline validation, for what's implemented:** a broken prefab ref, a malformed
+  `.tmj`/JSON, or a missing referenced file fails the *bake*, never the *game*. GBA
+  palette overflow is the one design-time check that currently only fires at *upload*
+  time (§3), not bake time, so it isn't in this category yet.
 - **Round-trip tested:** the pipeline/resource suites (`make pipeline`, `make resource`,
-  `make tools`) bake fixtures and assert the runtime
-  `ResourceCache` reads back identical views for every type, on every target encoding.
+  `make tools`) bake fixtures and assert the runtime `ResourceCache` reads back identical
+  views for every type, on every target encoding.
+
+**Designed, not implemented** (all of §2's "designed, not implemented" list applies here
+too):
+- **No incremental bake.** Every `phxpack`/converter invocation re-does the full
+  decode+encode+write; there's no content-hash-based skip of unchanged assets. Fine at
+  this project's asset volume; would need the lock-file work below to scale further.
+- **No lock file, no reproducibility guarantee that's actually checked.** `.phxp.lock`
+  (recording source hashes + tool versions so CI could flag a stale bundle) is unbuilt.

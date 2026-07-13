@@ -18,9 +18,10 @@ void log_emit(LogLevel level, const char* fmt, ...);   // formats into a fixed s
 
 } // namespace phx
 
-// Compile-time floor: levels below this vanish entirely (no code, no strings).
+// Compile-time floor: levels below this vanish entirely (no code, no strings). See assert.h
+// for why both PHX_BUILD_RELEASE and NDEBUG are checked.
 #ifndef PHX_LOG_FLOOR
-    #if defined(PHX_BUILD_RELEASE)
+    #if defined(PHX_BUILD_RELEASE) || defined(NDEBUG)
         #define PHX_LOG_FLOOR 2   /* Info */
     #else
         #define PHX_LOG_FLOOR 0   /* Trace */

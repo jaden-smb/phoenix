@@ -21,6 +21,7 @@ enum class Status : int16_t {
     IoError,
     Unsupported,
     Overflow,
+    Corrupt,       // structurally valid but a content integrity check failed (e.g. bad checksum)
 };
 
 template <class T>

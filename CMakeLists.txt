@@ -20,6 +20,16 @@ if(PHX_TARGET STREQUAL "gba" OR PHX_TARGET STREQUAL "psp")
   # Consoles: no exceptions, no RTTI — matches the engine's no-throw contract.
   add_compile_options(-fno-exceptions -fno-rtti)
   add_compile_definitions(PHX_NO_EXCEPTIONS=1)
+  # Every GBA/PSP build always ships on real hardware or an emulator standing in for it, never
+  # a dev host — so PHX_BUILD_RELEASE (phx/core/assert.h, phx/core/log.h) is unconditional here,
+  # same as the Makefile's GBA_FLAGS/PSP_FLAGS: a debug PHX_ASSERT trap hangs a console instead
+  # of dropping into a debugger, and Trace/Debug log format strings just burn ROM the GBA size
+  # gate (docs/09 MVP gate) is already tight on. Host/Windows builds instead pick this up from
+  # the standard CMake Release/RelWithDebInfo/MinSizeRel configs, which already define NDEBUG —
+  # see the `defined(NDEBUG)` fallback in assert.h/log.h — so pass -DCMAKE_BUILD_TYPE=Release
+  # for a release desktop build; the default (no CMAKE_BUILD_TYPE) stays debug, matching the
+  # Makefile's default.
+  add_compile_definitions(PHX_BUILD_RELEASE=1)
 endif()
 
 if(MSVC)
@@ -50,7 +60,9 @@ add_subdirectory(examples/emberwing)
 # ---- host-only tools (always built for the host, even when cross-compiling) -
 # The asset pipeline (docs/08): per-format CONVERTERS bake author sources into intermediate
 # .phx* files; the phxpack ASSEMBLER merges them into assets.phxp. They share one bake path
-# (tools/phxpack/builders.h). The phxtmap/phxentity GUI editors are M6 (not yet built).
+# (tools/phxpack/builders.h). The phxtmap/phxentity GUI editors are Makefile-only for now
+# (`make tmap` / `make entity`): they need SDL2 + a display, which this tree doesn't probe for
+# (see PHX_USE_SDL on phx_platform) — wiring them into CMake is still open.
 if(NOT CMAKE_CROSSCOMPILING)
   add_subdirectory(tools/phxpack)     # assembler
   add_subdirectory(tools/phxsprite)   # PNG/sprdef/json -> .phxspr

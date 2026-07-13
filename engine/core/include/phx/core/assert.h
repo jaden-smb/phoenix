@@ -9,7 +9,13 @@ namespace phx::detail {
 [[noreturn]] void assert_fail(const char* expr, const char* file, int line, const char* msg);
 }
 
-#if defined(PHX_BUILD_RELEASE)
+// PHX_BUILD_RELEASE is the engine's own release switch (unconditionally defined for GBA/PSP
+// cross builds — see Makefile GBA_FLAGS/PSP_FLAGS and the root CMakeLists.txt — since a debug
+// assert trap that's fine on a host build hangs real hardware; opt-in on the host via
+// `make release` / `-DCMAKE_BUILD_TYPE=Release`). NDEBUG is also honored directly so a plain
+// CMake Release/RelWithDebInfo/MinSizeRel config (which already defines it) gets correct
+// behavior with no extra wiring.
+#if defined(PHX_BUILD_RELEASE) || defined(NDEBUG)
     #define PHX_ASSERT(cond)            ((void)0)
     #define PHX_ASSERT_MSG(cond, msg)   ((void)0)
 #else

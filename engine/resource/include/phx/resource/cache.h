@@ -67,13 +67,37 @@ struct SpriteView {
 };
 
 // Compile-time name hashing so call sites cost nothing: cache.texture("hero"_hash)
+//
+// Validation performed at mount() (docs/06-resources.md §1/§7): magic + version (refuses a
+// newer major), every TOC entry's [offset, offset+size) bounds-checked against the mapped
+// file so a corrupt/truncated bundle can never drive an out-of-bounds read, an optional
+// (default on) CRC32 of the TOC+blob region against BundleHeader.blob_crc32, and — ONLY on a
+// real console build (PHX_GBA_HW / PHX_TARGET_PSP; never the host, incl. `TIER=gba_sim`,
+// which only simulates the fixed-point *scalar* tier, not real hardware — see CLAUDE.md) — that
+// the bundle's `target` byte matches the tier the binary actually ships on, so a bundle baked
+// for the wrong console can never load silently.
+//
+// Lifecycle: mount() is idempotent — mounting the same path twice is a no-op, not a wasted
+// slot. unmount()/unmount_all() close the platform file/mapping and free the mount slot for
+// reuse; ANY view/pointer obtained from this cache before that call (TextureView, a raw TOC
+// blob pointer, …) is invalidated the instant it returns — zero-copy views alias the mapping,
+// they are never copied out.
 class ResourceCache {
 public:
     static Result<ResourceCache*> create(ArenaAllocator&);
 
     // Mount a bundle via the platform's open/map. The mapped view stays valid until
-    // unmount()/shutdown. Multiple bundles can be mounted (searched in mount order).
-    Status mount(const phx_platform*, const char* path);
+    // unmount()/unmount_all()/shutdown. Multiple bundles can be mounted (searched in mount
+    // order; kMaxMounts slots, reused after unmount()). `verify_checksum=false` skips the
+    // CRC32 pass (still does every structural check) when mount-time latency matters more
+    // than catching bit-rot/bad-flash — the default favors safety.
+    Status mount(const phx_platform*, const char* path, bool verify_checksum = true);
+
+    // Unmount a previously-mounted bundle by path (compacts the mount table). NotFound if no
+    // mount matches. Invalidates every view/pointer this cache handed out from that bundle.
+    Status unmount(const phx_platform*, const char* path);
+    // Unmount everything (app shutdown, or a clean slate before mounting a new level's set).
+    Status unmount_all(const phx_platform*);
 
     Result<TextureView> texture(NameHash);
     Result<TilemapView> tilemap(NameHash);
@@ -83,6 +107,7 @@ public:
     Result<BlobView>    blob(NameHash);
 
     uint32_t asset_count() const { return total_assets_; }
+    uint32_t mount_count() const { return mount_count_; }
 
 private:
     ResourceCache() = default;
@@ -95,6 +120,7 @@ private:
         const TocEntry*     toc  = nullptr;
         uint32_t            count = 0;
         const uint8_t**     decoded = nullptr;  // per-asset decompressed buffer (lazy; null=raw/zero-copy)
+        NameHash            path_hash = 0;      // fnv1a(path); identifies the mount for unmount()
     };
 
     const TocEntry* find(NameHash, AssetType) const;

@@ -11,10 +11,13 @@ the runtime wraps as a `SoundView` and plays through the software mixer. `phxpac
 Decodes RIFF/PCM WAV (8- or 16-bit, mono or stereo) with the pipeline's own decoder; stereo is
 downmixed to mono, 8-bit is converted to signed 16. Then the **per-target encode** step runs:
 
-- `--target 0` (GBA): the PCM is **resampled down to 16384 Hz at bake time** — the GBA Direct
-  Sound device rate. The cartridge carries ~2.7× less sample data (for 44.1 kHz sources) and
-  the 16 MHz CPU mixes 1:1 instead of resampling every voice. Q16 linear interpolation,
-  all-integer, deterministic.
+- `--target 0` (GBA): the PCM is **resampled down to 18157 Hz at bake time** — the vblank-locked
+  GBA Direct Sound device rate (924 CPU cycles/sample; 280896 CPU cycles/video frame ÷ 924 =
+  exactly 304 samples/frame, so the DMA double-buffer swap never drifts against vblank; a
+  non-locked rate like 16384 Hz gives a fractional 274.3125 samples/frame instead — see
+  `tools/phxpack/bundle_writer.h`'s `kTier0Rate` comment). The cartridge carries ~2.4× less
+  sample data (for 44.1 kHz sources) and the 16 MHz CPU mixes 1:1 instead of resampling every
+  voice. Q16 linear interpolation, all-integer, deterministic.
 - `--target 1|2` (PSP/PC, default 2): the source rate is kept — those mixers run at 44.1 kHz
   and resample cheaply at runtime.
 
@@ -38,4 +41,4 @@ The asset name defaults to the WAV's stem; the game looks it up by that name
 
 Try it on the fixture `make check` drops: `./build/phxsnd --out /tmp/t.phxsnd build/p_tone.wav`.
 Verified by `make audio` (decode → bake → mount → mix) and `make pipeline` (incl. the tier-0
-resample: rate 16384, frame count scaled, samples intact).
+resample: rate 18157, frame count scaled, samples intact).

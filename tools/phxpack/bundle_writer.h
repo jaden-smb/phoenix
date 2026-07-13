@@ -7,11 +7,13 @@
 #include "phx/resource/bundle.h"
 #include "phx/core/types.h"
 #include "phx/core/pixel.h"
+#include "phx/core/crc32.h"
 #include "lz_encode.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -20,7 +22,16 @@ namespace phxtool {
 
 class BundleWriter {
 public:
-    explicit BundleWriter(uint8_t target_tier = 2) : target_(target_tier) {}
+    // target_tier: 0=GBA PPU, 1=PSP GU, 2=PC GL/soft (phx/resource/bundle.h). Anything else is
+    // an authoring mistake (a made-up tier the runtime's target guard could never match) —
+    // fail loudly at construction rather than silently baking an unloadable bundle.
+    explicit BundleWriter(uint8_t target_tier = 2) : target_(target_tier) {
+        if (target_tier > 2) {
+            std::fprintf(stderr, "BundleWriter: invalid target tier %u (want 0=GBA/1=PSP/2=PC)\n",
+                         unsigned(target_tier));
+            std::abort();
+        }
+    }
 
     // Enable LZSS compression of blobs. Each asset is compressed independently at write()
     // time and stored compressed ONLY if that actually shrinks it (else stored verbatim), so
@@ -87,8 +98,9 @@ public:
 
     // Mono 16-bit PCM sound at `rate` Hz (e.g. decoded from a WAV). PER-TARGET ENCODE
     // (docs/06): on tier 0 (GBA) the PCM is resampled down to the GBA device rate at BAKE
-    // time — the ROM carries ~2.7× less sample data and the 16 MHz CPU mixes 1:1 instead
-    // of resampling every voice. Q16 linear interpolation, all-integer (deterministic).
+    // time — the ROM carries ~2.4× less sample data (for 44.1 kHz sources) and the 16 MHz
+    // CPU mixes 1:1 instead of resampling every voice. Q16 linear interpolation, all-integer
+    // (deterministic).
     // Tiers 1/2 keep the source rate: their mixers run at 44.1 kHz and resample cheaply.
     // == the GBA Direct Sound device rate. 18157 Hz is the vblank-locked rate (924 CPU
     // cycles/sample; exactly 304 samples per 280896-cycle video frame) — the GBA backend's
@@ -179,22 +191,26 @@ public:
         }
         const uint32_t total = cursor;
 
+        // Assemble the whole file in memory first (TOC + blobs; zero-filled alignment padding
+        // comes for free from vector's default-init) so the blob-region CRC32 can be computed
+        // before the header is written — a bundle is small enough on any target's dev machine
+        // that this costs nothing, and it means the header is ALWAYS written with the real
+        // checksum of the bytes that follow it, never patched after the fact on disk.
+        std::vector<uint8_t> buf(total - toc_off, 0);
+        std::memcpy(buf.data(), toc.data(), count * sizeof(phx::TocEntry));
+        for (uint32_t i = 0; i < count; ++i)
+            std::memcpy(buf.data() + (toc[i].offset - toc_off), stored[i]->data(), stored[i]->size());
+
         phx::BundleHeader h{};
         h.magic = phx::kBundleMagic; h.version = phx::kBundleVersion;
         h.target = target_; h.flags = 0;
-        h.asset_count = count; h.toc_offset = toc_off; h.total_size = total; h.reserved = 0;
+        h.asset_count = count; h.toc_offset = toc_off; h.total_size = total;
+        h.blob_crc32 = phx::crc32_of(buf.data(), buf.size());   // covers TOC + every blob
 
         FILE* fp = std::fopen(path.c_str(), "wb");
         if (!fp) return false;
         std::fwrite(&h, sizeof(h), 1, fp);
-        std::fwrite(toc.data(), sizeof(phx::TocEntry), count, fp);
-        // blobs at their padded offsets
-        uint32_t pos = blob_off;
-        for (uint32_t i = 0; i < count; ++i) {
-            while (pos < toc[i].offset) { std::fputc(0, fp); ++pos; }   // 16-byte alignment pad
-            std::fwrite(stored[i]->data(), 1, stored[i]->size(), fp);
-            pos += uint32_t(stored[i]->size());
-        }
+        std::fwrite(buf.data(), 1, buf.size(), fp);
         std::fclose(fp);
         return true;
     }

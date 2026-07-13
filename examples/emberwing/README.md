@@ -35,7 +35,7 @@ The game was designed *around* what the engine genuinely offers. The load-bearin
 | Physics = axis-separated AABB-vs-tile + overlap Hits; **out-of-bounds tiles are solid** (closed box); `solid_from = 1` on the *last* tile layer | Pits cannot kill by falling out of the world: every pit floor is **lava** — deco-layer tiles for the visual plus a merged rect **hazard spawn** for the kill. Non-solid visuals (lava, ruins) live on the deco layer so they never collide. |
 | No hot-path heap; entities/components are pool-backed; GBA caps: 256 entities, 128 sprites, 160 KB engine arena | Entity budget ≈ 120 live (≈85 spawns + bounded 16-slot particle bursts). Every array in game code is fixed-size; systems allocate nothing. |
 | Determinism gate: both scalar tiers (float / Q16.16) must render byte-identical frames | All gameplay timers are **integer frame counts**, velocities are integer px/s via `s_from_int`, and camera smoothing is integer pixel math — the same idiom as the engine's zoom/parallax front end. No float literals anywhere in game code. |
-| Audio: pure software mixer + SPSC command queue; per-platform device pumps (`phx_sdl/gba/psp_audio_start`); tier-0 bake resamples sounds to the GBA Direct Sound rate (16384 Hz) | Game code only ever *pushes intents* into an `AudioCommandQueue`. Entry points decide who drains it: SDL/PSP audio threads, the GBA per-frame pump (16384 Hz mixer), or the game's own render hook when headless — so gameplay code is identical everywhere. |
+| Audio: pure software mixer + SPSC command queue; per-platform device pumps (`phx_sdl/gba/psp_audio_start`); tier-0 bake resamples sounds to the GBA Direct Sound rate (18157 Hz) | Game code only ever *pushes intents* into an `AudioCommandQueue`. Entry points decide who drains it: SDL/PSP audio threads, the GBA per-frame pump (18157 Hz mixer), or the game's own render hook when headless — so gameplay code is identical everywhere. |
 | Assets: offline-baked `.phxp`, zero-copy views (ROM pointer on GBA); Tiled importer, sprite clips, sounds all share one bake path | All art/audio/level data is **authored on the host** (pixel-art painters, a chiptune synthesizer, an ASCII section composer that emits real Tiled JSON) and baked through the same importers the CLI tools use. Consoles mount a ROM/EBOOT-embedded bundle; nothing is parsed at runtime. |
 | Scene stack with persistent Blackboard + platform save seam | Title → Level ⇄ Pause, Level → Clear. Best-run stats persist via the save seam (file on PC/PSP, battery SRAM on GBA). |
 
@@ -126,7 +126,7 @@ Host-only bake path (STL allowed; never ships to console):
   (`--target 0|1|2` per-tier encoding, same as `phxpack`).
 
 Entry points: `main.cpp` (headless/production), `desktop_main.cpp` (SDL/GL window + real
-audio device via the SPSC queue discipline), `gba_main.cpp` (ROM bundle, 16384 Hz mixer,
+audio device via the SPSC queue discipline), `gba_main.cpp` (ROM bundle, 18157 Hz mixer,
 per-frame Direct Sound pump), `psp_main.cpp` (EBOOT bundle, audio thread).
 
 Verification: `tests/emberwing_test.cpp` — a scripted deterministic playthrough of the
@@ -139,7 +139,7 @@ check` on both scalar tiers.
 - **The GBA renders on silicon, not the CPU**: the PPU build streams the camera window of
   each layer into a 32×32 screenblock (~700 halfword writes/layer/frame), re-packs the
   visible sprites' tiles into a 1D OBJ run (~40 tiles/frame), and the PPU scans it all out.
-  The CPU's frame is gameplay + the 16384 Hz audio pump — which is why the DirectSound
+  The CPU's frame is gameplay + the 18157 Hz audio pump — which is why the DirectSound
   stream no longer starves (the software-render ROM, kept as `make gba-emberwing`, spends
   the whole frame rasterizing and sounds like it).
 - **Boot is instant**: the Q16 sine LUT is now a compile-time table in ROM — it used to be
@@ -151,9 +151,10 @@ check` on both scalar tiers.
   are zero-copy from ROM on GBA: 320·20·4·2 B ≈ 50 KB of cartridge, ~0 B of EWRAM).
 - **Sprite budget**: worst case on screen ≈ 20 (enemies + pickups + geysers + HUD + a burst
   of particles) against the 128-OBJ ceiling; HUD text is the biggest consumer.
-- **Audio on GBA**: the mixer runs at the 16384 Hz device rate and the bundle's sounds are
-  baked *to that rate*, so the ARM7 mixes 1:1 with no resampling; the music is softened at
-  bake time (3-tap lowpass) so the 22050→16384 Hz encode doesn't alias square-wave
-  harmonics into fizz on the 8-bit DAC.
+- **Audio on GBA**: the mixer runs at the 18157 Hz vblank-locked device rate (304
+  samples/frame — see `tools/phxsnd/instructions.md`) and the bundle's sounds are baked *to
+  that rate*, so the ARM7 mixes 1:1 with no resampling; the music is softened at bake time
+  (3-tap lowpass) so the 22050→18157 Hz encode doesn't alias square-wave harmonics into fizz
+  on the 8-bit DAC.
 - **Fixed-point tier**: gameplay math is integer/`scalar` idiom throughout, so the GBA build
   (no FPU) runs the same code the determinism gate verifies on the host.

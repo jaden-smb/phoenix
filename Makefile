@@ -7,6 +7,13 @@
 #
 # Default tier is PC (float scalar). To exercise the GBA fixed-point path on the host:
 #   make test TIER=gba_sim    (defines PHX_TARGET_GBA -> scalar = fixed16)
+#
+# Host builds default to DEBUG (PHX_ASSERT live, full Trace logging). To build+run any target
+# against the release configuration instead (PHX_BUILD_RELEASE=1 — see phx/core/assert.h):
+#   make check RELEASE=1      (or just `make release`, a dedicated gate — see below)
+# GBA/PSP cross builds (GBA_FLAGS/PSP_FLAGS below) are ALWAYS release: those ship on real
+# hardware, where a debug assert trap hangs the console instead of failing a CI job, and every
+# debug-only log format string costs ROM bytes the GBA size gate is already tight on.
 
 CXX      ?= g++
 CXXFLAGS := -std=c++17 -O2 -g -Wall -Wextra -Wpedantic
@@ -36,17 +43,23 @@ TIER ?= pc
 ifeq ($(TIER),gba_sim)
   CXXFLAGS += -DPHX_TARGET_GBA=1
 endif
+RELEASE ?= 0
+ifeq ($(RELEASE),1)
+  CXXFLAGS += -DPHX_BUILD_RELEASE=1 -DNDEBUG
+endif
 CXXFLAGS += $(EXTRA_CXXFLAGS)   # hook for wrapper targets (e.g. `sanitize` adds -fsanitize=…)
 
 BUILD  := build
 
-# Host objects are compiled into a per-tier directory so the float (pc) and fixed-point
-# (gba_sim) tiers can never contaminate each other: without this, `make test TIER=gba_sim`
-# followed by `make check` would link stale fixed16 objects into the float build (make
-# tracks timestamps, not flags). Binaries keep their documented build/ paths; the tier
-# stamp below relinks them exactly when the tier changes.
-HOSTOBJ   := $(BUILD)/obj-$(TIER)
-TIERSTAMP := $(BUILD)/.tier-$(TIER)
+# Host objects are compiled into a per-(tier,release) directory so the float (pc) / fixed-point
+# (gba_sim) tiers, AND the debug/release configs, can never contaminate each other: without
+# this, `make test TIER=gba_sim` or `make test RELEASE=1` followed by a plain `make check`
+# would link stale objects (make tracks timestamps, not flags) into the wrong build. Binaries
+# keep their documented build/ paths; the config stamp below relinks them exactly when
+# TIER or RELEASE changes.
+CFG       := $(TIER)-r$(RELEASE)
+HOSTOBJ   := $(BUILD)/obj-$(CFG)
+TIERSTAMP := $(BUILD)/.tier-$(CFG)
 BIN    := $(BUILD)/phx_tests
 SMOKE  := $(BUILD)/phx_smoke
 RENDER := $(BUILD)/phx_render
@@ -361,6 +374,17 @@ sanitize:
 	  EXTRA_CXXFLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -O1"
 	@echo "SANITIZE PASS (full check suite clean under ASan+UBSan)"
 
+# Release gate: the full check suite must build and pass with PHX_BUILD_RELEASE=1 — the config
+# every GBA/PSP cross build always uses (GBA_FLAGS/PSP_FLAGS above), and what a host `Release`
+# CMake config picks up via the NDEBUG fallback in assert.h/log.h. Exists because stripping
+# PHX_ASSERT to `((void)0)` can turn an assert-only-referenced local into an unused-variable
+# warning under -Wall -Wextra (the zero-warnings bar applies here too) — this is where that
+# would be caught, on the host, instead of only showing up in a devkitARM/pspsdk cross build.
+# Own build root so release objects never mix with the default debug ones.
+release:
+	@$(MAKE) check BUILD=$(BUILD)/release RELEASE=1
+	@echo "RELEASE PASS (full check suite clean with PHX_BUILD_RELEASE=1)"
+
 test: $(BIN)
 	@./$(BIN)
 
@@ -534,7 +558,11 @@ GBA_ARCH   := -mthumb -mthumb-interwork -mcpu=arm7tdmi
 # fixes a hard hang on the first World::add<>() (it spun forever before any LevelScene render).
 # PHX_TARGET_GBA selects the fixed-point tier (also set by the host TIER=gba_sim build);
 # PHX_GBA_HW additionally marks REAL hardware (MMIO/VRAM/OAM paths) — only the cross build sets it.
-GBA_FLAGS  := -std=c++17 -O2 -fno-rtti -fno-exceptions -fno-threadsafe-statics -Wall -Wextra $(GBA_ARCH) -DPHX_TARGET_GBA=1 -DPHX_GBA_HW=1
+# PHX_BUILD_RELEASE=1 unconditionally: every GBA cross build (smoke ROMs included) ships on
+# real hardware or an emulator standing in for it, never a dev host, so PHX_ASSERT's trap path
+# (assert.h) is pure downside — a debug assert firing on a console hangs it, it doesn't drop
+# into a debugger — and Trace/Debug log format strings just burn ROM the size gate is tight on.
+GBA_FLAGS  := -std=c++17 -O2 -fno-rtti -fno-exceptions -fno-threadsafe-statics -Wall -Wextra $(GBA_ARCH) -DPHX_TARGET_GBA=1 -DPHX_GBA_HW=1 -DPHX_BUILD_RELEASE=1 -DNDEBUG
 GBA_INC    := -Iengine/core/include -Iengine/memory/include -Iengine/ecs/include \
               -Iengine/input/include -Iengine/audio/include -Iengine/platform/include \
               -Iengine/render/include -Iengine/render/src -Iengine/resource/include \
@@ -643,6 +671,15 @@ size-gate: $(BUILD)/gba/phx-platformer-ppu.gba
 	  --elf $(BUILD)/gba/platformer-ppu.elf \
 	  --size-tool $(DEVKITARM)/bin/arm-none-eabi-size
 
+# Same gate for the OTHER shipping PPU ROM (README calls Emberwing the console proof-of-scale
+# slice) — the platformer alone doesn't catch a budget regression that only Emberwing's bigger
+# map/audio/enemy set would trip.
+size-gate-emberwing: $(BUILD)/gba/phx-emberwing-ppu.gba
+	@python3 tools/common/size_gate.py \
+	  --rom $(BUILD)/gba/phx-emberwing-ppu.gba \
+	  --elf $(BUILD)/gba/emberwing-ppu.elf \
+	  --size-tool $(DEVKITARM)/bin/arm-none-eabi-size
+
 # host tool that bakes the .phxp the ROM embeds (same importers as the host game)
 $(PLATBAKE): $(HOSTOBJ)/examples/platformer/src/bake_main.o
 	@mkdir -p $(dir $@)
@@ -740,7 +777,10 @@ PSP_PRXGEN := $(PSPDEV)/bin/psp-prxgen
 # -fno-tree-loop-distribute-patterns: we define our own memset/memcpy/memmove/strlen for PSP (see
 # psp_platform.cpp — pspsdk would otherwise bind them to kernel sysclib SYSCALL stubs); this stops
 # GCC from turning those functions' byte loops back into calls to themselves (infinite recursion).
-PSP_FLAGS  := -std=c++17 -O2 -fno-rtti -fno-exceptions -fno-threadsafe-statics -fno-tree-loop-distribute-patterns -Wall -Wextra -G0 -DPHX_TARGET_PSP=1 \
+# PHX_BUILD_RELEASE=1 unconditionally — same rationale as GBA_FLAGS above: every PSP cross
+# build ships on real hardware/an emulator, so debug asserts and Trace/Debug logging are pure
+# downside there, never a dev aid.
+PSP_FLAGS  := -std=c++17 -O2 -fno-rtti -fno-exceptions -fno-threadsafe-statics -fno-tree-loop-distribute-patterns -Wall -Wextra -G0 -DPHX_TARGET_PSP=1 -DPHX_BUILD_RELEASE=1 -DNDEBUG \
               -I$(PSPSDK)/include
 PSP_INC    := -Iengine/core/include -Iengine/memory/include -Iengine/ecs/include \
               -Iengine/input/include -Iengine/audio/include -Iengine/platform/include \
@@ -1067,9 +1107,9 @@ $(HOSTOBJ)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
-# Tier stamp: exactly one .tier-* exists at a time. Host binaries depend on it, so switching
-# TIER forces a relink (their objects already live in per-tier dirs — no recompile needed),
-# and a binary linked under one tier can never be mistaken for up-to-date under the other.
+# Config stamp: exactly one .tier-* exists at a time. Host binaries depend on it, so switching
+# TIER or RELEASE forces a relink (their objects already live in per-config dirs — no recompile
+# needed), and a binary linked under one config can never be mistaken for up-to-date under another.
 $(TIERSTAMP):
 	@mkdir -p $(BUILD)
 	@rm -f $(BUILD)/.tier-*

@@ -42,7 +42,9 @@ struct BundleHeader {
     uint32_t asset_count;
     uint32_t toc_offset;   // byte offset of TocEntry[asset_count]
     uint32_t total_size;   // whole bundle size in bytes
-    uint32_t reserved;     // (crc32 of blob region — 0 = unchecked for now)
+    uint32_t blob_crc32;   // CRC32 (phx/core/crc32.h) of [toc_offset, total_size) — TOC + blobs.
+                           // 0 means "unchecked" (an explicit opt-out some tooling may still
+                           // produce); the writer (tools/phxpack) always fills in a real value.
 };
 
 // TOC entries are sorted by name_hash for O(log n) lookup.

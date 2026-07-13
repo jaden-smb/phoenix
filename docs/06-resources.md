@@ -2,7 +2,8 @@
 
 > `engine/resource/` (runtime) + the pack format produced by `tools/` (offline).
 > Principle: **assets are baked offline, loaded by mmap/zero-copy, never parsed at
-> runtime.** PNG/JSON/XML/WAV exist only on the developer's machine.
+> runtime.** PNG/JSON/WAV/Tiled `.tmj` exist only on the developer's machine (no XML
+> input anywhere in the pipeline today — Tiled maps are read as `.tmj`, not `.tmx`).
 
 ## 1. The `.phxp` bundle format
 
@@ -11,8 +12,8 @@ A bundle is a flat, append-only container the engine memory-maps. Layout:
 ```
  offset 0
  ┌──────────────────────────────────────────────────────────────┐
- │ Header (32 B)                                                  │
- │  magic "PHXP" | version u16 | platform u8 | flags u8           │
+ │ Header (24 B)                                                  │
+ │  magic "PHXP" | version u16 | target u8 | flags u8             │
  │  asset_count u32 | toc_offset u32 | total_size u32 | crc32 u32 │
  ├──────────────────────────────────────────────────────────────┤
  │ TOC[asset_count]   (sorted by name_hash for binary search)     │
@@ -25,13 +26,42 @@ A bundle is a flat, append-only container the engine memory-maps. Layout:
 ```
 
 - **Names are 32-bit FNV-1a hashes**, not strings — no string table at runtime, no
-  `std::string`. A human-readable `manifest.txt` (hash↔path) ships only in dev builds.
+  `std::string`. (A human-readable `manifest.txt` hash↔path sidecar for dev builds is
+  planned but not implemented — `tools/phxpack` writes only the `.phxp` today.)
 - **TOC is sorted** → `O(log n)` lookup, or `O(1)` if the game caches the handle at
   load (it should).
-- **Platform-specialized at pack time.** The same logical asset is encoded
-  differently per target (see §3); the bundle's `platform` byte guards mismatches.
+- **Specialized at pack time, per target, where it matters.** Today that's sound only
+  (§4's "As built" note) — the bundle's `target` byte still guards a mismatched-target
+  mount (§2) even though most asset types are byte-identical across targets right now.
 
-## 2. Runtime API (`phx/resource/cache.h`)
+## 2. Validation & lifecycle
+
+`mount()` never trusts the file it's handed — a bundle can be truncated by an interrupted
+write, bit-rotted on a flash cart, or simply the wrong file — so every mount runs the full
+chain below before a single asset becomes visible, cheapest checks first:
+
+1. **Magic + version.** Wrong magic (not a `.phxp`, or a big-endian host) or a version newer
+   than the reader understands both fail closed (`Status::IoError` / `Status::Unsupported`).
+2. **Structural bounds.** `total_size` can't exceed the mapped file; the TOC and every single
+   entry's `[offset, offset+size)` must land fully inside the bundle. This runs BEFORE the
+   checksum pass, so a corrupt offset is caught precisely (`Status::IoError`), not lumped in
+   with a generic checksum failure.
+3. **Checksum.** `BundleHeader.blob_crc32` (phx/core/crc32.h) covers the TOC + every blob;
+   a mismatch is `Status::Corrupt`. Pass `verify_checksum=false` to `mount()` to skip this pass
+   (still get every structural check) when mount-time latency matters more than catching
+   bit-rot — the default is on.
+4. **Target tier.** On a REAL console build (never the host, including `TIER=gba_sim`, which
+   only simulates the GBA's fixed-point *scalar* tier — see CLAUDE.md) the bundle's `target`
+   byte must match the tier the binary actually ships on, so a bundle baked for the wrong
+   console can never load silently — `Status::Unsupported`.
+
+`mount()` is idempotent (mounting the same path twice is a no-op, not a wasted slot).
+`unmount()`/`unmount_all()` close the platform file/mapping and free the slot for reuse —
+mounting a fresh bundle for a new level, or a clean shutdown. Every view/pointer this cache
+handed out from that bundle (a `TextureView`, a raw blob pointer, …) is invalidated the
+instant unmount returns: they alias the mapping and are never copied out.
+
+## 3. Runtime API (`phx/resource/cache.h`)
 
 ```cpp
 namespace phx {
@@ -40,19 +70,21 @@ enum class AssetType : uint16_t { Texture, Tilemap, Sprite, Sound, Music, Font, 
 
 class ResourceCache {
 public:
-    static Result<ResourceCache*> create(ArenaAllocator&, size_t budget_bytes);
+    static Result<ResourceCache*> create(ArenaAllocator&);
 
-    Status   mount(const char* bundle_path);     // mmap (PC) or load-once (PSP/GBA)
+    // mmap (PC) or load-once (PSP/GBA), fully validated (§2) before anything is visible.
+    Status mount(const phx_platform*, const char* bundle_path, bool verify_checksum = true);
+    Status unmount(const phx_platform*, const char* bundle_path);
+    Status unmount_all(const phx_platform*);
+
     // O(1) typed views into the mmap'd blob — no copy, no parse:
     Result<TextureView> texture(NameHash);
     Result<TilemapView> tilemap(NameHash);
-    Result<SoundView>   sound(NameHash);
+    Result<SoundDataView> sound(NameHash);
     Result<BlobView>    blob(NameHash);
 
-    // for assets that DO need decode/upload (e.g. GPU texture), cache the result:
-    TextureId           gpu_texture(NameHash, Renderer&);  // LRU, budget-bounded
-    void                evict_unused();
-    const CacheStats&   stats() const;
+    uint32_t asset_count() const;
+    uint32_t mount_count() const;
 };
 
 // compile-time name hashing so call sites cost nothing:
@@ -63,13 +95,18 @@ constexpr NameHash operator""_hash(const char* s, size_t n);   // "player.png"_h
 Usage:
 
 ```cpp
-TextureId player = ctx->res->gpu_texture("hero_atlas"_hash, *ctx->render);
-auto map = ctx->res->tilemap("level1"_hash).unwrap();   // zero-copy view
+res->mount(app.platform(), "assets.phxp");
+TextureView tv = res->texture("hero_atlas"_hash).unwrap();   // zero-copy view
+TextureId   player = ctx->render->load_texture({ tv.pixels, tv.width, tv.height, tv.format });
+auto map = ctx->res->tilemap("level1"_hash).unwrap();         // zero-copy view
 ```
 
-## 3. Per-platform specialization (same logical asset, different bytes)
+## 4. Per-platform specialization (same logical asset, different bytes)
 
-| Asset    | GBA blob                            | PSP blob                  | PC blob          |
+**This table is the target design, not all of it built** — see the "As built" note below
+the table for what `tools/phxpack` actually produces today.
+
+| Asset    | GBA blob (target design)            | PSP blob (target design)  | PC blob          |
 |----------|-------------------------------------|---------------------------|------------------|
 | Texture  | 4bpp paletted 8×8 tiles + palette    | swizzled CLUT/RGBA4444    | RGBA8 (or BCn)   |
 | Tilemap  | tile indices + map base (VRAM-ready) | indexed grid + atlas ref  | indexed + atlas  |
@@ -86,10 +123,10 @@ the same capability tier. A game's code is byte-for-byte identical.
 > upload); tilemaps carry `uint16` index layers **plus an optional per-layer Q16
 > parallax-factor table** (flag bit in `TilemapBlobHeader.flags`, 4-byte aligned,
 > imported from Tiled's `parallaxx`/`parallaxy`); sounds are mono 16-bit PCM, with
-> the **tier-0 (GBA) bake resampling to the 16384 Hz device rate** at encode time —
+> the **tier-0 (GBA) bake resampling to the 18157 Hz device rate** at encode time —
 > ADPCM, tracker music, and the remaining per-target texture codecs are future work.
 
-## 4. Caching & memory policy
+## 5. Caching & memory policy
 
 ```
  ResourceCache budget (from Config.cache_bytes)
@@ -108,7 +145,7 @@ the same capability tier. A game's code is byte-for-byte identical.
 - On GBA there is no LRU churn — everything fits in VRAM/ROM by design; the "cache" is
   just the VRAM allocation map.
 
-## 5. Streaming (PSP/PC)
+## 6. Streaming (PSP/PC)
 
 Large music and big maps stream rather than fully resident:
 
@@ -123,7 +160,7 @@ The mixer pulls from the ring; the resource system refills it ahead of the read
 cursor. GBA does not stream (no FS); its music is a resident tracker module played by
 the audio mixer's pattern player.
 
-## 6. Compression
+## 7. Compression
 
 - **Per-blob, optional, type-aware.** TOC `flags` bit marks compression; `size` is
   compressed, `uncompressed_size` is the mmap-decode target.
@@ -134,18 +171,23 @@ the audio mixer's pattern player.
   textures the driver wants raw, small assets where header overhead dominates.
 - Compression is a *pack-time* decision per asset; the runtime just sees a flag.
 
-## 7. Versioning
+## 8. Versioning
 
 - Bundle `version u16` gates format compatibility; the loader refuses a newer major.
+  **Implemented and enforced** — `mount()` rejects a version newer than the reader (§2).
 - Each `AssetType` has its own `struct` version embedded in its blob header, so a
   texture format change doesn't invalidate sounds.
-- `phxpack --upgrade old.phxp` re-bakes from a recorded **source manifest** (the build
-  records which source files + tool versions produced each blob), enabling
-  reproducible rebuilds and incremental re-pack (only changed sources re-encode).
-- A `.phxp.lock` records tool versions + source hashes → CI fails if a bundle is stale
-  relative to its sources.
 
-## 8. Why baked + mmap (justification)
+**Not implemented (design, future work):** `phxpack` today is a straight, non-incremental
+assembler — every `--out` invocation re-bakes everything it's given, there is no
+`--upgrade` flag, no recorded source manifest, and no `.phxp.lock`. The original design
+called for `phxpack --upgrade old.phxp` re-baking from a recorded source manifest (which
+source files + tool versions produced each blob) for reproducible/incremental rebuilds,
+plus a `.phxp.lock` (tool versions + source hashes) so CI could fail a stale bundle. None
+of that exists in `tools/phxpack/` yet — revisit if bake times on a larger project become
+a real pain point; today's bakes are fast enough that full re-bakes are fine.
+
+## 9. Why baked + mmap (justification)
 
 | Approach          | Runtime cost            | RAM            | GBA viable | Determinism |
 |-------------------|-------------------------|----------------|------------|-------------|
