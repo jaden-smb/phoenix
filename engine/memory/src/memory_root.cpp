@@ -3,8 +3,9 @@
 // malloc (the only difference is where `block_` comes from).
 #include "phx/memory/memory_root.h"
 
+#include "phx/core/log.h"
+
 #include <cstdlib>
-#include <cstdio>
 #include <new>
 
 namespace phx {
@@ -52,10 +53,13 @@ ArenaAllocator MemoryRoot::sub(size_t bytes, const char* tag) {
 }
 
 void MemoryRoot::dump_map() const {
-    std::printf("[phx.mem] root %.1f KB | used %.1f KB\n",
-                root_.capacity() / 1024.0, root_.used() / 1024.0);
+    // Through the log seam, not printf: on PSP a bare printf() is resolved from libpspkernel's
+    // KERNEL StdioForKernel stub (no -lc printf wins the link order), and a user-mode EBOOT
+    // importing a kernel library fails to load on real hardware (8002013C LIBRARY_NOTFOUND).
+    PHX_LOG_INFO("[phx.mem] root %.1f KB | used %.1f KB",
+                 root_.capacity() / 1024.0, root_.used() / 1024.0);
     for (uint8_t i = 0; i < tag_count_; ++i)
-        std::printf("          %-16s %.1f KB\n", tags_[i].name, tags_[i].bytes / 1024.0);
+        PHX_LOG_INFO("          %-16s %.1f KB", tags_[i].name, tags_[i].bytes / 1024.0);
 }
 
 } // namespace phx

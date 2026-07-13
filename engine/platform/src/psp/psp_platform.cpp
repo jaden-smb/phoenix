@@ -17,6 +17,7 @@
 #include <pspaudio.h>
 #include <pspthreadman.h>
 #include <pspiofilemgr.h>
+#include <psppower.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -27,26 +28,59 @@
 // engine crashed on boot. Defining them here (our objects link before the archives) wins, and is
 // correct on real hardware too. Built with -fno-tree-loop-distribute-patterns so these loops are
 // not "optimized" back into calls to themselves.
+// Word-at-a-time, not byte loops: these run on the frame path (framebuffer clears, sprite
+// blits, the VRAM present copy), and a byte loop is ~4x slower on the real 333 MHz Allegrex —
+// a cost PPSSPP's JIT hides completely by running even naive loops at host speed.
 extern "C" {
 void* memset(void* dst, int c, size_t n) {
-    unsigned char* p = static_cast<unsigned char*>(dst);
-    for (size_t i = 0; i < n; ++i) p[i] = static_cast<unsigned char>(c);
+    unsigned char* d = static_cast<unsigned char*>(dst);
+    const unsigned char b = static_cast<unsigned char>(c);
+    for (; n && (reinterpret_cast<uintptr_t>(d) & 3u); --n) *d++ = b;
+    uint32_t* d4 = reinterpret_cast<uint32_t*>(d);
+    const uint32_t w = uint32_t(b) * 0x01010101u;
+    for (; n >= 16; n -= 16, d4 += 4) { d4[0] = w; d4[1] = w; d4[2] = w; d4[3] = w; }
+    for (; n >= 4; n -= 4) *d4++ = w;
+    d = reinterpret_cast<unsigned char*>(d4);
+    while (n--) *d++ = b;
     return dst;
 }
 void* memcpy(void* dst, const void* src, size_t n) {
     unsigned char* d = static_cast<unsigned char*>(dst);
     const unsigned char* s = static_cast<const unsigned char*>(src);
-    for (size_t i = 0; i < n; ++i) d[i] = s[i];
+    if (((reinterpret_cast<uintptr_t>(d) ^ reinterpret_cast<uintptr_t>(s)) & 3u) == 0) {
+        for (; n && (reinterpret_cast<uintptr_t>(d) & 3u); --n) *d++ = *s++;
+        uint32_t* d4 = reinterpret_cast<uint32_t*>(d);
+        const uint32_t* s4 = reinterpret_cast<const uint32_t*>(s);
+        for (; n >= 16; n -= 16, d4 += 4, s4 += 4) {
+            d4[0] = s4[0]; d4[1] = s4[1]; d4[2] = s4[2]; d4[3] = s4[3];
+        }
+        for (; n >= 4; n -= 4) *d4++ = *s4++;
+        d = reinterpret_cast<unsigned char*>(d4);
+        s = reinterpret_cast<const unsigned char*>(s4);
+    }
+    while (n--) *d++ = *s++;
     return dst;
 }
 void* memmove(void* dst, const void* src, size_t n) {
+    // A forward copy only ever reads addresses >= the ones it has written when dst < src,
+    // so the word-wise memcpy above is overlap-safe for that direction.
+    if (reinterpret_cast<uintptr_t>(dst) < reinterpret_cast<uintptr_t>(src))
+        return memcpy(dst, src, n);
     unsigned char* d = static_cast<unsigned char*>(dst);
     const unsigned char* s = static_cast<const unsigned char*>(src);
-    if (d < s) { for (size_t i = 0; i < n; ++i) d[i] = s[i]; }
-    else       { for (size_t i = n; i-- > 0; ) d[i] = s[i]; }
+    for (size_t i = n; i-- > 0; ) d[i] = s[i];
     return dst;
 }
 size_t strlen(const char* s) { size_t n = 0; while (s[n]) ++n; return n; }
+// strchr too: it exists as a KERNEL SysclibForKernel stub in libpspkernel.a, and a user-mode
+// EBOOT importing a kernel library is refused by real firmware at load (8002013C
+// LIBRARY_NOTFOUND) even though PPSSPP's HLE resolves it.
+char* strchr(const char* s, int c) {
+    for (;; ++s) {
+        if (*s == static_cast<char>(c)) return const_cast<char*>(s);
+        if (*s == '\0') return nullptr;
+    }
+}
 }
 
 namespace {
@@ -55,8 +89,6 @@ constexpr int kScreenW = 480, kScreenH = 272, kStride = 512;
 
 struct PspGfx { phx_soft_fb fb; };
 PspGfx   g_gfx = { { nullptr, 0, 0 } };
-uint64_t g_step_ns = 1000000000ull / 60;
-uint64_t g_vtime   = 0;
 uint32_t* g_vram   = nullptr;
 
 const void* g_bundle = nullptr; size_t g_bundle_size = 0;
@@ -79,20 +111,36 @@ int psp_init(const phx_platform_desc* desc) {
     g_gfx.fb.pixels = static_cast<uint32_t*>(malloc(size_t(w) * size_t(h) * sizeof(uint32_t)));
     if (!g_gfx.fb.pixels) return 1;
 
+    // Real hardware boots homebrew at 222/111 MHz; request full speed. PPSSPP ignores clock
+    // frequency entirely, so this difference never shows in the emulator. (scePower is a
+    // resident user-mode library — safe to import, unlike the *ForKernel traps above.)
+    scePowerSetClockFrequency(333, 333, 166);
+
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_DIGITAL);
-    g_vtime = 0;
     if (g_direct) return 0;                       // the GU backend sets up sceDisplay/sceGu itself
 
     // uncached VRAM pointer (EDRAM base | 0x40000000), used as the display framebuffer.
     g_vram = reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(sceGeEdramGetAddr()) | 0x40000000u);
     sceDisplaySetMode(0, kScreenW, kScreenH);
-    sceDisplaySetFrameBuf(g_vram, kStride, PSP_DISPLAY_PIXEL_FORMAT_8888, PSP_DISPLAY_SETBUF_IMMEDIATE);
+    // NEXTFRAME, not IMMEDIATE: real firmware rejects SETBUF_IMMEDIATE with INVALID_MODE unless
+    // the pixel format and stride already match the latched framebuffer state (they don't at game
+    // launch), leaving the display address unset — a permanently black screen on hardware while
+    // PPSSPP (whose boot-latched state happens to match 8888/512) renders fine.
+    sceDisplaySetFrameBuf(g_vram, kStride, PSP_DISPLAY_PIXEL_FORMAT_8888, PSP_DISPLAY_SETBUF_NEXTFRAME);
     return 0;
 }
 void psp_shutdown(void) { free(g_gfx.fb.pixels); g_gfx.fb.pixels = nullptr; }
 
-uint64_t psp_clock_ns(void) { uint64_t t = g_vtime; g_vtime += g_step_ns; return t; }
+// REAL clock, same convention as the SDL desktop backend (a virtual frame-locked clock is
+// only correct where the frame rate is fixed by construction: the null backend's tests and
+// the GBA's 60 Hz PPU). On a variable-rate device a virtual clock ties GAME SPEED to render
+// rate — every missed vblank became slow motion instead of a fixed-step catch-up. With real
+// time the accumulator runs the extra steps and gameplay speed stays correct at any fps; it
+// also makes the App loop's phase-profiling stamps real microseconds on PSP.
+// (The old per-read full-step virtual clock was worse still: five clock reads per App frame
+// meant five sim steps per rendered frame — 5x game speed and 5x update cost.)
+uint64_t psp_clock_ns(void) { return uint64_t(sceKernelGetSystemTimeWide()) * 1000ull; }
 void     psp_sleep_ns(uint64_t) {}
 int      psp_pump_events(void) { return 1; }
 
@@ -104,16 +152,26 @@ void psp_present(void) {
     int sx = kScreenW / w, sy = kScreenH / h;
     int s = sx < sy ? sx : sy; if (s < 1) s = 1;
     const int ox = (kScreenW - w * s) / 2, oy = (kScreenH - h * s) / 2;
-    const uint32_t* src = g_gfx.fb.pixels;
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            const uint32_t c = src[y * w + x];          // 8888 == R,G,B,A: copy verbatim
-            const int bx = ox + x * s, by = oy + y * s;
-            for (int dy = 0; dy < s; ++dy) {
-                uint32_t* row = g_vram + size_t(by + dy) * kStride + bx;
-                for (int dx = 0; dx < s; ++dx) row[dx] = c;
+    const uint32_t* src = g_gfx.fb.pixels;              // 8888 == R,G,B,A: copy verbatim
+    // Expand each source row once into a cached scratch row, then word-copy it to its s
+    // destination rows: sequential 4-word bursts keep the Allegrex write buffer streaming
+    // into uncached VRAM, where one scattered 32-bit store per pixel stalled on hardware
+    // (uncached writes are full-price on the real bus; PPSSPP has no such cost).
+    static uint32_t row[kScreenW];
+    for (int y = 0; y < h; ++y) {
+        const uint32_t* srow = src + size_t(y) * size_t(w);
+        const uint32_t* out  = srow;
+        if (s > 1) {
+            for (int x = 0; x < w; ++x) {
+                const uint32_t c = srow[x];
+                for (int dx = 0; dx < s; ++dx) row[x * s + dx] = c;
             }
+            out = row;
         }
+        for (int dy = 0; dy < s; ++dy)
+            memcpy(g_vram + size_t(oy + y * s + dy) * kStride + ox, out,
+                   size_t(w) * size_t(s) * sizeof(uint32_t));
+    }
 }
 
 phx_gfx*   psp_gfx(void)   { return reinterpret_cast<phx_gfx*>(&g_gfx); }

@@ -65,21 +65,33 @@ struct AABB {
     }
 };
 
-// 2D affine matrix (row-major 3x3 with implicit last row). Used by 2.5D / camera.
-template <class T>
-struct Mat3 {
-    T m[9] = { T(1),T(0),T(0),  T(0),T(1),T(0),  T(0),T(0),T(1) };
-    static Mat3 translate(Vec2<T> t);
-    static Mat3 scale(Vec2<T> s);
-    Vec2<T> apply(Vec2<T> p) const { return { m[0]*p.x + m[1]*p.y + m[2],
-                                              m[3]*p.x + m[4]*p.y + m[5] }; }
-};
-
-// Concrete engine aliases.
+// Concrete engine aliases (Mat3 below needs `scalar`, so these come first).
 using vec2  = Vec2<scalar>;
 using aabb  = AABB<scalar>;
-using mat3  = Mat3<scalar>;
 using vec2i = Vec2<int32_t>;   // pixel/tile coordinates (always integer)
+
+// 2D affine matrix (row-major 3x3 with implicit last row). Used by 2.5D / camera.
+// m[0..2] and m[3..5] are the two affine rows applied by apply(); m[6..8] is the implicit
+// (0,0,1) last row and is never read, kept only so the layout reads as a real 3x3.
+//
+// NOT templated like Vec2/AABB: the identity/scale factories bake in the literal "1",
+// which on the fixed16 tier must go through s_from_int(1), not a raw T(1) — fixed16's
+// single-int constructor takes RAW Q16.16 bits (see phx/core/fixed.h), so `fixed16(1)` is
+// ~0.0000153, not 1.0. A prior generic `template<class T> struct Mat3` used `T(1)` directly
+// in its default-member-initializer, which silently built a near-zero "identity" on GBA
+// (only caught once tests/unit/test_math.cpp exercised it on both scalar tiers). Since Mat3
+// only ever aliased `scalar` anyway (no `imat3`), it operates on `scalar` directly and uses
+// the same tier-safe s_from_int() idiom as Camera2D::zoom (engine/render/renderer.h).
+struct Mat3 {
+    scalar m[9] = { s_from_int(1), s_from_int(0), s_from_int(0),
+                     s_from_int(0), s_from_int(1), s_from_int(0),
+                     s_from_int(0), s_from_int(0), s_from_int(1) };
+    static Mat3 translate(vec2 t) { Mat3 r; r.m[2] = t.x; r.m[5] = t.y; return r; }
+    static Mat3 scale(vec2 s)     { Mat3 r; r.m[0] = s.x; r.m[4] = s.y; return r; }
+    vec2 apply(vec2 p) const { return { m[0]*p.x + m[1]*p.y + m[2],
+                                        m[3]*p.x + m[4]*p.y + m[5] }; }
+};
+using mat3 = Mat3;
 
 inline scalar length(vec2 v) { return s_sqrt(v.len2()); }
 

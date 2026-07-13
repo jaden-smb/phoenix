@@ -96,8 +96,16 @@ int App::run(Game* game) {
         // Phase profiling: stamp each phase with the platform clock (µs into prof_). Four
         // clock reads per frame — cheap enough to keep on unconditionally, even on GBA.
         const uint64_t t_upd = plat_->clock_ns();
-        for (int i = 0; i < steps; ++i)
+        for (int i = 0; i < steps; ++i) {
             game->on_fixed_update(*this, dt_);
+            // Apply any despawns the game recorded via world().defer() during this step
+            // (e.g. from inside an each() callback). Automatic and unconditional: with no
+            // pending commands this is an empty loop, so games that never call defer() pay
+            // nothing extra. This is what makes `world.defer().despawn(e)` actually "safe to
+            // record during iteration, applied on flush" (world.h) without the game having
+            // to remember a manual flush call itself.
+            world_->flush_deferred();
+        }
 
         const uint64_t t_ren = plat_->clock_ns();
         game->on_render(*this, acc_.alpha());

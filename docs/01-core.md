@@ -146,13 +146,18 @@ fixed16 fx_rcp(fixed16);         // reciprocal via LUT + 1 Newton step (no HW di
 
 ```cpp
 template <class T> struct Vec2 { T x, y; /* + - * dot len2 ... */ };
-template <class T> struct Mat3 { T m[9]; /* 2D affine */ };
 template <class T> struct AABB { Vec2<T> min, max; bool overlaps(const AABB&) const; };
 
 using vec2   = Vec2<scalar>;     // scalar == float (PC/PSP) or fixed16 (GBA)
-using mat3   = Mat3<scalar>;
 using aabb   = AABB<scalar>;
 using vec2i  = Vec2<int32_t>;    // integer (tile coords, pixel coords)
+
+// Mat3 is NOT templated like Vec2/AABB: its identity/translate/scale factories bake in
+// the literal "1", which the fixed16 tier can only get correctly via s_from_int(1) (a raw
+// `T(1)` would build a near-zero fixed16, since fixed16's single-int ctor is RAW bits, not
+// a value) — so it operates on `scalar` directly.
+struct Mat3 { scalar m[9]; /* 2D affine; translate/scale/apply — phx/core/math.h */ };
+using mat3 = Mat3;
 ```
 
 Gameplay writes `vec2 v{3, 4}; v = v * dt;` and it compiles to SSE on PC, FPU on PSP,

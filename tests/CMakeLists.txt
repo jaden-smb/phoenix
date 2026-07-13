@@ -20,7 +20,7 @@ set(_test_wd ${CMAKE_BINARY_DIR})
 # ---- unit suite (foundation) ----------------------------------------------
 add_executable(phx_tests
   unit/main.cpp
-  unit/test_fixed.cpp unit/test_memory.cpp unit/test_ecs.cpp unit/test_time.cpp
+  unit/test_fixed.cpp unit/test_math.cpp unit/test_memory.cpp unit/test_ecs.cpp unit/test_time.cpp
   unit/test_input.cpp unit/test_physics.cpp unit/test_anim.cpp unit/test_scene.cpp
   unit/test_ui.cpp unit/test_audio.cpp unit/test_stream.cpp unit/test_lz.cpp
   unit/test_png.cpp unit/test_json.cpp unit/test_wav.cpp unit/test_cmdqueue.cpp

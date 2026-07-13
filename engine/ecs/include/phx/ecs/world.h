@@ -98,6 +98,11 @@ public:
     }
 
     // Deferred structural changes — safe to record during iteration, applied on flush.
+    // `App::run` (engine/runtime/src/app.cpp) calls flush_deferred() automatically once per
+    // fixed step, right after Game::on_fixed_update returns — so under the normal App loop
+    // you never need to call it yourself; `world.defer().despawn(e)` inside any each() is
+    // enough. Call flush_deferred() manually only if you drive a World without App (a
+    // headless tool, or a unit test like tests/unit/test_ecs.cpp).
     struct Commands {
         World* w;
         void despawn(Entity e) { w->queue_despawn(e); }

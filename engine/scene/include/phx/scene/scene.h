@@ -74,7 +74,11 @@ public:
     Scene*      top();
     uint32_t    depth() const { return depth_; }
     bool        empty() const { return depth_ == 0; }
-    Transition  last_transition() const { return last_tr_; }   // seam: drive a fade quad
+    // The Transition passed to the most recently applied push/pop/replace. Recorded only —
+    // nothing in the engine reads this back today (no timing/progress, no fade-quad render
+    // on any backend; see docs/10-gameplay-systems.md §3). It exists as a seam for a game
+    // (or a future engine change) to drive its own transition effect off of.
+    Transition  last_transition() const { return last_tr_; }
     Blackboard& persistent() { return board_; }
     StackAllocator& scene_arena() { return *scratch_; }
 

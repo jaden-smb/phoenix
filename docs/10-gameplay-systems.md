@@ -96,9 +96,10 @@ class SceneStack {
 public:
     void push(Scene*, Transition = Transition::None);
     void pop(Transition = Transition::None);
-    void replace(Scene*, Transition = Transition::Fade);
+    void replace(Scene*, Transition = Transition::None);
     void update(EngineCtx*, scalar dt);      // updates top (or all, if "transparent")
     void render(EngineCtx*, scalar alpha);   // renders back-to-front for overlays
+    Transition  last_transition() const;     // the Transition passed to the most recent op
     Blackboard& persistent();                // survives scene changes (save data, etc.)
 };
 enum class Transition { None, Fade, SlideLeft, SlideRight };
@@ -109,8 +110,15 @@ enum class Transition { None, Fade, SlideLeft, SlideRight };
   exit) → leaving a scene frees all its allocations in O(1), no leaks.
 - The ECS `World` can be **per-scene** or shared; the example uses one world cleared on
   scene change, with persistent data (score, save slot) in the `Blackboard`.
-- Transitions are driven by a tiny coroutine-free state machine and render via the same
-  sprite path (a fading quad), so they work on GBA (palette fade) and PSP/PC (alpha).
+- **`Transition` is a recorded hint only, not yet a rendered effect.** `push`/`pop`/
+  `replace` store whatever `Transition` you pass as `last_transition()`
+  (`engine/scene/src/scene.cpp`), but nothing in the engine reads it back — there is no
+  timing/progress state machine and no fade-quad render step, on any backend. Both
+  example games always pass the `None` default, so `Fade`/`SlideLeft`/`SlideRight` are
+  presently just labeled enum values. `last_transition()` is a real seam for a game (or
+  a future engine change) to drive its own fade — e.g. render a full-screen tinted quad
+  keyed off `last_transition()` for a few frames after a push/pop — but that wiring does
+  not exist yet.
 
 ---
 

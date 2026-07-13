@@ -68,6 +68,7 @@ GU     := $(BUILD)/phx_gu
 
 TEST_SRC   := tests/unit/main.cpp \
               tests/unit/test_fixed.cpp \
+              tests/unit/test_math.cpp \
               tests/unit/test_memory.cpp \
               tests/unit/test_ecs.cpp \
               tests/unit/test_time.cpp \
@@ -789,7 +790,7 @@ PSP_INC    := -Iengine/core/include -Iengine/memory/include -Iengine/ecs/include
               -Iengine/ui/include -Iengine/runtime/include -Iexamples/platformer/src
 # The PRX link flow: keep relocations (-Wl,-q) + the prx specs/linkfile so psp-prxgen works.
 PSP_LDFLAGS:= -L$(PSPSDK)/lib -specs=$(PSPSDK)/lib/prxspecs -Wl,-q,-T$(PSPSDK)/lib/linkfile.prx
-PSP_LIBS   := -lpspaudio -lpspdisplay -lpspge -lpspctrl -lpspgu -lpsputility -lpspuser -lpspkernel
+PSP_LIBS   := -lpspaudio -lpspdisplay -lpspge -lpspctrl -lpspgu -lpsppower -lpsputility -lpspuser -lpspkernel
 PSP_SRC    := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
               engine/render/src/renderer.cpp engine/render/src/soft/soft_renderer.cpp \
               engine/platform/src/psp/psp_platform.cpp examples/psp_smoke/main.cpp

@@ -179,7 +179,10 @@ in one small system.
 - Sparse arrays cost `max_entities × 4` per type even when few entities have it —
   acceptable because our ceilings are known and small.
 - No structural change *during* iteration without deferral (we provide a command
-  buffer: `world.defer().despawn(e)` flushed after the system).
+  buffer: `world.defer().despawn(e)`, auto-flushed by `App::run` once per fixed step
+  right after `Game::on_fixed_update` returns — see `engine/runtime/src/app.cpp`. A
+  headless caller that drives a `World` without `App` must call `flush_deferred()`
+  itself, as `tests/unit/test_ecs.cpp` does).
 - Relationships/hierarchy (parent-child) are not native — modeled as a `Parent`
   component, resolved by a system.
 
