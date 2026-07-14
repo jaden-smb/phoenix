@@ -168,6 +168,7 @@ TextureId load_tex(EngineCtx* c, NameHash h) {
     if (!r) return kNoTexture;
     TextureView v = r.unwrap();
     TextureDesc d{}; d.pixels = v.pixels; d.width = v.width; d.height = v.height;
+    d.format = v.format;                        // per-target baked encoding (docs/06 §4)
     return c->render->load_texture(d);
 }
 

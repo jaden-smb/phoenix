@@ -56,14 +56,18 @@ public:
         quads_ = a.alloc_array<GuQuad>(kMaxQuads);
     }
 
+    // Accepts linear RGBA8 and the tier-1 bake's swizzled RGBA8 (same texels, GU block
+    // order — sampled zero-copy on hardware with the swizzle bit set; see gu_model.h).
     TextureId upload_tex(const TextureDesc& d) override {
-        if (d.format != PixelFormat::RGBA8) return kNoTexture;
+        const bool swz = d.format == PixelFormat::RGBA8_SWZ;
+        if (d.format != PixelFormat::RGBA8 && !swz)          return kNoTexture;
+        if (swz && !swz_size_ok(d.width, d.height))          return kNoTexture;
         TextureId id;
         if (free_n_ > 0)                    id = free_[--free_n_];
         else if (tex_count_ < kMaxTextures) id = tex_count_++;
         else                                return kNoTexture;
         tex_[id] = GuTexRef{ static_cast<const uint32_t*>(d.pixels),
-                             int32_t(d.width), int32_t(d.height) };
+                             int32_t(d.width), int32_t(d.height), uint8_t(swz ? 1 : 0) };
         return id;
     }
 
@@ -195,7 +199,7 @@ private:
         sceGuDisable(GU_DEPTH_TEST);
         sceGuDisable(GU_BLEND);
         sceGuEnable(GU_TEXTURE_2D);
-        sceGuTexMode(GU_PSM_8888, 0, 0, 0);
+        sceGuTexMode(GU_PSM_8888, 0, 0, 0);   // per-texture swizzle bit re-set at each bind
         sceGuTexFilter(GU_NEAREST, GU_NEAREST);
         sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
         sceGuTexWrap(GU_CLAMP, GU_CLAMP);
@@ -217,6 +221,9 @@ private:
             const GuQuad& q = quads_[i];
             if (q.tex >= tex_count_ || !tex_[q.tex].px) continue;
             const GuTexRef& t = tex_[q.tex];
+            // Tier-1 baked textures are swizzled (GU block order, gu_model.h) — tell the GU,
+            // which then reads the blob zero-copy with better texture-cache behaviour.
+            sceGuTexMode(GU_PSM_8888, 0, 0, t.swz ? 1 : 0);
             sceGuTexImage(0, t.w, t.h, t.w, t.px);              // texel UVs index this (PoT) texture
             const int dw = q.dw > 0 ? q.dw : q.sw;
             const int dh = q.dh > 0 ? q.dh : q.sh;

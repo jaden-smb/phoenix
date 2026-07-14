@@ -10,8 +10,10 @@ animation is hardcoded in game code. `phxpack` merges the `.phxspr` into the fin
 ## How it works
 
 Reads a small definition file, decodes the referenced sheet PNG with the pipeline's own
-dependency-free decoder (8-bit gray/RGB/palette/RGBA, all five filters), and emits the sheet as
-RGBA8 plus a clip table (`first`, `count`, `fps`, `loop` per clip; clip names are FNV-1a hashed
+dependency-free decoder (8-bit gray/RGB/palette/RGBA, all five filters), and emits the sheet
+texture **per-target encoded** (`--target 0` → 4bpp paletted tiles for the GBA PPU,
+`--target 1` → GU-swizzled RGBA8, `--target 2` → plain RGBA8; docs/06 §4 — shared
+`BundleWriter` path, same as phxpack) plus a clip table (`first`, `count`, `fps`, `loop` per clip; clip names are FNV-1a hashed
 for the runtime's `animator.play("walk"_hash)`). The texture asset is named after the sheet
 PNG's stem, so several sprites can share one sheet; the sprite asset is named by `--name` or
 the def file's stem.

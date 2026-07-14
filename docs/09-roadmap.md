@@ -23,16 +23,21 @@ gate in `make check`):
       (plus camera zoom/shake beyond the checklist).
 - [x] ECS: sparse-set world, fixed-step systems, deferred structural changes.
 - [x] Resource: `.phxp` bundle baked by `phxpack`; mmap/zero-copy load; per-target
-      encode (tier-0 sound rate; further codecs post-MVP).
+      encode (tier-0 sound rate + 4bpp paletted textures, tier-1 swizzled textures;
+      lock-file incremental rebakes — ADPCM/tracker codecs remain post-MVP).
 - [x] Input/Audio/Scene/Physics/Anim/UI at the depth in `docs/10` (incl. dialogue).
 - [x] Example game: player movement, jump, 2 enemy types, camera, HUD, save/load
       (plus a parallax backdrop).
 - [x] Fits GBA budget (ROM + IWRAM/EWRAM) — proven by the CI size gate.
 
-**Explicitly NOT in MVP:** Vulkan, job/threading system, particle system, lighting,
+**Explicitly NOT in MVP:** job/threading system, particle system, lighting,
 networking, scripting, the GUI editors' full feature set (CLI converters suffice for
 MVP; editor MVPs — `phxtmap` paint/entity modes, `phxentity` table editing — landed
 with M6; their full feature set remains 0.2 scope).
+
+**Not on the roadmap at all (decided non-goal):** a modern-GL (3.3 core) or Vulkan PC
+backend. The PC tier's design *is* the GL 1.1 immediate-mode port of the software
+golden reference (`docs/03` §6 records the decision and the bar for ever reopening it).
 
 **Beyond the MVP, also done:** the M6 profiler overlay + GUI editor MVPs and the M7
 determinism + ASan/UBSan release gates (named make targets, CI jobs). Remaining
@@ -84,7 +89,7 @@ across power cycles, physical PSP) and the license.
 | 0.1     | MVP (above)            | 4 platforms, platformer slice, CLI pipeline                              |
 | 0.2     | Authoring & 2.5D       | full `phxtmap`/`phxentity`; PSP/PC 2.5D (depth, billboards, affine GBA)  |
 | 0.3     | Audio & FX             | tracker music, ADPCM streaming, particle system, palette/blend FX        |
-| 0.4     | Performance & jobs     | optional PC/PSP job system; render instancing 2.0; profiler GUI          |
+| 0.4     | Performance & jobs     | optional PC/PSP job system; profiler GUI                                  |
 | 0.5     | Scripting (optional)   | tiny embeddable VM (Lua-subset or bytecode) — **off on GBA**             |
 | 0.6     | New platforms (tier 2) | Nintendo DS, PS Vita backends (see §4)                                   |
 | 1.0     | Stability & docs       | API freeze, semver guarantees, full manual, two shipped sample games     |

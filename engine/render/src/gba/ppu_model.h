@@ -80,25 +80,11 @@ struct PpuState {
 };
 
 // --- colour conversion (the GBA is 15-bit BGR555) -----------------------------------
-
-// Pack an RGBA8 texel (R | G<<8 | B<<16 | A<<24) to BGR555 (R | G<<5 | B<<10).
-inline uint16_t rgba8_to_bgr555(uint32_t c) {
-    uint32_t r = (c        & 0xFF) >> 3;
-    uint32_t g = ((c >> 8)  & 0xFF) >> 3;
-    uint32_t b = ((c >> 16) & 0xFF) >> 3;
-    return uint16_t(r | (g << 5) | (b << 10));
-}
-
-// Expand a BGR555 colour back to an RGBA8 texel (5-bit -> 8-bit, replicating high bits).
-inline uint32_t bgr555_to_rgba8(uint16_t c) {
-    uint32_t r5 =  c        & 0x1F;
-    uint32_t g5 = (c >> 5)  & 0x1F;
-    uint32_t b5 = (c >> 10) & 0x1F;
-    uint8_t  r  = uint8_t((r5 << 3) | (r5 >> 2));
-    uint8_t  g  = uint8_t((g5 << 3) | (g5 >> 2));
-    uint8_t  b  = uint8_t((b5 << 3) | (b5 >> 2));
-    return rgba(r, g, b);
-}
+// rgba8_to_bgr555 / bgr555_to_rgba8 live in phx/core/pixel.h (shared with the offline
+// texture bake, which quantizes to the same 15-bit space); re-exported here so existing
+// phx::gba call sites keep working.
+using phx::rgba8_to_bgr555;
+using phx::bgr555_to_rgba8;
 
 // Rasterize the modelled PPU into an RGBA8 framebuffer (kScreenW x kScreenH). Pure:
 // no allocation, no globals — exactly the pixels the GBA would scan out. `out` must hold

@@ -23,7 +23,11 @@ struct ReadAsset {
 };
 
 // Parse `path` into its assets. Returns false on I/O error or malformed/foreign bundle.
-inline bool bundle_read(const std::string& path, std::vector<ReadAsset>& out) {
+// `hdr_out` (optional) receives the validated bundle header — e.g. so the assembler can
+// refuse to merge an intermediate baked for a DIFFERENT target tier (now that blobs are
+// per-target encoded, a tier mix-up must fail at pack time, not render wrong on device).
+inline bool bundle_read(const std::string& path, std::vector<ReadAsset>& out,
+                        phx::BundleHeader* hdr_out = nullptr) {
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return false;
     std::fseek(f, 0, SEEK_END);
@@ -40,6 +44,7 @@ inline bool bundle_read(const std::string& path, std::vector<ReadAsset>& out) {
     std::memcpy(&h, buf.data(), sizeof(h));
     if (h.magic != phx::kBundleMagic || h.version != phx::kBundleVersion) return false;
     if (size_t(h.toc_offset) + size_t(h.asset_count) * sizeof(phx::TocEntry) > buf.size()) return false;
+    if (hdr_out) *hdr_out = h;
 
     out.clear();
     out.reserve(h.asset_count);

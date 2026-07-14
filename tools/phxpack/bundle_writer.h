@@ -9,6 +9,7 @@
 #include "phx/core/pixel.h"
 #include "phx/core/crc32.h"
 #include "lz_encode.h"
+#include "tex_encode.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -38,13 +39,37 @@ public:
     // turning this on never makes a bundle bigger and the reader handles a mix transparently.
     void set_compression(bool on) { compress_ = on; }
 
+    // PER-TARGET ENCODE (docs/06 §4, docs/08 §2), the texture counterpart of add_sound's
+    // tier-0 resample: tier 0 bakes the PPU's native PAL4_TILES (4bpp tiles + palettes,
+    // ~8× less texel data in the ROM, upload = claim banks + remap nibbles instead of a
+    // full quantize), tier 1 bakes the GU's swizzled RGBA8 (pure reorder, sampled zero-copy
+    // with the swizzle bit). Sources a tier can't express stay RGBA8 — the runtime then
+    // behaves exactly as it did for v1 bundles (upload-time quantize on GBA, linear on PSP).
     void add_texture(const std::string& name, const uint32_t* rgba,
                      uint16_t w, uint16_t h) {
         phx::TextureBlobHeader th{};
         th.width = w; th.height = h; th.format = uint8_t(phx::PixelFormat::RGBA8);
-        std::vector<uint8_t> blob(sizeof(th) + size_t(w) * h * 4);
+
+        std::vector<uint8_t> payload;
+        if (target_ == 0 && pal4_encode(rgba, w, h, payload)) {
+            th.format = uint8_t(phx::PixelFormat::PAL4_TILES);
+            std::printf("  ~ texture %-12s tier-0 encode: RGBA8 -> 4bpp tiles (%u -> %u bytes)\n",
+                        name.c_str(), unsigned(uint32_t(w) * h * 4), unsigned(payload.size()));
+        } else if (target_ == 1 && swz_encode(rgba, w, h, payload)) {
+            th.format = uint8_t(phx::PixelFormat::RGBA8_SWZ);
+            std::printf("  ~ texture %-12s tier-1 encode: RGBA8 swizzled (GU block order)\n",
+                        name.c_str());
+        } else {
+            if (target_ != 2)
+                std::printf("  ~ texture %-12s kept RGBA8 (source not tier-%u encodable)\n",
+                            name.c_str(), unsigned(target_));
+            payload.resize(size_t(w) * h * 4);
+            std::memcpy(payload.data(), rgba, payload.size());
+        }
+
+        std::vector<uint8_t> blob(sizeof(th) + payload.size());
         std::memcpy(blob.data(), &th, sizeof(th));
-        std::memcpy(blob.data() + sizeof(th), rgba, size_t(w) * h * 4);
+        std::memcpy(blob.data() + sizeof(th), payload.data(), payload.size());
         push(name, phx::AssetType::Texture, std::move(blob));
     }
 
@@ -150,8 +175,25 @@ public:
     // Add an already-baked asset with its name hash intact (used to MERGE a pre-baked bundle —
     // e.g. converter output — whose TOC stores hashes, not the original asset names).
     void add_raw(phx::NameHash hash, phx::AssetType type, std::vector<uint8_t> blob) {
-        entries_.push_back(Entry{ hash, type, std::move(blob) });
+        entries_.push_back(Entry{ hash, type, std::move(blob), std::string(), source_ });
     }
+
+    // Author-source attribution for the assets added AFTER this call (the phxpack assembler
+    // sets it per input). Feeds the manifest sidecar and the lock file's per-input asset map.
+    void set_source(const std::string& src) { source_ = src; }
+
+    // Introspection for the manifest/lock writers (tools/phxpack/lock.h). Note: write()
+    // sorts entries by name hash, so index/order differs before and after write().
+    uint32_t         entry_count() const        { return uint32_t(entries_.size()); }
+    phx::NameHash    entry_hash(uint32_t i) const   { return entries_[i].hash; }
+    phx::AssetType   entry_type(uint32_t i) const   { return entries_[i].type; }
+    const std::string& entry_name(uint32_t i) const { return entries_[i].name; }    // "" if merged raw
+    const std::string& entry_source(uint32_t i) const { return entries_[i].source; }
+
+    // CRC32 of the COMPLETE file written by the last successful write() (header included).
+    // The lock file records it so a later invocation can prove the output on disk is exactly
+    // the bundle this bake produced (not stale, not hand-edited).
+    uint32_t file_crc32() const { return file_crc32_; }
 
     // Assemble and write. Returns false on I/O error.
     bool write(const std::string& path) {
@@ -212,22 +254,30 @@ public:
         std::fwrite(&h, sizeof(h), 1, fp);
         std::fwrite(buf.data(), 1, buf.size(), fp);
         std::fclose(fp);
+        file_crc32_ = phx::crc32_finish(phx::crc32(buf.data(), buf.size(),
+                                                   phx::crc32(&h, sizeof(h))));
         return true;
     }
 
     uint32_t count() const { return uint32_t(entries_.size()); }
 
 private:
-    struct Entry { phx::NameHash hash; phx::AssetType type; std::vector<uint8_t> blob; };
+    // name/source are host-side metadata only (manifest + lock); they never reach the bundle.
+    struct Entry {
+        phx::NameHash hash; phx::AssetType type; std::vector<uint8_t> blob;
+        std::string name, source;
+    };
 
     static uint32_t align16(uint32_t v) { return (v + 15u) & ~15u; }
 
     void push(const std::string& name, phx::AssetType type, std::vector<uint8_t>&& blob) {
-        entries_.push_back(Entry{ phx::fnv1a(name.c_str()), type, std::move(blob) });
+        entries_.push_back(Entry{ phx::fnv1a(name.c_str()), type, std::move(blob), name, source_ });
     }
 
     uint8_t target_;
     bool    compress_ = false;
+    std::string source_;
+    uint32_t file_crc32_ = 0;
     std::vector<Entry> entries_;
 };
 

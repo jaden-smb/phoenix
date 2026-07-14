@@ -6,9 +6,11 @@
 #include "phx/platform/gfx_soft.h"
 #include "phx/render/renderer.h"
 #include "phx/core/caps.h"
+#include "tex_encode.h"         // per-target bake encoders (tools/phxpack; host-only test)
 
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 using namespace phx;
 
@@ -169,6 +171,46 @@ int main() {
         fb = phx_gfx_soft_lock(plat->gfx());
         expect_px(fb, 3, 3, kYellow, "shake +8x: tile(1,0) yellow shifted to the origin");
     } else { ++g_fail; std::printf("    FAIL second renderer for shake\n"); }
+
+    // --- per-target baked encodings sample correctly on the reference backend (docs/06 §4):
+    // the GBA/PSP software tiers mount their tier's bundles, so the soft rasterizer must
+    // read PAL4_TILES (through its palettes; 15-bit-quantized colours) and RGBA8_SWZ
+    // (bit-exact — swizzling only reorders texels). Encoded with the REAL bake encoders. ---
+    {
+        static uint32_t src[8 * 8];
+        for (int i = 0; i < 64; ++i) src[i] = (i % 2) ? kRed : kYellow;
+        src[9] = 0;                                        // (1,1): transparent
+
+        std::vector<uint8_t> pal4, swz;
+        ++g_checks; if (!phxtool::pal4_encode(src, 8, 8, pal4)) { ++g_fail; std::printf("    FAIL pal4_encode\n"); }
+        ++g_checks; if (!phxtool::swz_encode(src, 8, 8, swz))   { ++g_fail; std::printf("    FAIL swz_encode\n"); }
+
+        TextureDesc p4{}; p4.pixels = pal4.data(); p4.width = 8; p4.height = 8;
+        p4.format = PixelFormat::PAL4_TILES;
+        TextureDesc sz{}; sz.pixels = swz.data(); sz.width = 8; sz.height = 8;
+        sz.format = PixelFormat::RGBA8_SWZ;
+        TextureId t4 = r->load_texture(p4), tz = r->load_texture(sz);
+        ++g_checks; if (t4 == kNoTexture || tz == kNoTexture) { ++g_fail; std::printf("    FAIL PAL4/SWZ upload\n"); }
+
+        r->set_tilemap_parallax(map, 0, s_from_int(1), s_from_int(1));   // restore for clarity
+        r->begin_frame(Camera2D{});
+        DrawSprite a{}; a.tex = t4; a.sw = a.sh = 8; a.layer = 1;
+        a.pos = vec2{ s_from_int(0), s_from_int(24) };
+        r->draw_sprite(a);
+        DrawSprite b = a; b.tex = tz; b.pos = vec2{ s_from_int(16), s_from_int(24) };
+        r->draw_sprite(b);
+        r->end_frame();
+        fb = phx_gfx_soft_lock(plat->gfx());
+        // PAL4 texels return through the 15-bit palette -> compare against quantized values.
+        expect_px(fb, 0, 24, bgr555_to_rgba8(rgba8_to_bgr555(kYellow)),
+                  "PAL4 texel (0,0) = quantized yellow");
+        expect_px(fb, 1, 24, bgr555_to_rgba8(rgba8_to_bgr555(kRed)),
+                  "PAL4 texel (1,0) = quantized red");
+        expect_px(fb, 1, 25, kClear,   "PAL4 transparent texel skipped");
+        expect_px(fb, 16, 24, kYellow, "SWZ texel (0,0) bit-exact yellow");
+        expect_px(fb, 17, 25, kClear,  "SWZ transparent texel skipped");
+        expect_px(fb, 18, 25, kYellow, "SWZ texel (2,1) bit-exact yellow");
+    }
 
     plat->shutdown();
 

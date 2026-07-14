@@ -129,9 +129,12 @@ is an *honest API limit*, enforced gracefully on every tier, not a GBA-only surp
 
 ### 3.3 The resource model
 
-- **Textures** (`TextureDesc`) are decoded RGBA8 rectangles. The software tier points at
-  your pixels **zero-copy** (they must outlive the texture); GL uploads via
-  `glTexImage2D`; the PPU backend *quantizes* the atlas to 4bpp paletted tiles at upload.
+- **Textures** (`TextureDesc`) carry decoded pixels in one of the baked encodings
+  (`PixelFormat`, docs/06 §4): plain RGBA8, tier-0 `PAL4_TILES` (4bpp paletted tiles —
+  the PPU consumes them natively, the soft tier samples them through their palettes), or
+  tier-1 swizzled RGBA8 (the GU binds it zero-copy with the swizzle bit). The software
+  tier points at your pixels **zero-copy** (they must outlive the texture); GL uploads
+  RGBA8 via `glTexImage2D`; the PPU backend still quantizes plain RGBA8 at upload.
   `load_texture`/`unload_texture` recycle slots (256 max per backend) — this is what the
   budget-bounded LRU `TextureCache` (`phx/render/texture_cache.h`) drives: key it with an
   asset NameHash, hand it pixels only on a miss, and it evicts least-recently-used entries
@@ -260,21 +263,28 @@ Practical notes:
 ### Software (`src/soft/`) — the golden reference
 CPU rasterizer into the platform's RGBA8 framebuffer (`phx_gfx_soft_lock`). No GPU, runs
 headless; produces the reference output every other backend is diffed against. 256 texture
-slots with free-list recycling, 32 tilemap slots. RGBA8 only, zero-copy source pixels.
+slots with free-list recycling, 32 tilemap slots. Zero-copy source pixels; samples every
+baked texture encoding in place (RGBA8, tier-0 `PAL4_TILES` through its palettes, tier-1
+swizzled RGBA8 — docs/06 §4), so the GBA/PSP *software* tiers run their consoles' bundles
+without an expansion buffer.
 
 ### OpenGL (`src/gl/`)
 A deliberate GL 1.1 immediate-mode port of the software rasterizer's *geometry* — textured,
 tinted quads, ortho pixel projection, nearest filtering, alpha blend. No glad/glew/GLAD —
 just libGL. Selected by `PHX_HAVE_SDL` + `PHX_HAVE_GL`; the SDL platform then creates a GL
 context and swaps buffers. Pixel-verified against the soft golden on a real GPU
-(`make gl-verify`). (docs/03 §6 sketches a GL 3.3 instanced design — the implemented
-backend chose maximum compatibility instead; instancing is future scope, docs/09 v0.4.)
+(`make gl-verify`). A modern-GL (3.3 core) / Vulkan backend is a **decided non-goal** —
+docs/03 §6 records the decision; maximum compatibility won for the one tier with
+performance to spare.
 
 ### GBA PPU (`src/gba/`)
-Speaks the hardware's actual language: quantizes each RGBA8 atlas into **4bpp paletted 8×8
-tiles sharing one 16-color BGR555 palette**, turns tilemaps into Mode-0 text-BG screen
-entries (32×32 cells = one screenblock, 256-tile char store = charblock budget), sprites
-into OAM entries (≤128). `ppu_compose` (`ppu_model.h`) then produces the exact frame the
+Speaks the hardware's actual language: **4bpp paletted 8×8 tiles + 16-color BGR555 palette
+banks**. Tier-0 bundles arrive pre-quantized (`PAL4_TILES`, baked by
+`tools/phxpack/tex_encode.h` with the same quantizer — upload just claims palette banks
+and remaps nibbles); RGBA8 uploads (tests, un-bakeable art) are quantized at upload, and
+both paths compose the identical frame (`make ppu` asserts it). Tilemaps become Mode-0
+text-BG screen entries (32×32 cells = one screenblock, 256-tile char store = charblock
+budget) and sprites become OAM entries (≤128). `ppu_compose` (`ppu_model.h`) then produces the exact frame the
 PPU would scan out — **on the CPU, on any host** — so every hardware constraint (palette
 overflow, unaligned art, sprite ceiling) surfaces in a headless test. On real hardware
 (`PHX_GBA_HW`), `submit_hardware()` DMAs the same tile/map/OAM/palette data into
@@ -350,7 +360,8 @@ from the nearest tier's backend, and validate against the soft golden before any
 - The sprite sort is `qsort` on every tier (the docs/03 radix-on-console idea was not
   needed at current scene sizes).
 - Roadmap (docs/09): 2.5D (depth/billboards/affine GBA) in v0.2, palette/blend FX in v0.3,
-  instancing + job-system render pass in v0.4, Vulkan optional, DS/Vita backends in v0.6.
+  job-system render pass in v0.4, DS/Vita backends in v0.6. Modern-GL/Vulkan is a decided
+  non-goal (docs/03 §6).
 
 ## 9. Related reading
 

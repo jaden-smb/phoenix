@@ -41,17 +41,19 @@ bake path single and testable).
 Responsibilities:
 - Resolve names → FNV-1a hashes, build the **sorted TOC** (§`docs/06`).
 - Apply compression where it pays (`--compress auto` measures and keeps the smaller).
-- Stamp the bundle `target` byte for the mount-time tier check (`docs/06` §2) —
-  **implemented**, and today it's the *only* real per-target divergence for most asset
-  types: textures/tilemaps/bin tables are byte-identical across `--target 0|1|2`.
-
-**Designed, not implemented:** the original design called for `phxpack` to invoke a
-per-target texture encoder (4bpp tiles for GBA, swizzle for PSP, RGBA8 PC), write an
-`assets.phxp.lock` (source hashes + tool versions, for reproducible/incremental rebuilds),
-and emit a `manifest.txt` (hash↔path) for dev-build debugging. None of the three exist in
-`tools/phxpack/` — every invocation is a full, non-incremental re-bake, and the only
-per-target *asset* encode implemented anywhere in the pipeline is `phxsnd`'s GBA sound
-resample (§5). See §9 for the full list of pipeline guarantees this affects.
+- Stamp the bundle `target` byte for the mount-time tier check (`docs/06` §2), and
+  refuse to merge an intermediate baked for a *different* tier (blobs are per-target
+  encoded, so a tier mix-up fails at pack time, not on a console).
+- **Per-target texture encode** (`tools/phxpack/tex_encode.h`, docs/06 §4): `--target 0`
+  bakes 4bpp paletted tiles + palettes (the GBA PPU's native layout), `--target 1` bakes
+  GU-swizzled RGBA8, `--target 2` keeps RGBA8. The sound counterpart is the tier-0
+  18157 Hz resample (§5). Both run inside `BundleWriter`, so converters get them too.
+- **Lock file** (`<out>.lock`, `tools/phxpack/lock.h`): tool + format versions, per-input
+  content hashes, per-input asset lists, output CRC32 — drives the incremental rebake
+  (unchanged inputs are reused from the previous bundle), the "up to date" skip, CI
+  stale-bundle detection, and `--upgrade` (re-bake from the recorded source list).
+- **Manifest** (`--manifest` → `<out>.manifest.txt`): human-readable
+  hash ↔ name ↔ source-path table for dev builds (hashes are one-way; this is the map).
 
 ## 3. `phxsprite` — sprites, atlases, animation
 
@@ -70,16 +72,18 @@ Input: a PNG plus an optional sidecar describing slices/animations:
 }
 ```
 
-Output `.phxspr` blob: RGBA8 atlas pixels (same bytes regardless of `--target` — no
-per-target texture encode is implemented anywhere in the pipeline yet, see §2) + a frame
-table + an animation table consumed directly by `engine/anim`.
+Output `.phxspr` blob: the atlas texture **per-target encoded** (shared `BundleWriter`
+path, so `--target 0` emits 4bpp paletted tiles, `--target 1` swizzled RGBA8 — see §2 and
+docs/06 §4) + a frame table + an animation table consumed directly by `engine/anim`.
 
-**Designed, not implemented:** bake-time GBA palette quantization (≤16 colors, failing
-loudly offline if the art exceeds the budget). Today that quantization happens instead at
-*upload* time in the GBA PPU render backend (`engine/render/src/gba/gba_ppu.cpp`), on every
-run, not just at bake — so a too-large palette is currently a runtime/test-time failure,
-not a bake-time one. Moving it to bake time (catching it offline, before it ever reaches a
-console) is open work.
+**Bake-time GBA palette quantization is implemented** (`tools/phxpack/tex_encode.h`): the
+tier-0 encoder runs the same quantizer as the GBA PPU upload path (≤15 opaque colours per
+16-colour palette, whole-texture palette when possible for OBJ use, per-tile palettes
+otherwise) and its output composes the exact same frame (asserted by `make ppu`). Art the
+tier can't express (a non-8px-aligned atlas, >15 colours in one 8×8 tile) is reported at
+bake time and kept as RGBA8 — the PPU backend then applies its upload-time quantizer or
+rejects it exactly as before, so nothing that would fail on hardware slips through
+silently.
 
 ## 4. `phxtile` — tilemaps & collision
 
@@ -206,23 +210,18 @@ users aren't locked into our editor.
 
 ## 9. Pipeline guarantees
 
-**True today:**
-- **Determinism, informally:** the bake path is a pure function of its inputs (no clock
-  reads, no nondeterministic ordering) — same sources in, same bundle bytes out — but
-  nothing *asserts* this; there's no lock file, and the pipeline suites don't diff two
-  independent bakes of the same fixtures byte-for-byte to prove it.
-- **Offline validation, for what's implemented:** a broken prefab ref, a malformed
-  `.tmj`/JSON, or a missing referenced file fails the *bake*, never the *game*. GBA
-  palette overflow is the one design-time check that currently only fires at *upload*
-  time (§3), not bake time, so it isn't in this category yet.
+**True today, and asserted:**
+- **Determinism, checked:** the bake path is a pure function of its inputs (no clock
+  reads, no nondeterministic ordering) — same sources in, same bundle bytes out. The
+  pipeline suite diffs two independent bakes of the same fixture byte-for-byte, and
+  `make phxpack` proves an incremental rebake equals a `--full` rebake byte-for-byte.
+- **Offline validation:** a broken prefab ref, a malformed `.tmj`/JSON, a missing
+  referenced file, or GBA palette overflow in a single 8×8 tile (§3 — now caught by the
+  tier-0 bake encoder) fails or warns at the *bake*, never surprises the *game*.
 - **Round-trip tested:** the pipeline/resource suites (`make pipeline`, `make resource`,
   `make tools`) bake fixtures and assert the runtime `ResourceCache` reads back identical
-  views for every type, on every target encoding.
-
-**Designed, not implemented** (all of §2's "designed, not implemented" list applies here
-too):
-- **No incremental bake.** Every `phxpack`/converter invocation re-does the full
-  decode+encode+write; there's no content-hash-based skip of unchanged assets. Fine at
-  this project's asset volume; would need the lock-file work below to scale further.
-- **No lock file, no reproducibility guarantee that's actually checked.** `.phxp.lock`
-  (recording source hashes + tool versions so CI could flag a stale bundle) is unbuilt.
+  views for every type, on every target encoding (including PAL4/swizzled textures).
+- **Incremental, via the lock file** (§2, `docs/06` §8): unchanged inputs are reused from
+  the previous bundle; an unchanged input list skips the bake ("up to date"); the
+  `<out>.lock`'s recorded output CRC32 lets CI flag a stale/hand-edited bundle; and
+  `--upgrade` re-bakes a bundle from its own recorded source list. `--full` opts out.

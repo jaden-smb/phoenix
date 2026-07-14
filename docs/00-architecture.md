@@ -20,11 +20,12 @@ single codebase:
 | Linux    | x86-64 / ARM64            | GBs                 | OpenGL 1.1¹          | GCC / Clang        |
 | Windows  | x86-64                    | GBs                 | OpenGL 1.1¹          | MSVC / Clang / GCC |
 
-¹ The original design target for the PC tier was a GL 3.3 core / optional-Vulkan backend
-(docs/03 §6 sketches it); the implemented `render/src/gl/` backend deliberately chose maximum
-compatibility instead — immediate-mode `glBegin`/`glVertex` against a GL 1.1 context, with the
-software rasterizer staying the golden reference every backend is diffed against. No Vulkan
-backend exists. Revisit GL 3.3/Vulkan only if PC/Windows batching becomes a real bottleneck.
+¹ The PC tier's design is deliberate maximum compatibility: immediate-mode
+`glBegin`/`glVertex` against a GL 1.1 context, with the software rasterizer staying the
+golden reference every backend is diffed against. A GL 3.3 core / optional-Vulkan backend
+was an early sketch and is **dropped as a non-goal** (docs/03 §6 records the decision):
+2D scenes this size never make PC draw-call count the bottleneck, and a second PC GPU
+path would widen the maintenance matrix for the one tier with performance to spare.
 
 The central engineering tension is the **17,000× RAM gap** between the GBA and a
 modern PC. Phoenix resolves this not by lowest-common-denominator design, but by a
@@ -300,14 +301,15 @@ its JSON export, not `.tmx`.)
  └──────┘             └──────────┘
 ```
 
-Bundle format `.phxp`: header → TOC (hashed names → offset/size/type) → blobs. Textures are
-**RGBA8 in the bundle on every target** — there is no bake-time GBA 4bpp/paletted or PSP
-swizzled texture encoding today; the GBA PPU backend quantizes RGBA8 to 4bpp tiles + a
-palette at *upload* time instead (per-target texture baking is future work, tracked as such
-in `docs/06-resources.md` §4). Sound is the one asset type with a real bake-time per-target
-encode (`--target 0` resamples to the GBA's 18157 Hz device rate). The TOC layout is
-identical across targets so the resource API is identical. Full spec in
-`docs/06-resources.md` and `docs/08-tooling.md`.
+Bundle format `.phxp`: header → TOC (hashed names → offset/size/type) → blobs. Textures
+and sounds are **per-target encoded at bake time**: `--target 0` (GBA) bakes textures as
+4bpp paletted 8×8 tiles + palettes (the PPU's native layout; upload just claims palette
+banks) and resamples sounds to the GBA's 18157 Hz device rate; `--target 1` (PSP) bakes
+textures in the GU's swizzled block order (sampled zero-copy with the swizzle bit set);
+`--target 2` (PC) keeps plain RGBA8/PCM. Art a tier can't express (e.g. a non-8px-aligned
+texture on tier 0) honestly stays RGBA8 and the GBA backend falls back to its upload-time
+quantizer. The TOC layout is identical across targets so the resource API is identical.
+Full spec in `docs/06-resources.md` and `docs/08-tooling.md`.
 
 ---
 

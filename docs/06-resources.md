@@ -26,13 +26,14 @@ A bundle is a flat, append-only container the engine memory-maps. Layout:
 ```
 
 - **Names are 32-bit FNV-1a hashes**, not strings — no string table at runtime, no
-  `std::string`. (A human-readable `manifest.txt` hash↔path sidecar for dev builds is
-  planned but not implemented — `tools/phxpack` writes only the `.phxp` today.)
+  `std::string`. Name hashes are one-way, so for dev-build debugging
+  `phxpack --manifest` writes a human-readable `<out>.manifest.txt` sidecar
+  (hash ↔ name ↔ source path, one line per asset).
 - **TOC is sorted** → `O(log n)` lookup, or `O(1)` if the game caches the handle at
   load (it should).
-- **Specialized at pack time, per target, where it matters.** Today that's sound only
-  (§4's "As built" note) — the bundle's `target` byte still guards a mismatched-target
-  mount (§2) even though most asset types are byte-identical across targets right now.
+- **Specialized at pack time, per target, where it matters.** Textures and sounds are
+  per-target encoded (§4); the bundle's `target` byte guards a mismatched-target mount
+  (§2), and `phxpack` refuses to merge an intermediate baked for a different tier.
 
 ## 2. Validation & lifecycle
 
@@ -103,28 +104,25 @@ auto map = ctx->res->tilemap("level1"_hash).unwrap();         // zero-copy view
 
 ## 4. Per-platform specialization (same logical asset, different bytes)
 
-**This table is the target design, not all of it built** — see the "As built" note below
-the table for what `tools/phxpack` actually produces today.
+**This table is as built** — what `tools/phxpack` produces per `--target` today.
 
-| Asset    | GBA blob (target design)            | PSP blob (target design)  | PC blob          |
+| Asset    | GBA blob (`--target 0`)             | PSP blob (`--target 1`)   | PC blob (`--target 2`) |
 |----------|-------------------------------------|---------------------------|------------------|
-| Texture  | 4bpp paletted 8×8 tiles + palette    | swizzled CLUT/RGBA4444    | RGBA8 (or BCn)   |
-| Tilemap  | tile indices + map base (VRAM-ready) | indexed grid + atlas ref  | indexed + atlas  |
-| Sound SFX| 8-bit PCM @ low rate (DMA-ready)     | ADPCM (VAG-like)          | 16-bit PCM       |
-| Music    | tracker module (.mod-style) or PCM   | ADPCM stream              | OGG/PCM stream   |
-| Font     | 4bpp tile glyphs                     | atlas                     | atlas            |
+| Texture  | **4bpp paletted 8×8 tiles + 16-colour BGR555 palettes** (`PAL4_TILES`, phx/core/pixel.h) — the PPU's native layout, ~8× less texel data; falls back to RGBA8 when the art isn't tier-0 expressible | **swizzled RGBA8** (`RGBA8_SWZ`, GU block order, sampled zero-copy with the swizzle bit; pure reorder → still bit-identical to the soft golden); linear RGBA8 when the size doesn't block-align | RGBA8 |
+| Tilemap  | `uint16` index layers + optional per-layer Q16 parallax table | same       | same             |
+| Sound SFX| mono 16-bit PCM **resampled to the 18157 Hz device rate at bake** | mono 16-bit PCM @ source rate | mono 16-bit PCM @ source rate |
+| Music    | (same PCM path as SFX today)         | same                      | same             |
+| Font     | a texture atlas — encodes like any texture | atlas               | atlas            |
 
-`phxpack --target gba|psp|pc` chooses the encoder. The **runtime view structs are
-identical**; only the decoder behind `gpu_texture`/audio-upload differs, selected by
-the same capability tier. A game's code is byte-for-byte identical.
+`phxpack --target 0|1|2` chooses the encoder (`tools/phxpack/tex_encode.h` mirrors the
+GBA PPU upload quantizer exactly, so a baked blob composes the same frame the RGBA8
+upload path would — asserted by `make ppu`). The **runtime view structs are identical**;
+only the decode behind texture-upload/audio differs, selected by the same capability
+tier. A game's code is byte-for-byte identical.
 
-> **As built:** the table above is the *target* encoding matrix. Implemented today:
-> textures ship RGBA8 (the GBA PPU backend quantizes to 4bpp tiles + palette at
-> upload); tilemaps carry `uint16` index layers **plus an optional per-layer Q16
-> parallax-factor table** (flag bit in `TilemapBlobHeader.flags`, 4-byte aligned,
-> imported from Tiled's `parallaxx`/`parallaxy`); sounds are mono 16-bit PCM, with
-> the **tier-0 (GBA) bake resampling to the 18157 Hz device rate** at encode time —
-> ADPCM, tracker music, and the remaining per-target texture codecs are future work.
+> Still future work (design only): ADPCM/tracker music, BCn on PC, and a CLUT/RGBA4444
+> option for PSP (rejected for now — 4444 would break the GU's bit-identity with the
+> software golden reference, which is worth more than the bytes).
 
 ## 5. Caching & memory policy
 
@@ -178,14 +176,17 @@ the audio mixer's pattern player.
 - Each `AssetType` has its own `struct` version embedded in its blob header, so a
   texture format change doesn't invalidate sounds.
 
-**Not implemented (design, future work):** `phxpack` today is a straight, non-incremental
-assembler — every `--out` invocation re-bakes everything it's given, there is no
-`--upgrade` flag, no recorded source manifest, and no `.phxp.lock`. The original design
-called for `phxpack --upgrade old.phxp` re-baking from a recorded source manifest (which
-source files + tool versions produced each blob) for reproducible/incremental rebuilds,
-plus a `.phxp.lock` (tool versions + source hashes) so CI could fail a stale bundle. None
-of that exists in `tools/phxpack/` yet — revisit if bake times on a larger project become
-a real pain point; today's bakes are fast enough that full re-bakes are fine.
+**Implemented — the lock-file pipeline (`tools/phxpack/lock.h`):** every `phxpack` bake
+writes `<out>.lock` recording the tool version, bundle-format version, target tier,
+compression flag, each input's content hash (CRC32) + size, which assets each input
+produced, and the CRC32 of the written bundle. On the next invocation: unchanged inputs
+are **reused from the previous bundle** (per-asset incremental), a fully unchanged input
+list skips the bake entirely ("up to date"), and `phxpack --upgrade old.phxp` re-bakes a
+bundle from its own lock's recorded source list after a tool/format upgrade. CI can flag
+a stale bundle by diffing the lock's `output crc32` against the file. An incremental
+rebake is **byte-identical** to a `--full` bake — asserted by `make phxpack` and the
+pipeline suite — so the lock is an optimization, never a semantic. Bumping either the
+tool version (`kPhxpackToolVersion`) or `kBundleVersion` invalidates every lock.
 
 ## 9. Why baked + mmap (justification)
 

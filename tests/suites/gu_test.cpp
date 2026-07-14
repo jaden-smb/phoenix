@@ -11,8 +11,10 @@
 #include "phx/render/renderer.h"
 #include "phx/core/caps.h"
 #include "gu_model.h"           // internal GU model (added to -I by the Makefile target)
+#include "tex_encode.h"         // the tier-1 bake encoder (tools/phxpack; host-only test)
 
 #include <cstdio>
+#include <vector>
 
 using namespace phx;
 using namespace phx::gu;
@@ -163,6 +165,51 @@ int main() {
         check(out[0] == kRed,            "compose: scaled quad covers origin");
         check(out[3 * 8 + 3] == kRed,    "compose: scaled quad covers (3,3)");
         check(out[4 * 8 + 4] == kClear,  "compose: outside the 4x4 quad -> clear");
+    }
+
+    // === RGBA8_SWZ (the tier-1 bake) samples pixel-identically to linear RGBA8 ==========
+    // Swizzling is a pure texel reorder (phx/core/pixel.h); uploading the swizzled blob with
+    // format RGBA8_SWZ must render the exact same frame as the linear texels.
+    {
+        static uint32_t lin[16 * 16];
+        for (int y = 0; y < 16; ++y)
+            for (int x = 0; x < 16; ++x)
+                lin[y * 16 + x] = rgba(uint8_t(x * 16), uint8_t(y * 16), 128,
+                                       (x == 0 && y == 0) ? 0 : 255);   // one clear texel
+        std::vector<uint8_t> swz;
+        check(phxtool::swz_encode(lin, 16, 16, swz), "bake swizzles a 16x16 RGBA8 texture");
+
+        static Rgba frame_a[FBW * FBH];
+        for (int pass = 0; pass < 2; ++pass) {
+            TextureDesc td{}; td.width = 16; td.height = 16;
+            if (pass == 0) { td.pixels = lin; }
+            else           { td.pixels = swz.data(); td.format = PixelFormat::RGBA8_SWZ; }
+            TextureId tid = r->load_texture(td);
+            check(tid != kNoTexture, pass == 0 ? "linear upload" : "swizzled upload");
+
+            r->begin_frame(Camera2D{});
+            DrawSprite s{}; s.tex = tid; s.sx = 0; s.sy = 0; s.sw = 16; s.sh = 16;
+            s.pos = vec2{ s_from_int(4), s_from_int(4) }; s.layer = 1;
+            r->draw_sprite(s);
+            DrawSprite f = s; f.flags = kFlipX; f.pos = vec2{ s_from_int(24), s_from_int(4) };
+            r->draw_sprite(f);                       // flip exercises non-trivial addressing
+            r->end_frame();
+
+            phx_soft_fb fb = phx_gfx_soft_lock(plat->gfx());
+            if (pass == 0) {
+                for (int i = 0; i < FBW * FBH; ++i) frame_a[i] = fb.pixels[i];
+            } else {
+                bool same = true;
+                for (int i = 0; i < FBW * FBH && same; ++i) same = fb.pixels[i] == frame_a[i];
+                check(same, "swizzled texture renders the EXACT linear frame");
+            }
+            r->unload_texture(tid);
+        }
+
+        // a size the GU can't swizzle (width % 4) is refused as RGBA8_SWZ
+        TextureDesc bad{}; bad.pixels = lin; bad.width = 10; bad.height = 16;
+        bad.format = PixelFormat::RGBA8_SWZ;
+        check(r->load_texture(bad) == kNoTexture, "non-block-aligned RGBA8_SWZ rejected");
     }
 
     plat->shutdown();

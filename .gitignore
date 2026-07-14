@@ -32,6 +32,8 @@ depend.mk
 
 # Generated files
 *.phxp
+*.phxp.lock
+*.phxp.manifest.txt
 *.ppm
 *.sav
 

@@ -13,8 +13,10 @@
 #include "phx/render/renderer.h"
 #include "phx/core/caps.h"
 #include "ppu_model.h"          // internal PPU model (added to -I by the Makefile target)
+#include "tex_encode.h"         // the tier-0 bake encoder (tools/phxpack; host-only test)
 
 #include <cstdio>
+#include <vector>
 
 using namespace phx;
 using namespace phx::gba;
@@ -332,6 +334,79 @@ int main() {
               "compose: clear texel -> backdrop");
         check(out[kScreenW * 100 + 100] == bgr555_to_rgba8(pal[1]),
               "compose: window wraps at 256 px to fill the screen");
+    }
+
+    // === PAL4_TILES bake path == RGBA8 upload path (docs/06 §4) ========================
+    // The tier-0 bake (tools/phxpack/tex_encode.h) runs this backend's quantizer offline;
+    // uploading the baked blob must compose the EXACT frame the RGBA8 quantize produces —
+    // for both the one-palette (OBJ-safe) case and the per-tile-palette spill.
+    {
+        // one-bank atlas: 2 tiles, 3 colours + a transparent texel
+        static uint32_t atlas[16 * 8];
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 16; ++x)
+                atlas[y * 16 + x] = (x < 8) ? kBlue : ((y < 4) ? kGreen : kRed);
+        atlas[0] = 0;                                        // alpha 0 -> nibble 0
+
+        // spilling atlas: 2 tiles x 15 fresh colours each (>15 total -> per-tile palettes)
+        static uint32_t spill[16 * 8];
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 16; ++x)
+                spill[y * 16 + x] = rgba(uint8_t((((y * 8 + (x & 7)) % 15) + 1) * 8),
+                                         (x < 8) ? 64 : 128, 0);
+
+        // encode both through the REAL bake encoder
+        std::vector<uint8_t> enc_atlas, enc_spill;
+        check(phxtool::pal4_encode(atlas, 16, 8, enc_atlas), "bake encodes the one-bank atlas");
+        check(phxtool::pal4_encode(spill, 16, 8, enc_spill), "bake encodes the spilling atlas");
+        {
+            const TexturePal4Header& ph =
+                *reinterpret_cast<const TexturePal4Header*>(enc_atlas.data());
+            check(ph.pal_count == 1, "one-bank atlas baked a single palette (OBJ-safe)");
+            const TexturePal4Header& ps =
+                *reinterpret_cast<const TexturePal4Header*>(enc_spill.data());
+            check(ps.pal_count == 2, ">15-colour atlas spilled to per-tile palettes");
+        }
+
+        // render the same scene through two fresh renderers: RGBA8 vs baked PAL4
+        static uint16_t cells[4] = { 1, 2, 2, 1 };
+        static Rgba frame_a[kScreenW * kScreenH];
+        for (int pass = 0; pass < 2; ++pass) {
+            auto rrp = Renderer::create(plat->gfx(), arena, caps());
+            Renderer* rp = rrp.unwrap();
+            TextureDesc t1{}, t2{};
+            t1.width = t2.width = 16; t1.height = t2.height = 8;
+            if (pass == 0) { t1.pixels = atlas; t2.pixels = spill; }
+            else {
+                t1.pixels = enc_atlas.data(); t1.format = PixelFormat::PAL4_TILES;
+                t2.pixels = enc_spill.data(); t2.format = PixelFormat::PAL4_TILES;
+            }
+            TextureId ta = rp->load_texture(t1);
+            TextureId tb = rp->load_texture(t2);
+            check(ta != kNoTexture && tb != kNoTexture,
+                  pass == 0 ? "RGBA8 pass uploads" : "PAL4 pass uploads");
+
+            TilemapDesc md{}; md.indices = cells; md.width = 2; md.height = 2;
+            md.layers = 1; md.tile_w = 8; md.tile_h = 8; md.tileset = tb;   // spill as BG
+            TilemapId map = rp->upload_tilemap(md);
+
+            rp->begin_frame(cam);
+            rp->draw_tilemap(map, 0);
+            DrawSprite sp{}; sp.tex = ta; sp.sx = 8; sp.sy = 0; sp.sw = 8; sp.sh = 8;
+            sp.pos = vec2{ s_from_int(30), s_from_int(20) }; sp.layer = 1;
+            rp->draw_sprite(sp);                             // one-bank texture as an OBJ
+            rp->end_frame();
+
+            phx_soft_fb fb = phx_gfx_soft_lock(plat->gfx());
+            if (pass == 0) {
+                for (int i = 0; i < kScreenW * kScreenH; ++i) frame_a[i] = fb.pixels[i];
+            } else {
+                bool same = true;
+                for (int i = 0; i < kScreenW * kScreenH && same; ++i)
+                    same = fb.pixels[i] == frame_a[i];
+                check(same, "baked PAL4 upload composes the EXACT RGBA8-quantize frame");
+            }
+        }
     }
 
     plat->shutdown();

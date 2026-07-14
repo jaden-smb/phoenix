@@ -6,9 +6,11 @@
 namespace phx {
 
 namespace {
-// Bytes an uploaded texture costs. The renderer only accepts RGBA8, so 4 bytes/texel.
+// Bytes an uploaded texture costs, by encoding: 4 bytes/texel for the RGBA8 layouts,
+// ~0.5 for the tier-0 4bpp bake (palettes/tile tables are noise next to the texel data).
 uint32_t tex_bytes(const TextureDesc& d) {
-    return uint32_t(d.width) * uint32_t(d.height) * 4u;
+    const uint32_t texels = uint32_t(d.width) * uint32_t(d.height);
+    return d.format == PixelFormat::PAL4_TILES ? texels / 2u : texels * 4u;
 }
 } // namespace
 

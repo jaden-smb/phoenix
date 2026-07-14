@@ -962,6 +962,24 @@ phxpack: $(PHXPACK)
 	@head -c4 $(BUILD)/cli.phxp | grep -q PHXP && echo "PHXPACK PASS (valid PHXP bundle)" || (echo "PHXPACK FAIL"; exit 1)
 	@./$(PHXPACK) --out $(BUILD)/cli_z.phxp --target 2 --compress $(BUILD)/t.ppm $(BUILD)/m.tmcsv
 	@head -c4 $(BUILD)/cli_z.phxp | grep -q PHXP && echo "PHXPACK PASS (valid compressed bundle)" || (echo "PHXPACK FAIL"; exit 1)
+	@# lock-file pipeline (docs/08 §2): identical inputs skip the bake; a touched input is
+	@# re-baked while the rest are reused from the previous bundle; the incremental output
+	@# is BYTE-IDENTICAL to a from-scratch --full bake; --upgrade re-bakes from the lock.
+	@cp $(BUILD)/t.ppm $(BUILD)/li_t.ppm; cp $(BUILD)/m.tmcsv $(BUILD)/li_m.tmcsv
+	@rm -f $(BUILD)/cli_i.phxp.lock
+	@./$(PHXPACK) --out $(BUILD)/cli_i.phxp --target 2 --manifest $(BUILD)/li_t.ppm $(BUILD)/li_m.tmcsv >/dev/null
+	@test -f $(BUILD)/cli_i.phxp.lock && test -f $(BUILD)/cli_i.phxp.manifest.txt \
+	  && echo "PHXPACK PASS (lock + manifest sidecars written)" || (echo "PHXPACK FAIL (sidecars)"; exit 1)
+	@./$(PHXPACK) --out $(BUILD)/cli_i.phxp --target 2 $(BUILD)/li_t.ppm $(BUILD)/li_m.tmcsv | grep -q "up to date" \
+	  && echo "PHXPACK PASS (unchanged inputs skip the bake)" || (echo "PHXPACK FAIL (lock skip)"; exit 1)
+	@printf '# touched\n' >> $(BUILD)/li_m.tmcsv
+	@./$(PHXPACK) --out $(BUILD)/cli_i.phxp --target 2 $(BUILD)/li_t.ppm $(BUILD)/li_m.tmcsv | grep -q "reused 1" \
+	  && echo "PHXPACK PASS (incremental: unchanged input reused)" || (echo "PHXPACK FAIL (incremental)"; exit 1)
+	@./$(PHXPACK) --out $(BUILD)/cli_if.phxp --target 2 --full $(BUILD)/li_t.ppm $(BUILD)/li_m.tmcsv >/dev/null
+	@cmp -s $(BUILD)/cli_i.phxp $(BUILD)/cli_if.phxp \
+	  && echo "PHXPACK PASS (incremental rebake byte-identical to full)" || (echo "PHXPACK FAIL (reproducibility)"; exit 1)
+	@./$(PHXPACK) --upgrade $(BUILD)/cli_i.phxp >/dev/null && cmp -s $(BUILD)/cli_i.phxp $(BUILD)/cli_if.phxp \
+	  && echo "PHXPACK PASS (--upgrade re-bakes reproducibly from the lock)" || (echo "PHXPACK FAIL (upgrade)"; exit 1)
 	@# fixture INPUTS live at literal build/ — the suite binaries that drop them (png/sprite/
 	@# tiled/audio) hardcode that path, so it holds even when a wrapper overrides $(BUILD)
 	@test -f build/png_in.png && ./$(PHXPACK) --out $(BUILD)/cli_png.phxp --target 2 build/png_in.png \
@@ -1078,7 +1096,8 @@ $(TILED): $(TILED_OBJ)
 	$(CXX) $(CXXFLAGS) $(TILED_OBJ) -o $@
 
 PHXPACK_HDRS := tools/phxpack/bundle_writer.h tools/phxpack/bundle_reader.h tools/phxpack/builders.h \
-                tools/phxpack/png.h tools/phxpack/tiled.h tools/phxpack/wav.h tools/phxpack/json.h
+                tools/phxpack/png.h tools/phxpack/tiled.h tools/phxpack/wav.h tools/phxpack/json.h \
+                tools/phxpack/tex_encode.h tools/phxpack/lock.h
 
 $(PHXPACK): tools/phxpack/main.cpp $(PHXPACK_HDRS)
 	@mkdir -p $(dir $@)

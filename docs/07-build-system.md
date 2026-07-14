@@ -145,11 +145,10 @@ add_dependencies(platformer assets)
 # GBA: assets.phxp is bin2o'd into the ROM; PSP/PC: shipped alongside EBOOT/exe.
 ```
 
-Even in this sketch, "incremental: only changed source assets re-encode" would need a
-`.phxp.lock`-style hash file that doesn't exist yet (`docs/08-tooling.md` §2/§9) — as
-written, CMake's own `DEPENDS` list already forces a full re-run of `phxpack` on any
-input change; there's no partial/incremental re-encode inside `phxpack` itself to exploit
-either way.
+CMake's `DEPENDS` list re-runs `phxpack` on any input change; *inside* that run,
+`phxpack`'s lock file (`docs/08-tooling.md` §2/§9) makes the re-bake incremental — only
+the changed sources re-encode, the rest are reused from the previous bundle, and an
+invocation whose inputs are all unchanged is a no-op ("up to date").
 
 ## 6. Dependency enforcement in CI
 

@@ -121,6 +121,7 @@ foreach(spec ppu:gba/gba_ppu gu:gu/gu_backend)
     ${CMAKE_SOURCE_DIR}/engine/memory/include
     ${CMAKE_SOURCE_DIR}/engine/platform/include
     ${CMAKE_SOURCE_DIR}/engine/render/include
+    ${_phxpack_inc}                                        # tex_encode.h (bake==upload proofs)
     ${_render_src} ${_render_src}/gba ${_render_src}/gu)   # ppu_model.h / gu_model.h
   add_test(NAME ${tname} COMMAND it_${tname} WORKING_DIRECTORY ${_test_wd})
 endforeach()

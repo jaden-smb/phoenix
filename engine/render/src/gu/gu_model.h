@@ -25,7 +25,15 @@ constexpr int kScreenW = 480;   // PSP native resolution (the model composes any
 constexpr int kScreenH = 272;
 
 // A bound texture: full RGBA8 pixels (the PSP GU samples 32-bit textures directly).
-struct GuTexRef { const uint32_t* px; int32_t w, h; };
+// `swz` marks the tier-1 bake's swizzled block layout (phx/core/pixel.h): on hardware the
+// GU samples it zero-copy with the swizzle bit set; the model computes the same addresses.
+// A pure reorder — texel values are identical, so the soft goldens still apply exactly.
+struct GuTexRef { const uint32_t* px; int32_t w, h; uint8_t swz = 0; };
+
+inline uint32_t gu_texel(const GuTexRef& t, int x, int y) {
+    return t.swz ? t.px[swz_texel_index(uint32_t(x), uint32_t(y), uint32_t(t.w))]
+                 : t.px[y * t.w + x];
+}
 
 // One textured sprite quad: a source rect sampled (nearest) into a screen dest rect, with
 // optional flip and a per-channel modulate (vertex colour). Dest is already camera-adjusted.
@@ -72,7 +80,7 @@ inline void gu_compose(const GuState& s, uint32_t* out) {
                 const int sox  = (dw == d.sw) ? x : (x * d.sw / dw); // nearest source col
                 const int srcX = fx ? (d.sx + d.sw - 1 - sox) : (d.sx + sox);
                 if (srcX < 0 || srcX >= t.w) continue;
-                uint32_t texel = t.px[srcY * t.w + srcX];
+                uint32_t texel = gu_texel(t, srcX, srcY);
                 if ((texel >> 24) == 0) continue;                    // alpha 0 -> skip
                 if (mod) {
                     uint32_t r = uint32_t(rgba_r(texel)) * rgba_r(d.tint) / 255;

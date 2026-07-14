@@ -116,13 +116,18 @@ public:
 #endif
     }
 
-    // Quantize an RGBA8 atlas into 4bpp tiles + palette banks. Fails (kNoTexture) on the
-    // honest GBA constraints: non-RGBA8, non-8px-aligned, char-store full, one tile needing
-    // >15 opaque colours, or all 16 banks exhausted.
+    // Accepts the PPU's two texture encodings and fails (kNoTexture) on the honest GBA
+    // constraints (non-8px-aligned, char-store full, >15 opaque colours in one tile, all
+    // 16 banks exhausted):
+    //   · PAL4_TILES (the tier-0 bake, docs/06 §4): tiles arrive pre-quantized — upload just
+    //     claims a palette bank per baked palette and remaps nibbles through a 16-entry LUT.
+    //   · RGBA8 (tests, tier-2 bundles, un-bakeable art): the full upload-time quantizer.
+    //     Both paths produce the same composed frame for the same source art.
     TextureId upload_tex(const TextureDesc& d) override {
-        if (d.format != PixelFormat::RGBA8 || !d.pixels)      return kNoTexture;
-        if (d.width == 0 || d.height == 0)                    return kNoTexture;
+        if (!d.pixels || d.width == 0 || d.height == 0)       return kNoTexture;
         if ((d.width % kTile) || (d.height % kTile))          return kNoTexture;  // tile-align
+        if (d.format == PixelFormat::PAL4_TILES)              return upload_pal4(d);
+        if (d.format != PixelFormat::RGBA8)                   return kNoTexture;
         const uint16_t cols = uint16_t(d.width  / kTile);
         const uint16_t rows = uint16_t(d.height / kTile);
         const uint32_t need = uint32_t(cols) * rows;
@@ -198,6 +203,67 @@ public:
         if (id >= tex_n_ || !tex_[id].used) return;  // out of range / double free
         tex_[id].used = false;                       // (tiles are not reclaimed; ids are)
         free_[free_n_++] = id;
+    }
+
+    // The PAL4_TILES fast path: the bake already ran this backend's quantizer offline
+    // (tools/phxpack/tex_encode.h mirrors it exactly), so upload is claim-banks + LUT-remap
+    // — no per-texel colour scan on the 16 MHz CPU, and the ROM carries 4bpp, not RGBA8.
+    TextureId upload_pal4(const TextureDesc& d) {
+        // Blob payloads are 8-aligned (16-aligned blob start + the 8-byte blob header), so
+        // header/palette casts are safe on ARM; the tile words are 4-aligned by the format.
+        const uint8_t* pay = static_cast<const uint8_t*>(d.pixels);
+        const TexturePal4Header& ph = *reinterpret_cast<const TexturePal4Header*>(pay);
+        const uint16_t cols = uint16_t(d.width  / kTile);
+        const uint16_t rows = uint16_t(d.height / kTile);
+        const uint32_t need = uint32_t(cols) * rows;
+        if (ph.pal_count == 0 || ph.pal_count > kPalBanks)    return kNoTexture;
+        if (tile_count_ + need > kTileCap)                    return kNoTexture;  // char store full
+
+        const uint16_t* pals  = reinterpret_cast<const uint16_t*>(pay + pal4_palettes_off());
+        const uint8_t*  used  = pay + pal4_pal_used_off(ph.pal_count);
+        const uint8_t*  tpal  = pay + pal4_tile_pal_off(ph.pal_count);
+        const uint32_t* tdata = reinterpret_cast<const uint32_t*>(
+                                    pay + pal4_tile_data_off(ph.pal_count, need));
+
+        // One global bank per baked palette; LUT = baked slot -> global bank slot. When the
+        // palette lands in a fresh bank the LUT is the identity and the remap is a straight copy.
+        uint8_t gbank[kPalBanks];
+        uint8_t lut[kPalBanks][kPalSize] = {};
+        for (uint16_t p = 0; p < ph.pal_count; ++p) {
+            const int n = used[p] <= kPalSize - 1 ? used[p] : kPalSize - 1;
+            uint16_t colors[kPalSize - 1];
+            for (int k = 0; k < n; ++k) colors[k] = pals[p * kPalSize + 1 + k];
+            const int b = claim_bank(colors, n);
+            if (b < 0) return kNoTexture;                     // all 16 banks exhausted
+            gbank[p] = uint8_t(b);
+            for (int s = 1; s <= n; ++s) lut[p][s] = bank_slot(uint8_t(b), pals[p * kPalSize + s]);
+        }
+
+        const uint16_t base = tile_count_;
+        for (uint32_t t = 0; t < need; ++t) {
+            const uint8_t p = tpal[t];
+            if (p >= ph.pal_count) return kNoTexture;         // malformed payload
+            PpuTile& tile = tiles_[base + t];
+            for (int r = 0; r < kTile; ++r) {
+                const uint32_t in = tdata[t * 8 + r];
+                uint32_t out = 0;
+                for (int x = 0; x < kTile; ++x)
+                    out |= uint32_t(lut[p][(in >> (x * 4)) & 0xF]) << (x * 4);
+                tile.row[r] = out;
+            }
+            tile_bank_[base + t] = gbank[p];
+        }
+        tile_count_ = uint16_t(tile_count_ + need);
+
+        TextureId id;
+        if (free_n_ > 0)                    id = free_[--free_n_];
+        else if (tex_n_ < kMaxTextures)     id = tex_n_++;
+        else                                return kNoTexture;
+        // A single baked palette = one bank for the whole texture (OBJ-usable, like the
+        // RGBA8 path's one-bank case); several palettes = per-tile banks (BG-only).
+        tex_[id] = TexRec{ base, cols, rows, true,
+                           ph.pal_count == 1 ? gbank[0] : kBankNone };
+        return id;
     }
 
     TilemapId upload_map(const TilemapDesc& d) override {

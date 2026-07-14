@@ -11,7 +11,10 @@ namespace phx {
 
 // "PHXP" in little-endian byte order ('P'=0x50, 'H'=0x48, 'X'=0x58, 'P'=0x50).
 constexpr uint32_t kBundleMagic   = 0x50584850u;
-constexpr uint16_t kBundleVersion = 1;
+// v2: per-target texture encodes (tier 0 bakes PAL4_TILES, tier 1 bakes RGBA8_SWZ — see the
+// texture section below). v1 bundles (all textures RGBA8) still mount; a v1 runtime refuses
+// v2 bundles as "newer major", which is the correct failure for blobs it cannot decode.
+constexpr uint16_t kBundleVersion = 2;
 
 enum class AssetType : uint16_t {
     Texture = 1,
@@ -59,12 +62,25 @@ struct TocEntry {
 
 // ---- per-asset blob headers (first bytes of each blob) ----
 
+// Texture blobs are PER-TARGET ENCODED at bake time (tools/phxpack, docs/06 §4):
+//   tier 2 (PC)  — format RGBA8:      width*height*4 bytes, row-major.
+//   tier 1 (PSP) — format RGBA8_SWZ:  the same RGBA8 texels reordered into the GU's swizzled
+//                  block layout (16-byte × 8-row blocks; see swz_texel_index below) so the
+//                  GU samples the blob zero-copy with the swizzle bit set. Falls back to
+//                  RGBA8 when the size doesn't block-align (width % 4 || height % 8).
+//   tier 0 (GBA) — format PAL4_TILES: 4bpp paletted 8×8 tiles (the PPU's native layout; see
+//                  TexturePal4Header below). Falls back to RGBA8 when the art can't be
+//                  expressed (not 8px-aligned, or one tile needs >15 opaque colours) — the
+//                  PPU backend then applies its upload-time quantizer (or rejects, exactly
+//                  as it would have rejected the same art baked or not).
 struct TextureBlobHeader {
     uint16_t width;
     uint16_t height;
     uint8_t  format;       // PixelFormat
     uint8_t  pad[3];
-    // followed by width*height*4 bytes RGBA8 (for format==RGBA8)
+    // followed by the format-specific payload: raw RGBA8 rows, or the PAL4_TILES/RGBA8_SWZ
+    // layouts defined next to PixelFormat in phx/core/pixel.h (kept in core so render can
+    // consume them without a resource dependency — the same reason PixelFormat lives there)
 };
 
 struct TilemapBlobHeader {

@@ -89,6 +89,17 @@ int main() {
     { phxtool::BundleWriter w(2); check(phxtool::build_bin(w, "build/p_items.json", "items", "build/p_items.gen.h"), "phxbin build");
       check(w.write("build/p_items.phxbin"), "write .phxbin"); }
 
+    // --- 2b. bake determinism (docs/08 §9): identical input -> byte-identical bundle ----
+    {
+        phxtool::BundleWriter w2(2);
+        check(phxtool::build_sprite(w2, "build/p_hero.sprdef", "hero"), "re-bake hero");
+        check(w2.write("build/p_hero2.phxspr"), "write re-baked .phxspr");
+        std::vector<uint8_t> a, b;
+        check(phxtool::read_file("build/p_hero.phxspr", a)
+              && phxtool::read_file("build/p_hero2.phxspr", b) && a == b,
+              "two bakes of the same source are byte-identical (reproducible)");
+    }
+
     // --- 3. ASSEMBLER: merge the intermediates into one bundle (phxpack) -----
     const char* bundle = "build/p_assets.phxp";
     { phxtool::BundleWriter out(2);
@@ -151,6 +162,56 @@ int main() {
             check(s.frames == uint32_t((uint64_t(8) << 16) / ((uint64_t(22050) << 16) / 18157)),
                   "tier-0 frame count scaled by 18157/22050");
             check(s.samples && s.samples[0] == 0, "tier-0 first sample intact"); }
+    }
+
+    // per-target TEXTURE encode (docs/06 §4, the texture counterpart of the sound check
+    // above): the same RGBA8 art bakes to PAL4_TILES on tier 0, swizzled RGBA8 on tier 1,
+    // plain RGBA8 on tier 2 — and art a tier can't express honestly stays RGBA8.
+    {
+        static uint32_t art[8 * 8];
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 8; ++x)
+                art[y * 8 + x] = (x < 4) ? rgba(216, 40, 40) : rgba(40, 216, 40);
+        art[9] = 0;                                    // one transparent texel at (1,1)
+
+        for (int tier = 0; tier <= 2; ++tier) {
+            char path[64]; std::snprintf(path, sizeof(path), "build/p_tex%d.phxp", tier);
+            phxtool::BundleWriter wt{uint8_t(tier)};
+            wt.add_texture("art", art, 8, 8);
+            if (tier == 0) wt.add_texture("odd", art, 8, 2);   // h % 8 -> not tier-0 encodable
+            check(wt.write(path), "write per-tier texture bundle");
+
+            ResourceCache* ct = ResourceCache::create(arena).unwrap();
+            check(ct->mount(plat, path) == Status::Ok, "mount per-tier texture bundle");
+            auto tvr = ct->texture("art"_hash);
+            check(tvr.ok(), "texture('art') per tier");
+            if (!tvr.ok()) continue;
+            TextureView v = tvr.unwrap();
+            const uint8_t* pay = static_cast<const uint8_t*>(v.pixels);
+            if (tier == 0) {
+                check(v.format == PixelFormat::PAL4_TILES, "tier 0 baked PAL4_TILES");
+                const TexturePal4Header* ph = reinterpret_cast<const TexturePal4Header*>(pay);
+                check(ph->pal_count == 1, "2-colour art fits one palette (OBJ-safe)");
+                const uint16_t* pal   = reinterpret_cast<const uint16_t*>(pay + pal4_palettes_off());
+                const uint8_t*  tiles = pay + pal4_tile_data_off(ph->pal_count, 1);
+                check(pal4_texel(tiles, 0, 1, 1) == 0, "transparent texel -> nibble 0");
+                const uint8_t s00 = pal4_texel(tiles, 0, 0, 0);
+                check(s00 != 0 && pal[s00] == rgba8_to_bgr555(rgba(216, 40, 40)),
+                      "PAL4 texel (0,0) decodes to the quantized source colour");
+                // the fallback texture kept RGBA8 (and the runtime treats it like a v1 blob)
+                auto odd = ct->texture("odd"_hash);
+                check(odd.ok() && odd.unwrap().format == PixelFormat::RGBA8,
+                      "non-8px-aligned art honestly stays RGBA8 on tier 0");
+            } else if (tier == 1) {
+                check(v.format == PixelFormat::RGBA8_SWZ, "tier 1 baked swizzled RGBA8");
+                const uint32_t* px = reinterpret_cast<const uint32_t*>(pay);
+                check(px[swz_texel_index(5, 3, 8)] == art[3 * 8 + 5],
+                      "swizzled texel reads back bit-exact");
+            } else {
+                check(v.format == PixelFormat::RGBA8, "tier 2 keeps plain RGBA8");
+                check(std::memcmp(pay, art, sizeof(art)) == 0, "tier-2 texels untouched");
+            }
+        }
     }
 
     // data table, from phxbin: [u32 count][u32 stride][records...], ItemRecord{u16 id; u32 price; i16 atk;}

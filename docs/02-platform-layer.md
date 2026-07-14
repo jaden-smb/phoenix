@@ -97,8 +97,8 @@ engine/platform/src/
 
 - `init` → `SDL_CreateWindow` + `SDL_GL_CreateContext`. No `SDL_GL_SetAttribute` context-
   version request — it gets whatever default/compatibility context the driver hands back,
-  which is what the GL 1.1 immediate-mode backend (`docs/03` §6) actually needs. No Vulkan
-  surface; there is no Vulkan backend.
+  which is what the GL 1.1 immediate-mode backend (`docs/03` §6) needs. No Vulkan surface:
+  a Vulkan backend is an explicit non-goal (`docs/03` §6 records the decision).
 - `clock_ns` → `SDL_GetPerformanceCounter` scaled.
 - `poll_input` → `SDL_PollEvent` accumulated into `phx_input_raw`.
 - `open`/`map` → `mmap`(linux)/`MapViewOfFile`(win) the `.phxp` bundle, zero-copy.
