@@ -260,6 +260,59 @@ int main() {
         TmapDoc r2;
         check(TmapDoc::load(r.save_tmj(), r2) && r2.tile(1, 2, 2) == 0 && r2.spawns.size() == 1,
               "erase edits survive a second round-trip");
+
+        // Layer names authored in the doc survive the importer (not synthesized "layerN").
+        check(r2.layer_names.size() == 2 && r2.layer_names[0] == "backdrop" &&
+              r2.layer_names[1] == "main", "round-trip layer names");
+
+        // The doc's spawn vocabulary is harvested for the GUI's placeable list.
+        auto tys = r2.spawn_types();
+        check(tys.size() == 1 && tys[0] == "player", "spawn_types harvests the doc's vocabulary");
+    }
+
+    // phxtmap editor: per-GID collision flags author-edit + round-trip (saved as Tiled
+    // tileset per-tile properties, re-imported by the same tiled_load the bake uses), and
+    // bounded undo/redo over paint/spawn/flag/layer gestures.
+    {
+        using phxtool::TmapDoc;
+        TmapDoc d = TmapDoc::blank(4, 3, 8, 8, "tiles");
+
+        // collision authoring: cycle none -> solid -> oneway -> hazard -> none
+        d.cycle_tile_flag(3);
+        check(d.tile_flag(3) == phx::kTileFlagSolid, "cycle: none -> solid");
+        d.cycle_tile_flag(3);
+        check(d.tile_flag(3) == phx::kTileFlagOneWay, "cycle: solid -> oneway");
+        d.cycle_tile_flag(3);
+        check(d.tile_flag(3) == phx::kTileFlagHazard, "cycle: oneway -> hazard");
+        d.set_tile_flag(2, phx::kTileFlagSolid);
+        d.set_tile_flag(0, phx::kTileFlagSolid);            // GID 0 is air: must be refused
+        check(d.tile_flag(0) == 0, "GID 0 never takes a flag");
+
+        TmapDoc fr;
+        check(TmapDoc::load(d.save_tmj(), fr), "flagged .tmj re-parses via the real importer");
+        check(fr.tile_flag(2) == phx::kTileFlagSolid && fr.tile_flag(3) == phx::kTileFlagHazard,
+              "collision flags survive save -> import (tileset per-tile properties)");
+
+        // undo/redo: each gesture is one step; redo is cleared by a new edit
+        TmapDoc u = TmapDoc::blank(4, 3, 8, 8, "tiles");
+        check(!u.undo() && !u.redo(), "nothing to undo/redo on a fresh doc");
+        u.push_undo(); u.set_tile(0, 1, 1, 5);              // gesture 1: paint
+        u.push_undo(); u.add_spawn("coin", 8, 8);           // gesture 2: spawn
+        u.push_undo(); u.add_layer("fg");                   // gesture 3: layer
+        check(u.layers.size() == 2 && u.spawns.size() == 1 && u.tile(0, 1, 1) == 5, "edits applied");
+        check(u.undo() && u.layers.size() == 1, "undo pops the layer");
+        check(u.undo() && u.spawns.empty(), "undo pops the spawn");
+        check(u.undo() && u.tile(0, 1, 1) == 0, "undo pops the paint");
+        check(!u.undo(), "undo stack exhausted");
+        check(u.redo() && u.tile(0, 1, 1) == 5, "redo re-applies the paint");
+        check(u.redo() && u.spawns.size() == 1, "redo re-applies the spawn");
+        u.push_undo(); u.set_tile(0, 0, 0, 9);              // a new edit...
+        check(!u.redo(), "...clears the redo stack");
+        // a no-op gesture can be dropped so undo never "does nothing"
+        u.push_undo();
+        const size_t depth = u.undo_depth();
+        u.drop_undo();
+        check(u.undo_depth() == depth - 1, "drop_undo discards the no-op gesture");
     }
 
     // phxentity editor document model: load the items table, edit (clamped to the field's
@@ -288,6 +341,43 @@ int main() {
         check(phxtool::build_bin(wb, "build/p_items_edited.json", "items2",
                                  "build/p_items_edited.gen.h"),
               "edited table still bakes through the real phxbin builder");
+    }
+
+    // phxentity schema authoring: a fresh table from a CLI-style spec (--new/--fields),
+    // field add/remove keeping every record in shape, and honest failures on bad specs.
+    {
+        using phxtool::BinDoc;
+        BinDoc d;
+        std::string err;
+        check(BinDoc::blank("Enemy", { "hp:u16", "atk:i8" }, d, &err), "blank table from a schema");
+        check(d.struct_name == "Enemy" && d.fields.size() == 2 && d.records.empty(), "blank shape");
+        d.add_record(0); d.add_record(0);
+        check(d.add_field("speed", "u8"), "add a field");
+        check(d.fields.size() == 3 && d.records[0].size() == 3 && d.records[1][2] == 0,
+              "records grew with the schema");
+        check(!d.add_field("hp", "u16"), "duplicate field name refused");
+        check(!d.add_field("x", "f64"), "unknown field type refused");
+        check(d.remove_field(1), "remove a field");
+        check(d.fields.size() == 2 && d.fields[1].name == "speed" && d.records[0].size() == 2,
+              "records shrank with the schema");
+
+        BinDoc bad;
+        check(!BinDoc::blank("Enemy", { "hp=u16" }, bad, &err) && !err.empty(),
+              "bad field spec reports why");
+        check(!BinDoc::blank("Enemy", {}, bad, &err), "empty schema refused");
+
+        // the new table's saved JSON still bakes through the real phxbin builder
+        const std::string j = d.save_json();
+        write_file("build/p_new_table.json", j.data(), j.size());
+        phxtool::BundleWriter wb(2);
+        check(phxtool::build_bin(wb, "build/p_new_table.json", "enemies"),
+              "schema-authored table bakes through phxbin");
+
+        // malformed author JSON reports a positioned parse error (the diagnostics seam)
+        BinDoc m;
+        check(!BinDoc::load("{ \"struct\":\"X\",\n  \"fields\":[{\"name\":\"a\" \"type\":\"u8\"}] }", m, &err) &&
+              err.find("line 2") != std::string::npos,
+              "parse errors carry line/col positions");
     }
 
     // the generated accessor header exists and declares the struct

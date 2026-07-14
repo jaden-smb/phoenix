@@ -28,10 +28,13 @@ make entity                                # -> build/phxentity
 
 ./build/phxentity items.json               # edit (saves in place)
 ./build/phxentity --out copy.json items.json
+./build/phxentity --new Enemy --fields hp:u16,atk:i8,speed:u8 --out enemies.json
 ```
 
-The input must already have the phxbin shape (`struct` + `fields` + `records`) — start new
-tables from a snippet like:
+`--new NAME --fields a:type,b:type` starts a **fresh table** from a schema — no input file or
+hand-written JSON needed (types: `u8 i8 u16 i16 u32 i32`; it opens with one zeroed record).
+An existing input must have the phxbin shape (`struct` + `fields` + `records`); a malformed
+file is refused with a `line L, col C` parse error. For reference, the shape is:
 
 ```json
 { "struct": "ItemRecord",

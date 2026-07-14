@@ -95,9 +95,26 @@ struct TilemapBlobHeader {
     // if (flags & kTilemapHasParallax): then — 4-byte aligned from the blob start (zero
     // padding after an odd index count; unaligned int32 loads fault on ARM) — `layers`
     // pairs of int32 Q16.16 {fx, fy} per-layer camera factors (1<<16 = moves with the
-    // world), imported from Tiled's native parallaxx/parallaxy layer properties.
+    // world), imported from Tiled's native parallaxx/parallaxy layer properties;
+    // if (flags & kTilemapHasTileFlags): then — 4-byte aligned after the previous section —
+    // a uint32 count followed by count uint8 per-tile collision flags (kTileFlag*, indexed
+    // by tile index; index 0 = empty), imported from Tiled tileset per-tile properties.
 };
-enum : uint8_t { kTilemapHasParallax = 1 << 0 };
+enum : uint8_t {
+    kTilemapHasParallax  = 1 << 0,
+    kTilemapHasTileFlags = 1 << 1,
+};
+
+// Per-tile collision flags (the Tilemap blob's optional tile-flags table). Authored as Tiled
+// tileset per-tile properties or class strings (tools/phxpack/tiled.h). The physics module's
+// TileGrid constants (kTileSolid/kTileOneWay/kTileHazard, phx/physics/physics.h) mirror these
+// values — physics stays resource-free by design, so the pair is guarded by a unit-test
+// static_assert instead of an include.
+enum : uint8_t {
+    kTileFlagSolid  = 1 << 0,   // blocks all movement
+    kTileFlagOneWay = 1 << 1,   // blocks only downward motion entering from above (platforms)
+    kTileFlagHazard = 1 << 2,   // gameplay-defined (spikes/damage); physics only reports it
+};
 
 // Sound asset: mono 16-bit signed PCM at `rate` Hz. The runtime wraps it as an audio SoundView
 // (kept POD here so `resource` needs no dependency on `audio`).

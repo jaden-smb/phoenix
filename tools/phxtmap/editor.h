@@ -1,12 +1,14 @@
 // tools/phxtmap/editor.h — the tilemap editor's DOCUMENT model, separated from the GUI so
 // it is unit-testable headlessly. Loads/saves the open Tiled `.tmj` JSON (docs/08 §1: editors
-// output AUTHOR formats that the converters bake — never engine blobs), edits tile cells and
-// spawn objects in place, and round-trips through the same `tiled_load` the bake path uses.
+// output AUTHOR formats that the converters bake — never engine blobs), edits tile cells,
+// spawn objects, per-GID collision flags, and layers in place, with bounded undo/redo, and
+// round-trips through the same `tiled_load` the bake path uses — INCLUDING the tileset
+// collision metadata, so editing a map never strips what Tiled (or this editor) authored.
 // Host-only (STL fine).
 #ifndef PHX_TOOLS_PHXTMAP_EDITOR_H
 #define PHX_TOOLS_PHXTMAP_EDITOR_H
 
-#include "tiled.h"   // tools/phxpack — the one Tiled importer
+#include "tiled.h"   // tools/phxpack — the one Tiled importer (+ kTileFlag* via bundle.h)
 
 #include <cstdint>
 #include <cstdio>
@@ -22,6 +24,7 @@ public:
     std::vector<std::vector<uint16_t>> layers;                  // cell = GID (0 empty)
     std::vector<std::string> layer_names;
     std::vector<std::pair<double,double>> layer_parallax;       // 1:1 = moves with the world
+    std::vector<uint8_t> tile_flags;                            // per-GID kTileFlag* (collision)
     std::vector<TiledSpawn> spawns;
 
     // A blank single-layer document.
@@ -35,17 +38,17 @@ public:
     }
 
     // Load from `.tmj` text via the real importer (whatever it accepts, the bake accepts).
-    static bool load(const std::string& tmj_text, TmapDoc& out) {
+    // On failure `err` (when given) receives the importer's "line L, col C: reason" message.
+    static bool load(const std::string& tmj_text, TmapDoc& out, std::string* err = nullptr) {
         TiledMap tm;
-        if (!tiled_load(tmj_text, tm)) return false;
+        if (!tiled_load(tmj_text, tm, err)) return false;
         out.width = tm.width; out.height = tm.height;
         out.tile_w = tm.tile_w; out.tile_h = tm.tile_h;
         out.tileset = tm.tileset.empty() ? "tiles" : tm.tileset;
         out.layers = tm.layers;
+        out.layer_names = tm.layer_names;
         out.layer_parallax = tm.layer_parallax;
-        out.layer_names.assign(out.layers.size(), "");
-        for (size_t i = 0; i < out.layer_names.size(); ++i)
-            out.layer_names[i] = "layer" + std::to_string(i);
+        out.tile_flags = tm.tile_flags;
         out.spawns = tm.spawns;
         return true;
     }
@@ -81,6 +84,79 @@ public:
         }
         return false;
     }
+    // Every spawn type present in the document, in first-appearance order (the GUI merges
+    // these into its placeable-type list, so an opened map offers its own vocabulary).
+    std::vector<std::string> spawn_types() const {
+        std::vector<std::string> out;
+        for (const TiledSpawn& s : spawns) {
+            if (s.type.empty()) continue;
+            bool seen = false;
+            for (const std::string& t : out) if (t == s.type) { seen = true; break; }
+            if (!seen) out.push_back(s.type);
+        }
+        return out;
+    }
+
+    // ---- per-GID collision flags (kTileFlag*, baked into the Tilemap asset) ----
+    uint8_t tile_flag(uint16_t gid) const {
+        return gid < tile_flags.size() ? tile_flags[gid] : uint8_t(0);
+    }
+    void set_tile_flag(uint16_t gid, uint8_t flags) {
+        if (gid == 0) return;                                    // GID 0 is empty air
+        if (tile_flags.size() <= gid) tile_flags.resize(size_t(gid) + 1, 0);
+        tile_flags[gid] = flags;
+        dirty = true;
+    }
+    // One-key authoring: none -> solid -> oneway -> hazard -> none.
+    void cycle_tile_flag(uint16_t gid) {
+        const uint8_t f = tile_flag(gid);
+        uint8_t next = 0;
+        if      (f == 0)                    next = phx::kTileFlagSolid;
+        else if (f & phx::kTileFlagSolid)   next = phx::kTileFlagOneWay;
+        else if (f & phx::kTileFlagOneWay)  next = phx::kTileFlagHazard;
+        set_tile_flag(gid, next);
+    }
+    bool has_tile_flags() const {
+        for (uint8_t f : tile_flags) if (f) return true;
+        return false;
+    }
+
+    void add_layer(const std::string& name) {
+        layers.emplace_back(size_t(width) * height, 0);
+        layer_names.push_back(name.empty() ? "layer" + std::to_string(layers.size() - 1) : name);
+        layer_parallax.emplace_back(1.0, 1.0);
+        dirty = true;
+    }
+
+    // ---- undo/redo (bounded snapshots; the GUI pushes one per edit gesture) ----
+    // Call push_undo() BEFORE a gesture mutates the document (a paint stroke counts as one
+    // gesture, so click-drag paints undo in one step).
+    void push_undo() {
+        undo_.push_back(snap());
+        if (undo_.size() > kMaxUndo) undo_.erase(undo_.begin());
+        redo_.clear();
+    }
+    bool undo() {
+        if (undo_.empty()) return false;
+        redo_.push_back(snap());
+        restore(undo_.back());
+        undo_.pop_back();
+        dirty = true;
+        return true;
+    }
+    bool redo() {
+        if (redo_.empty()) return false;
+        undo_.push_back(snap());
+        restore(redo_.back());
+        redo_.pop_back();
+        dirty = true;
+        return true;
+    }
+    size_t undo_depth() const { return undo_.size(); }
+    size_t redo_depth() const { return redo_.size(); }
+    // Discard the most recent push_undo() — for a gesture that turned out to be a no-op
+    // (e.g. an erase click that hit nothing), so undo never "does nothing".
+    void drop_undo() { if (!undo_.empty()) undo_.pop_back(); }
 
     // ---- save: emit Tiled-compatible `.tmj` JSON (the exact dialect tiled_load parses) ----
     std::string save_tmj() const {
@@ -88,7 +164,32 @@ public:
                         ", \"height\":" + std::to_string(height) +
                         ", \"tilewidth\":" + std::to_string(tile_w) +
                         ", \"tileheight\":" + std::to_string(tile_h) + ",";
-        j += "\"tilesets\":[{\"firstgid\":1,\"name\":\"" + tileset + "\"}],";
+        j += "\"tilesets\":[{\"firstgid\":1,\"name\":\"" + tileset + "\"";
+        if (has_tile_flags()) {
+            // Per-tile collision as boolean properties (the most general Tiled form — a tile
+            // may carry several flags); id is 0-based, GID = firstgid + id.
+            j += ",\"tiles\":[";
+            bool first = true;
+            for (size_t gid = 1; gid < tile_flags.size(); ++gid) {
+                const uint8_t f = tile_flags[gid];
+                if (!f) continue;
+                if (!first) j += ",";
+                first = false;
+                j += "{\"id\":" + std::to_string(gid - 1) + ",\"properties\":[";
+                bool fp = true;
+                auto prop = [&](const char* name) {
+                    if (!fp) j += ",";
+                    fp = false;
+                    j += std::string("{\"name\":\"") + name + "\",\"type\":\"bool\",\"value\":true}";
+                };
+                if (f & phx::kTileFlagSolid)  prop("solid");
+                if (f & phx::kTileFlagOneWay) prop("oneway");
+                if (f & phx::kTileFlagHazard) prop("hazard");
+                j += "]}";
+            }
+            j += "]";
+        }
+        j += "}],";
         j += "\"layers\":[";
         for (size_t l = 0; l < layers.size(); ++l) {
             if (l) j += ",";
@@ -132,6 +233,24 @@ public:
     bool dirty = false;   // unsaved edits (shown in the GUI title bar)
 
 private:
+    static constexpr size_t kMaxUndo = 64;
+
+    // Everything an edit gesture can touch (geometry/tileset changes have no gesture).
+    struct Snapshot {
+        std::vector<std::vector<uint16_t>> layers;
+        std::vector<std::string> layer_names;
+        std::vector<std::pair<double,double>> layer_parallax;
+        std::vector<uint8_t> tile_flags;
+        std::vector<TiledSpawn> spawns;
+    };
+    Snapshot snap() const { return Snapshot{ layers, layer_names, layer_parallax, tile_flags, spawns }; }
+    void restore(const Snapshot& s) {
+        layers = s.layers; layer_names = s.layer_names; layer_parallax = s.layer_parallax;
+        tile_flags = s.tile_flags; spawns = s.spawns;
+    }
+
+    std::vector<Snapshot> undo_, redo_;
+
     // Compact decimal for parallax factors (avoids "0.500000"); JSON has no notion of
     // precision, and tiled_load reads any decimal form back.
     static std::string num(double v) {

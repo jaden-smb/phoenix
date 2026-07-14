@@ -4,6 +4,7 @@
 #include "phx/resource/lz.h"
 #include "phx/platform/platform.h"
 #include "phx/core/crc32.h"
+#include "phx/core/log.h"
 
 namespace phx {
 
@@ -33,23 +34,44 @@ Status ResourceCache::mount(const phx_platform* plat, const char* path, bool ver
     for (uint32_t i = 0; i < mount_count_; ++i)
         if (mounts_[i].path_hash == path_hash) return Status::Ok;   // idempotent re-mount
 
-    if (mount_count_ >= kMaxMounts) return Status::OutOfMemory;
+    if (mount_count_ >= kMaxMounts) {
+        PHX_LOG_ERROR("resource: mount '%s': all %u mount slots in use", path, kMaxMounts);
+        return Status::OutOfMemory;
+    }
 
     size_t size = 0;
     phx_file* f = plat->open(path, &size);
-    if (!f) return Status::NotFound;
+    if (!f) {
+        PHX_LOG_ERROR("resource: mount '%s': file not found/openable", path);
+        return Status::NotFound;
+    }
 
     const uint8_t* base = static_cast<const uint8_t*>(plat->map(f));
-    if (!base || size < sizeof(BundleHeader)) { plat->close(f); return Status::IoError; }
+    if (!base || size < sizeof(BundleHeader)) {
+        PHX_LOG_ERROR("resource: mount '%s': too small to be a bundle (%u bytes)", path, uint32_t(size));
+        plat->close(f); return Status::IoError;
+    }
 
     const BundleHeader* h = reinterpret_cast<const BundleHeader*>(base);
-    if (h->magic != kBundleMagic) { plat->close(f); return Status::IoError; }       // wrong format / endianness
-    if (h->version > kBundleVersion) { plat->close(f); return Status::Unsupported; } // newer major
-    if (h->total_size > size) { plat->close(f); return Status::IoError; }           // truncated file
+    if (h->magic != kBundleMagic) {                                  // wrong format / endianness
+        PHX_LOG_ERROR("resource: mount '%s': bad magic (not a .phxp bundle)", path);
+        plat->close(f); return Status::IoError;
+    }
+    if (h->version > kBundleVersion) {                               // newer major
+        PHX_LOG_ERROR("resource: mount '%s': bundle version %u, this runtime reads <= %u (re-bake)",
+                      path, h->version, kBundleVersion);
+        plat->close(f); return Status::Unsupported;
+    }
+    if (h->total_size > size) {                                      // truncated file
+        PHX_LOG_ERROR("resource: mount '%s': truncated (header says %u bytes, file has %u)",
+                      path, h->total_size, uint32_t(size));
+        plat->close(f); return Status::IoError;
+    }
     // toc_offset arithmetic below can't overflow uint32: asset_count is bounded by total_size
     // (each TocEntry is >= 1 byte of blob), and total_size <= the mapped file size.
     const uint64_t toc_end = uint64_t(h->toc_offset) + uint64_t(h->asset_count) * sizeof(TocEntry);
     if (h->toc_offset < sizeof(BundleHeader) || toc_end > h->total_size) {
+        PHX_LOG_ERROR("resource: mount '%s': TOC out of bounds", path);
         plat->close(f); return Status::IoError;
     }
 
@@ -57,17 +79,23 @@ Status ResourceCache::mount(const phx_platform* plat, const char* path, bool ver
     for (uint32_t i = 0; i < h->asset_count; ++i) {
         const uint64_t blob_end = uint64_t(toc[i].offset) + toc[i].size;
         if (toc[i].offset < toc_end || blob_end > h->total_size || toc[i].usize < toc[i].size) {
-            plat->close(f); return Status::IoError;   // an asset points outside the bundle
+            PHX_LOG_ERROR("resource: mount '%s': asset %u points outside the bundle", path, i);
+            plat->close(f); return Status::IoError;
         }
     }
 
     if (verify_checksum && h->blob_crc32 != 0) {
         const uint32_t got = crc32_of(base + h->toc_offset, h->total_size - h->toc_offset);
-        if (got != h->blob_crc32) { plat->close(f); return Status::Corrupt; }
+        if (got != h->blob_crc32) {
+            PHX_LOG_ERROR("resource: mount '%s': CRC mismatch (corrupt/hand-edited bundle)", path);
+            plat->close(f); return Status::Corrupt;
+        }
     }
 
-    if (kExpectedTarget != 0xFF && h->target != kExpectedTarget) {
-        plat->close(f); return Status::Unsupported;   // baked for a different console target
+    if (kExpectedTarget != 0xFF && h->target != kExpectedTarget) {   // baked for a different console
+        PHX_LOG_ERROR("resource: mount '%s': baked for target tier %u, this build ships tier %u "
+                      "(re-bake with --target %u)", path, h->target, kExpectedTarget, kExpectedTarget);
+        plat->close(f); return Status::Unsupported;
     }
 
     Mounted& m = mounts_[mount_count_++];
@@ -126,6 +154,8 @@ const uint8_t* ResourceCache::resolve(const TocEntry* e) {
 
 const TocEntry* ResourceCache::find(NameHash name, AssetType type) const {
     // search mounts in order; TOC within a mount is sorted by name_hash -> binary search.
+    uint16_t other_type = 0;   // a hash hit under a different asset type (kept for the miss log)
+    bool     saw_other  = false;
     for (uint32_t mi = 0; mi < mount_count_; ++mi) {
         const Mounted& m = mounts_[mi];
         uint32_t lo = 0, hi = m.count;
@@ -141,10 +171,20 @@ const TocEntry* ResourceCache::find(NameHash name, AssetType type) const {
                     if (m.toc[j].type == uint16_t(type)) return &m.toc[j];
                 for (uint32_t j = mid + 1; j < m.count && m.toc[j].name_hash == name; ++j)
                     if (m.toc[j].type == uint16_t(type)) return &m.toc[j];
-                break;
+                other_type = m.toc[mid].type;
+                saw_other  = true;
+                break;                              // try the next mount
             }
         }
     }
+    if (saw_other)
+        // The name exists but only as another type — almost always a call-site bug
+        // (texture("level") for a tilemap asset), so say so instead of a bare miss.
+        PHX_LOG_WARN("resource: asset 0x%08x exists but as type %u, not the requested %u",
+                     uint32_t(name), unsigned(other_type), unsigned(type));
+    else
+        PHX_LOG_DEBUG("resource: asset 0x%08x (type %u) not found in %u mounted bundle(s)",
+                      uint32_t(name), unsigned(type), mount_count_);
     return nullptr;
 }
 
@@ -176,11 +216,18 @@ Result<TilemapView> ResourceCache::tilemap(NameHash name) {
     v.tile_h  = mh->tile_h;
     v.tileset = mh->tileset;
     v.indices = reinterpret_cast<const uint16_t*>(p + sizeof(TilemapBlobHeader));
+    // Optional sections in a fixed order after the indices, each 4-aligned (bundle.h).
+    size_t end = sizeof(TilemapBlobHeader) +
+                 size_t(mh->width) * mh->height * mh->layers * sizeof(uint16_t);
     if (mh->flags & kTilemapHasParallax) {
-        // The Q16 table sits after the indices, 4-aligned from the blob start (bundle.h).
-        const size_t idx_end = sizeof(TilemapBlobHeader) +
-                               size_t(mh->width) * mh->height * mh->layers * sizeof(uint16_t);
-        v.parallax_q16 = reinterpret_cast<const int32_t*>(p + ((idx_end + 3) & ~size_t(3)));
+        const size_t par_off = (end + 3) & ~size_t(3);
+        v.parallax_q16 = reinterpret_cast<const int32_t*>(p + par_off);
+        end = par_off + size_t(mh->layers) * 2 * sizeof(int32_t);
+    }
+    if (mh->flags & kTilemapHasTileFlags) {
+        const size_t flg_off = (end + 3) & ~size_t(3);
+        v.tile_flag_count = *reinterpret_cast<const uint32_t*>(p + flg_off);
+        v.tile_flags = p + flg_off + sizeof(uint32_t);
     }
     return Result<TilemapView>::good(v);
 }

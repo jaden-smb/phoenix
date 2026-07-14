@@ -34,6 +34,11 @@ struct TilemapView {
     // Per-layer camera parallax factors: `layers` pairs of Q16.16 {fx, fy}, or nullptr when
     // the map has none (every layer moves with the world). Feed to set_tilemap_parallax.
     const int32_t*  parallax_q16 = nullptr;
+    // Per-tile collision flags (kTileFlag*, bundle.h), indexed by tile index; nullptr when
+    // the map was authored without tileset collision metadata (then the physics TileGrid's
+    // solid_from fallback applies). Feed to TileGrid.flags / flag_count.
+    const uint8_t*  tile_flags = nullptr;
+    uint32_t        tile_flag_count = 0;
 };
 
 struct BlobView {

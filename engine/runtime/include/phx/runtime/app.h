@@ -41,6 +41,9 @@ public:
     MemoryRoot&         mem()             { return *mem_; }
     const phx_platform* platform() const  { return plat_; }
     const InputState&   input()    const  { return input_; }
+    // The active control remap (identity by default). Mutable so a game's options scene can
+    // rebind buttons / tune the stick deadzone; takes effect on the next frame's update.
+    InputMap&           input_map()       { return input_.map; }
     ecs::World&         world()           { return *world_; }
     Renderer&           render()          { return *render_; }
     uint64_t            frame()    const  { return frame_; }

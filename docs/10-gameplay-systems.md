@@ -15,32 +15,46 @@ namespace phx {
 enum class Button : uint8_t {            // canonical order — same meaning everywhere
     Up, Down, Left, Right, A, B, X, Y, L, R, Start, Select, Count
 };
+struct InputMap {                         // remappable controls (POD, save-file friendly)
+    uint8_t physical[12];                 // logical Button <- physical bit (identity default)
+    uint8_t stick_to_dpad;                // left stick also drives Up/Down/Left/Right
+    int16_t stick_deadzone;               // RAW axis units -> integer-deterministic
+    void remap(Button logical, Button physical);
+    void reset();
+};
 struct InputState {
-    uint32_t held, pressed, released;     // bitmasks over Button
+    uint32_t held, pressed, released;     // bitmasks over LOGICAL Button (after `map`)
     vec2     lstick, rstick;              // [-1,1], zero on GBA
     vec2     pointer; bool pointer_down;  // mouse/touch; off on GBA
+    InputMap map;                         // the active remap (App::input_map() mutates it)
 
     bool down(Button b)     const { return held    & (1u<<int(b)); }
     bool just(Button b)     const { return pressed & (1u<<int(b)); }   // edge
     bool up(Button b)       const { return released& (1u<<int(b)); }
-    void poll(const phx_platform*);       // reads raw, computes edges vs last frame
+    void update(const phx_input_raw&);    // remap -> stick synthesis -> edges vs last frame
 };
 } // namespace phx
 ```
 
-Per-platform mapping table (lives in `input/src/maps.cpp`):
+Each platform backend fills `phx_input_raw` in the fixed canonical order:
 
-| `Button` | GBA key      | PSP        | PC keyboard | PC gamepad |
-|----------|--------------|------------|-------------|------------|
-| A        | A            | Cross      | Z / Space   | A          |
-| B        | B            | Circle     | X           | B          |
-| Start    | Start        | Start      | Enter       | Start      |
-| Up..Right| D-pad        | D-pad      | Arrows/WASD | D-pad/stick|
+| `Button` | GBA key      | PSP        | PC keyboard | PC gamepad (SDL) |
+|----------|--------------|------------|-------------|------------------|
+| A        | A            | Cross      | Z / Space   | A (south)        |
+| B        | B            | Circle     | X           | B (east)         |
+| Start    | Start        | Start      | Enter       | Start            |
+| Up..Right| D-pad        | D-pad      | Arrows/WASD | D-pad + stick    |
+
+The SDL backend supports **hot-plugged game controllers** (keyboard and pad are both always
+live, OR'd together; sticks land in `axis[0..3]`). Above the seam, **remapping is engine-side
+and platform-agnostic**: `InputState::update()` routes each physical bit through `InputMap`
+before edge detection, and synthesizes dpad bits from the left stick using an integer
+deadzone on the raw axis (tier-exact — no float in the path). A game's options scene rebinds
+via `App::input_map()` and can persist the POD `InputMap` through the platform save seam.
 
 Edge detection (`pressed`/`released`) is computed against last frame, so gameplay reads
-"jump pressed this frame" identically on every device. Bindings are data (remappable on
-PC); the default table is fixed for consoles. Input is sampled once per frame *before*
-the fixed-step sim loop, so all sub-steps see a consistent snapshot (determinism).
+"jump pressed this frame" identically on every device. Input is sampled once per frame
+*before* the fixed-step sim loop, so all sub-steps see a consistent snapshot (determinism).
 
 ---
 
@@ -153,6 +167,23 @@ Algorithm (per fixed step):
 3. **Broadphase AABB overlap** for entity-vs-entity (uniform grid binning, ceiling from
    caps) → emit `Hit`s for gameplay (enemy stomp, pickups). Overlap-only by default
    (triggers); resolution is opt-in.
+
+**What counts as solid — two modes on `TileGrid`.** Without metadata, solid iff
+`index >= solid_from` (index 0 = air; the "every non-empty tile on the gameplay layer"
+MVP rule). With a per-tile **collision flags table** (authored as Tiled tileset per-tile
+properties, baked into the Tilemap asset, served by `TilemapView.tile_flags`), each tile
+index maps to a `TileFlags` byte:
+
+- `kTileSolid` — blocks all movement;
+- `kTileOneWay` — a one-way platform: blocks only a body moving down whose bottom edge was
+  at/above the tile top before the step (jump up through it, land on it);
+- `kTileHazard` — non-blocking; physics only reports it (`PhysicsWorld::tile_flags_in(aabb)`
+  ORs the flags under a box — "is the player in spikes?").
+
+Decorative non-solid tiles can therefore share the gameplay layer with walls, platforms,
+and hazards. Out-of-range tiles read as solid in both modes (the map is a closed box), and
+both games feed `tv.tile_flags` straight into their `TileGrid`, so authored metadata takes
+effect with no game code.
 
 ```
  swept X then Y (separable):

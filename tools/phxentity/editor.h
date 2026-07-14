@@ -24,13 +24,47 @@ public:
     std::vector<std::vector<int64_t>> records;   // records[r][f]
     bool dirty = false;
 
-    static bool load(const std::string& json_text, BinDoc& out) {
+    // The integer field types the GUI can edit (phxbin also bakes f32, but a cell cursor
+    // stepping by ±1/±10 has no sensible float story — author those in JSON directly).
+    static bool valid_type(const std::string& t) {
+        return t == "u8" || t == "i8" || t == "u16" || t == "i16" || t == "u32" || t == "i32";
+    }
+
+    // A fresh table from a schema (the `--new NAME --fields a:t,b:t` CLI path — bootstrap a
+    // record table without hand-writing JSON). Field syntax "name:type"; returns false and
+    // sets `err` on a bad spec.
+    static bool blank(const std::string& sname, const std::vector<std::string>& field_specs,
+                      BinDoc& out, std::string* err = nullptr) {
+        auto fail = [&](const std::string& why) { if (err) *err = why; return false; };
+        if (sname.empty()) return fail("struct name is empty");
+        if (field_specs.empty()) return fail("a table needs at least one field");
+        out.struct_name = sname;
+        out.fields.clear(); out.records.clear();
+        for (const std::string& fs : field_specs) {
+            const size_t c = fs.find(':');
+            if (c == std::string::npos || c == 0)
+                return fail("bad field spec '" + fs + "' (want name:type, e.g. hp:u16)");
+            Field f{ fs.substr(0, c), fs.substr(c + 1) };
+            if (!valid_type(f.type))
+                return fail("bad field type '" + f.type + "' in '" + fs +
+                            "' (want u8/i8/u16/i16/u32/i32)");
+            out.fields.push_back(std::move(f));
+        }
+        out.dirty = true;                        // a new table is unsaved by definition
+        return true;
+    }
+
+    static bool load(const std::string& json_text, BinDoc& out, std::string* err = nullptr) {
+        auto fail = [&](const std::string& why) { if (err) *err = why; return false; };
         JsonValue root;
-        if (!JsonParser::parse(json_text, root) || !root.is_obj()) return false;
+        std::string jerr;
+        if (!JsonParser::parse(json_text, root, &jerr)) return fail("invalid JSON: " + jerr);
+        if (!root.is_obj()) return fail("top level is not a JSON object");
         out.struct_name = root.str_at("struct");
         if (out.struct_name.empty()) out.struct_name = "Record";
         const JsonValue* fs = root.find("fields");
-        if (!fs || !fs->is_arr() || fs->arr.empty()) return false;
+        if (!fs || !fs->is_arr() || fs->arr.empty())
+            return fail("needs a non-empty \"fields\" array of {\"name\",\"type\"}");
         out.fields.clear();
         for (const JsonValue& f : fs->arr)
             out.fields.push_back(Field{ f.str_at("name"), f.str_at("type") });
@@ -72,6 +106,22 @@ public:
         if (rec >= records.size()) return;
         records.erase(records.begin() + long(rec));
         dirty = true;
+    }
+    // Schema edits: grow/shrink every record with the field list (values default to 0).
+    bool add_field(const std::string& name, const std::string& type) {
+        if (name.empty() || !valid_type(type)) return false;
+        for (const Field& f : fields) if (f.name == name) return false;   // duplicate
+        fields.push_back(Field{ name, type });
+        for (auto& r : records) r.push_back(0);
+        dirty = true;
+        return true;
+    }
+    bool remove_field(size_t field) {
+        if (field >= fields.size() || fields.size() == 1) return false;   // keep >= 1 field
+        fields.erase(fields.begin() + long(field));
+        for (auto& r : records) r.erase(r.begin() + long(field));
+        dirty = true;
+        return true;
     }
 
     // ---- save: the exact dialect phxbin's build_bin parses back ----

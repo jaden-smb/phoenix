@@ -1,18 +1,30 @@
 // tests/test_physics.cpp — AABB-vs-tilemap physics: gravity, ground stop, wall stop, head
-// bonk, free-fall (no collider), and the entity overlap pass. Pure ECS (no platform/render),
-// so it runs in the unit suite on both scalar tiers. Tolerances absorb fixed/float drift.
+// bonk, free-fall (no collider), the entity overlap pass, and the per-tile collision flags
+// mode (decorative / one-way / hazard tiles). Pure ECS (no platform/render), so it runs in
+// the unit suite on both scalar tiers. Tolerances absorb fixed/float drift.
 #include "phx_test.h"
 #include "phx/physics/physics.h"
 #include "phx/ecs/world.h"
+#include "phx/resource/bundle.h"   // kTileFlag* — must mirror physics' TileFlags (asserted below)
+
+#include <cstdlib>                 // std::abort (fixture pool bound check)
 
 using namespace phx;
 using namespace phx::ecs;
 
+// The physics TileFlags values must equal the baked bundle constants — physics stays
+// resource-free by design (no include), so this is the drift guard for the pair.
+static_assert(uint8_t(phx::kTileSolid)  == uint8_t(phx::kTileFlagSolid),  "TileFlags drifted from bundle");
+static_assert(uint8_t(phx::kTileOneWay) == uint8_t(phx::kTileFlagOneWay), "TileFlags drifted from bundle");
+static_assert(uint8_t(phx::kTileHazard) == uint8_t(phx::kTileFlagHazard), "TileFlags drifted from bundle");
+
 namespace {
 
 World* fresh_world(uint32_t cap = 256) {
-    static uint8_t* pool = new uint8_t[8 << 20];
+    constexpr size_t kPool = 16 << 20;
+    static uint8_t* pool = new uint8_t[kPool];
     static size_t   off  = 0;
+    if (off + (1 << 20) > kPool) std::abort();     // pool exhausted: grow kPool (tests/README)
     ArenaAllocator* a = new ArenaAllocator();
     a->init(pool + off, 1 << 20);
     off += (1 << 20);
@@ -31,6 +43,23 @@ const uint16_t kTiles[8 * 6] = {
 };
 TileGrid grid() {
     TileGrid g; g.tiles = kTiles; g.w = 8; g.h = 6; g.tile_w = 8; g.tile_h = 8; g.solid_from = 1;
+    return g;
+}
+
+// A flags-mode grid: tile index selects a TileFlags byte instead of the >= solid_from rule.
+//   0 = air, 1 = solid, 2 = one-way platform, 3 = hazard (non-solid), 4 = decorative (no flags).
+const uint16_t kFlagTiles[8 * 6] = {
+    0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,
+    0,0,2,2,2,2,0,0,      // one-way platform at ty=2 (top edge y=16)
+    0,0,0,0,0,0,0,0,
+    4,0,0,3,0,0,0,0,      // decorative at tx=0, hazard at tx=3 (ty=4)
+    1,1,1,1,1,1,1,1,      // solid floor ty=5
+};
+const uint8_t kFlagTable[5] = { 0, kTileSolid, kTileOneWay, kTileHazard, 0 };
+TileGrid flag_grid() {
+    TileGrid g; g.tiles = kFlagTiles; g.w = 8; g.h = 6; g.tile_w = 8; g.tile_h = 8;
+    g.flags = kFlagTable; g.flag_count = 5;
     return g;
 }
 
@@ -149,6 +178,82 @@ PHX_TEST(physics_overlap_pass_emits_hit) {
     w->add<Body>(c, {});
     n = phy.step(*w, kDt, Span<Hit>{ hits, 8 });
     CHECK_EQ(n, 1u);
+}
+
+PHX_TEST(physics_flags_decorative_tile_not_solid) {
+    // In flags mode a non-empty tile with no flags is scenery: the body falls straight
+    // through it to the real floor (under solid_from it would have been a wall).
+    World* w = fresh_world();
+    PhysicsWorld phy; phy.set_tilemap(flag_grid());
+    phy.set_gravity(vec2{ s_from_int(0), s_from_int(600) });
+
+    Entity e = w->spawn();
+    w->add<Transform>(e, { vec2{ s_from_int(4), s_from_int(8) } });   // above the decor tile (tx=0,ty=4)
+    w->add<Body>(e, {});
+    w->add<AABBColl>(e, { vec2{ s_from_int(4), s_from_int(4) } });
+
+    Hit hits[8];
+    for (int i = 0; i < 120; ++i) phy.step(*w, kDt, Span<Hit>{ hits, 8 });
+
+    Transform* t = w->get<Transform>(e);
+    CHECK(w->get<Body>(e)->on_ground);
+    CHECK_NEAR(s_to_double(t->pos.y), 36.0, 1.0);          // rests on the floor, not the decor
+}
+
+PHX_TEST(physics_oneway_platform_lands_from_above) {
+    World* w = fresh_world();
+    PhysicsWorld phy; phy.set_tilemap(flag_grid());
+    phy.set_gravity(vec2{ s_from_int(0), s_from_int(600) });
+
+    Entity e = w->spawn();
+    w->add<Transform>(e, { vec2{ s_from_int(32), s_from_int(4) } });  // above the platform (top y=16)
+    w->add<Body>(e, {});
+    w->add<AABBColl>(e, { vec2{ s_from_int(4), s_from_int(4) } });
+
+    Hit hits[8];
+    for (int i = 0; i < 120; ++i) phy.step(*w, kDt, Span<Hit>{ hits, 8 });
+
+    Transform* t = w->get<Transform>(e);
+    CHECK(w->get<Body>(e)->on_ground);
+    CHECK_NEAR(s_to_double(t->pos.y), 12.0, 1.0);          // bottom edge resting at y=16
+}
+
+PHX_TEST(physics_oneway_platform_passes_from_below) {
+    World* w = fresh_world();
+    PhysicsWorld phy; phy.set_tilemap(flag_grid());
+    phy.set_gravity(vec2{ s_from_int(0), s_from_int(0) });   // no gravity: isolate the ascent
+
+    Entity e = w->spawn();
+    w->add<Transform>(e, { vec2{ s_from_int(32), s_from_int(36) } });  // on the floor, under the platform
+    w->add<Body>(e, { vec2{ s_from_int(0), s_from_int(-200) } });      // jump straight up
+    w->add<AABBColl>(e, { vec2{ s_from_int(4), s_from_int(4) } });
+
+    Hit hits[8];
+    for (int i = 0; i < 120; ++i) phy.step(*w, kDt, Span<Hit>{ hits, 8 });
+
+    Transform* t = w->get<Transform>(e);
+    // Passed THROUGH the platform (no bonk at its underside y=24) up to the world ceiling.
+    CHECK_NEAR(s_to_double(t->pos.y), 4.0, 1.0);
+
+    // Now fall back down: the same platform catches the body from above.
+    phy.set_gravity(vec2{ s_from_int(0), s_from_int(600) });
+    for (int i = 0; i < 120; ++i) phy.step(*w, kDt, Span<Hit>{ hits, 8 });
+    CHECK(w->get<Body>(e)->on_ground);
+    CHECK_NEAR(s_to_double(t->pos.y), 12.0, 1.0);
+}
+
+PHX_TEST(physics_tile_flags_in_reports_hazard) {
+    PhysicsWorld phy; phy.set_tilemap(flag_grid());
+
+    // A box inside the hazard tile (tx=3, ty=4) reports it — and nothing else.
+    aabb over_hazard = aabb::from_center(vec2{ s_from_int(28), s_from_int(36) },
+                                         vec2{ s_from_int(2), s_from_int(2) });
+    CHECK_EQ(unsigned(phy.tile_flags_in(over_hazard)), unsigned(kTileHazard));
+
+    // A box in open air reports no flags.
+    aabb in_air = aabb::from_center(vec2{ s_from_int(12), s_from_int(28) },
+                                    vec2{ s_from_int(2), s_from_int(2) });
+    CHECK_EQ(unsigned(phy.tile_flags_in(in_air)), 0u);
 }
 
 PHX_TEST(physics_overlap_query) {

@@ -4,14 +4,22 @@
 // register's mitigation for editor maintenance). The document logic lives in editor.h and is
 // unit-tested headlessly; this file is only the interactive shell.
 //
-//   phxtmap [--out FILE.tmj] [--size WxH] [FILE.tmj]
+//   phxtmap [--out FILE.tmj] [--size WxH] [--types a,b,c] [FILE.tmj]
 //
 //   mouse LMB        paint the selected tile (drag paints) / pick from the palette strip
 //                    (entity mode: place a spawn of the selected type)
 //   hold X key (B)   + LMB: erase tiles / remove spawns
 //   C key (X)        cycle the selected tile GID          E key (R)  toggle tile/entity mode
 //   Q key (L)        cycle the spawn type                 Tab        cycle the edited layer
+//   Z key (A)        UNDO                                 X+Z        REDO
+//   V key (Y)        cycle the selected GID's collision   X+Tab      ADD a layer
+//                    (none -> solid -> oneway -> hazard)
 //   arrows/WASD      scroll the camera                    Enter      SAVE to --out
+//
+// Spawn types come from --types plus whatever the loaded map already uses — nothing is
+// hardcoded. Collision flags show as a coloured underline in the palette (white=solid,
+// yellow=oneway, red=hazard) and are saved as Tiled tileset per-tile properties, which the
+// bake turns into the engine's per-tile collision table.
 //
 // Tiles render as a procedural 16-swatch atlas (layout editing needs positions, not art;
 // the baked game shows the real tileset). Window close quits; unsaved edits show a '*'.
@@ -24,6 +32,7 @@
 #include "editor.h"       // TmapDoc (tools/phxtmap)
 #include "debug_font.h"   // tools/common
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -35,8 +44,8 @@ namespace {
 
 constexpr int kViewW = 320, kViewH = 240;      // logical framebuffer (window is 3x)
 constexpr int kPaletteN = 16;                  // GIDs 1..16 as procedural swatches
-const char*   kSpawnTypes[] = { "player", "coin", "enemy", "spike" };
-constexpr int kSpawnTypeN = 4;
+constexpr int kMaxEditLayers = 8;              // the tilemap is uploaded ONCE at this capacity
+                                               // (no unload API — re-uploading would leak slots)
 
 // Distinct, readable swatch colours for GIDs 1..16 (procedural tileset).
 Rgba swatch_colour(int gid) {
@@ -52,6 +61,7 @@ Rgba swatch_colour(int gid) {
 struct EditorGame final : Game {
     phxtool::TmapDoc doc;
     std::string      out_path = "level.tmj";
+    std::vector<std::string> spawn_types { "player", "coin", "enemy", "spike" };
 
     UI          ui;
     BitmapFont  font{};
@@ -69,9 +79,37 @@ struct EditorGame final : Game {
     static uint32_t g_font_px[phxtool::kDebugFontW * phxtool::kDebugFontH];
     static uint32_t g_tiles_px[kPaletteN * 8 * 8];
 
+    // Merge the loaded map's spawn vocabulary into the placeable list (no hardcoding).
+    void merge_doc_spawn_types() {
+        for (const std::string& t : doc.spawn_types()) {
+            bool seen = false;
+            for (const std::string& s : spawn_types) if (s == t) { seen = true; break; }
+            if (!seen) spawn_types.push_back(t);
+        }
+    }
+
+    // Copy every document layer into the fixed-capacity flat buffer (unused capacity stays
+    // empty). The soft backend keeps the pointer, so this makes any edit — paint, undo,
+    // add-layer — live without a re-upload.
     void reflatten() {
+        std::fill(flat.begin(), flat.end(), uint16_t(0));
         size_t o = 0;
-        for (const auto& L : doc.layers) { std::memcpy(flat.data() + o, L.data(), L.size() * 2); o += L.size(); }
+        int copied = 0;
+        for (const auto& L : doc.layers) {
+            if (copied++ >= kMaxEditLayers) break;   // beyond the view capacity (kept in the doc)
+            std::memcpy(flat.data() + o, L.data(), L.size() * 2);
+            o += L.size();
+        }
+    }
+
+    void upload_map(Renderer& r) {
+        flat.assign(size_t(doc.width) * doc.height * kMaxEditLayers, 0);
+        reflatten();
+        TilemapDesc md{};
+        md.indices = flat.data(); md.width = uint16_t(doc.width); md.height = uint16_t(doc.height);
+        md.layers = uint8_t(kMaxEditLayers);
+        md.tile_w = uint8_t(doc.tile_w); md.tile_h = uint8_t(doc.tile_h); md.tileset = tiles_tex;
+        map = r.upload_tilemap(md);                 // soft backend keeps the pointer: edits are live
     }
 
     void on_start(App& app) override {
@@ -95,13 +133,7 @@ struct EditorGame final : Game {
         TextureDesc td{}; td.pixels = g_tiles_px; td.width = kPaletteN * 8; td.height = 8;
         tiles_tex = r.load_texture(td);
 
-        flat.assign(size_t(doc.width) * doc.height * doc.layers.size(), 0);
-        reflatten();
-        TilemapDesc md{};
-        md.indices = flat.data(); md.width = uint16_t(doc.width); md.height = uint16_t(doc.height);
-        md.layers = uint8_t(doc.layers.size());
-        md.tile_w = uint8_t(doc.tile_w); md.tile_h = uint8_t(doc.tile_h); md.tileset = tiles_tex;
-        map = r.upload_tilemap(md);                 // soft backend keeps the pointer: edits are live
+        upload_map(r);
     }
 
     void on_fixed_update(App& app, scalar) override {
@@ -112,10 +144,34 @@ struct EditorGame final : Game {
         if (in.down(Button::Up))    cam_y -= 2;
         if (in.down(Button::Down))  cam_y += 2;
 
-        if (in.just(Button::Select)) layer = (layer + 1) % int(doc.layers.size());
+        const bool mod = in.down(Button::B);       // X key: erase / alternate action modifier
+        if (in.just(Button::Select)) {
+            if (mod) {                             // X+Tab: add a layer (and edit it)
+                if (int(doc.layers.size()) < kMaxEditLayers) {
+                    doc.push_undo();
+                    doc.add_layer("");
+                    layer = int(doc.layers.size()) - 1;
+                    reflatten();
+                } else {
+                    std::printf("phxtmap: layer cap (%d) reached\n", kMaxEditLayers);
+                }
+            } else {
+                layer = (layer + 1) % int(doc.layers.size());
+            }
+        }
         if (in.just(Button::X))      gid = gid % kPaletteN + 1;
         if (in.just(Button::R))      entity_mode = !entity_mode;
-        if (in.just(Button::L))      spawn_type = (spawn_type + 1) % kSpawnTypeN;
+        if (in.just(Button::L))      spawn_type = (spawn_type + 1) % int(spawn_types.size());
+        if (in.just(Button::A)) {                  // Z: undo, X+Z: redo
+            if (mod) { if (!doc.redo()) std::printf("phxtmap: nothing to redo\n"); }
+            else     { if (!doc.undo()) std::printf("phxtmap: nothing to undo\n"); }
+            reflatten();                           // undo may also add/remove a layer
+            if (layer >= int(doc.layers.size())) layer = int(doc.layers.size()) - 1;
+        }
+        if (in.just(Button::Y) && !entity_mode) {  // V: cycle the selected GID's collision
+            doc.push_undo();
+            doc.cycle_tile_flag(uint16_t(gid));
+        }
         if (in.just(Button::Start)) {
             if (doc.save_file(out_path)) std::printf("phxtmap: saved %s\n", out_path.c_str());
             else                         std::fprintf(stderr, "phxtmap: cannot write %s\n", out_path.c_str());
@@ -123,7 +179,7 @@ struct EditorGame final : Game {
 
         const int px = s_to_int(in.pointer.x), py = s_to_int(in.pointer.y);
         const bool press = in.pointer_down && !prev_down;
-        const bool erase = in.down(Button::B);
+        const bool erase = mod;
 
         if (in.pointer_down && px >= 0 && py >= 0) {
             if (py >= kViewH - 12) {                                  // palette strip
@@ -135,12 +191,16 @@ struct EditorGame final : Game {
                 const int wx = px + cam_x, wy = py + cam_y;
                 if (entity_mode) {
                     if (press) {
-                        if (erase) doc.remove_spawn_at(wx, wy);
-                        else       doc.add_spawn(kSpawnTypes[spawn_type], wx, wy);
+                        doc.push_undo();                              // one gesture, one undo step
+                        bool changed = true;
+                        if (erase) changed = doc.remove_spawn_at(wx, wy);
+                        else       doc.add_spawn(spawn_types[size_t(spawn_type)], wx, wy);
+                        if (!changed) doc.drop_undo();
                     }
                 } else if (wx >= 0 && wy >= 0) {                      // drag paints
                     const int tx = wx / doc.tile_w, ty = wy / doc.tile_h;
                     if (doc.in_bounds(tx, ty)) {
+                        if (press) doc.push_undo();                   // a stroke = one undo step
                         doc.set_tile(layer, tx, ty, erase ? uint16_t(0) : uint16_t(gid));
                         reflatten();                                  // live into the soft backend
                     }
@@ -155,7 +215,8 @@ struct EditorGame final : Game {
         Camera2D cam{};
         cam.pos = vec2{ s_from_int(cam_x), s_from_int(cam_y) };
         r.begin_frame(cam);
-        for (uint8_t l = 0; l < uint8_t(doc.layers.size()); ++l) r.draw_tilemap(map, l);
+        const uint8_t shown = uint8_t(std::min(int(doc.layers.size()), kMaxEditLayers));
+        for (uint8_t l = 0; l < shown; ++l) r.draw_tilemap(map, l);
 
         ui.begin(r, app.input());
 
@@ -180,14 +241,29 @@ struct EditorGame final : Game {
             if (t + 1 == gid && !entity_mode)                          // selection frame
                 ui.rect(UIRect{ vec2{ s_from_int(x - 1), s_from_int(kViewH - 11) },
                                 vec2{ s_from_int(10), s_from_int(1) } }, rgba(255, 255, 90), 202);
+            // collision underline: white=solid, yellow=oneway, red=hazard
+            const uint8_t f = doc.tile_flag(uint16_t(t + 1));
+            if (f) {
+                const Rgba fc = (f & phx::kTileFlagSolid)  ? rgba(240, 240, 240)
+                              : (f & phx::kTileFlagOneWay) ? rgba(240, 220, 60)
+                                                           : rgba(240, 70, 60);
+                ui.rect(UIRect{ vec2{ s_from_int(x), s_from_int(kViewH - 2) },
+                                vec2{ s_from_int(8), s_from_int(1) } }, fc, 202);
+            }
         }
         char status[64]; int n = 0;
         auto put = [&](const char* s) { while (*s && n < 62) status[n++] = *s++; };
         put(entity_mode ? "ENT " : "TILE ");
-        if (entity_mode) { put(kSpawnTypes[spawn_type]); }
-        else { put("L"); status[n++] = char('0' + layer); put(" G");
-               if (gid >= 10) status[n++] = char('0' + gid / 10);
-               status[n++] = char('0' + gid % 10); }
+        if (entity_mode) { put(spawn_types[size_t(spawn_type)].c_str()); }
+        else {
+            put("L"); status[n++] = char('0' + layer); put(" G");
+            if (gid >= 10) status[n++] = char('0' + gid / 10);
+            status[n++] = char('0' + gid % 10);
+            const uint8_t f = doc.tile_flag(uint16_t(gid));
+            if (f & phx::kTileFlagSolid)  put(" SOL");
+            if (f & phx::kTileFlagOneWay) put(" ONE");
+            if (f & phx::kTileFlagHazard) put(" HAZ");
+        }
         if (doc.dirty) put(" *");
         put("  ENTER-SAVE");
         status[n] = 0;
@@ -202,6 +278,19 @@ struct EditorGame final : Game {
 uint32_t EditorGame::g_font_px[phxtool::kDebugFontW * phxtool::kDebugFontH];
 uint32_t EditorGame::g_tiles_px[kPaletteN * 8 * 8];
 
+// "a,b,c" -> {"a","b","c"} (empty pieces dropped).
+std::vector<std::string> split_types(const std::string& csv) {
+    std::vector<std::string> out;
+    size_t p = 0;
+    while (p <= csv.size()) {
+        size_t c = csv.find(',', p);
+        if (c == std::string::npos) c = csv.size();
+        if (c > p) out.emplace_back(csv.substr(p, c - p));
+        p = c + 1;
+    }
+    return out;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -212,8 +301,13 @@ int main(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--out" && i + 1 < argc)       game.out_path = argv[++i];
         else if (a == "--size" && i + 1 < argc) std::sscanf(argv[++i], "%dx%d", &bw, &bh);
-        else if (a == "--help") {
-            std::printf("usage: phxtmap [--out FILE.tmj] [--size WxH] [FILE.tmj]\n");
+        else if (a == "--types" && i + 1 < argc) {
+            auto ts = split_types(argv[++i]);
+            if (!ts.empty()) game.spawn_types = std::move(ts);
+        } else if (a == "--help") {
+            std::printf("usage: phxtmap [--out FILE.tmj] [--size WxH] [--types a,b,c] [FILE.tmj]\n"
+                        "  --types  the spawn types placeable in entity mode (default:\n"
+                        "           player,coin,enemy,spike, plus any the loaded map uses)\n");
             return 0;
         } else in_path = argv[i];
     }
@@ -224,13 +318,23 @@ int main(int argc, char** argv) {
             int c; while ((c = std::fgetc(f)) != EOF) text += char(c);
             std::fclose(f);
         }
-        if (text.empty() || !phxtool::TmapDoc::load(text, game.doc)) {
-            std::fprintf(stderr, "phxtmap: cannot load '%s'\n", in_path);
+        if (text.empty()) {
+            std::fprintf(stderr, "phxtmap: cannot read '%s'\n", in_path);
             return 1;
         }
+        std::string err;
+        if (!phxtool::TmapDoc::load(text, game.doc, &err)) {
+            std::fprintf(stderr, "phxtmap: cannot load '%s': %s\n", in_path, err.c_str());
+            return 1;
+        }
+        game.merge_doc_spawn_types();
+        if (int(game.doc.layers.size()) > kMaxEditLayers)
+            std::fprintf(stderr, "phxtmap: note: %zu layers, only the first %d are shown "
+                         "(all are kept and saved)\n", game.doc.layers.size(), kMaxEditLayers);
         if (game.out_path == "level.tmj") game.out_path = in_path;   // default: save in place
-        std::printf("phxtmap: loaded %s (%dx%d, %zu layers, %zu spawns)\n", in_path,
-                    game.doc.width, game.doc.height, game.doc.layers.size(), game.doc.spawns.size());
+        std::printf("phxtmap: loaded %s (%dx%d, %zu layers, %zu spawns%s)\n", in_path,
+                    game.doc.width, game.doc.height, game.doc.layers.size(), game.doc.spawns.size(),
+                    game.doc.has_tile_flags() ? ", collision flags" : "");
     } else {
         game.doc = phxtool::TmapDoc::blank(bw, bh, 8, 8, "tiles");
     }

@@ -93,37 +93,29 @@ bakes:
 - an optional per-layer Q16 parallax factor (imported from Tiled's `parallaxx`/`parallaxy`),
 - object layer → entity spawn list (positions + prefab refs for `phxentity`).
 
-There is **no separate collision layer or per-tile collision-shape/bitset field** — the
-convention (enforced by convention, not the file format) is that **the last tile layer IS
-the collision layer**: `engine/physics` treats any index `>= solid_from` in that last layer
-as solid (`docs/10-gameplay-systems.md`; `examples/platformer/src/systems.cpp` and
-`examples/emberwing/src/systems.cpp` both set `solid_from = 1`). A dedicated collision
-bitset/shape-id field, and `.tmx`/XML input, were the original design (below) — neither
-is built.
+**Collision comes from the map two ways.** The zero-setup convention is that **the last
+tile layer IS the collision layer**: `engine/physics` treats any index `>= solid_from` in
+that layer as solid (`docs/10-gameplay-systems.md`; both example games set
+`solid_from = 1`). On top of that, **per-tile collision metadata** is now baked when the
+tileset carries it: Tiled tileset per-tile boolean `properties` (`solid`, `oneway`,
+`hazard`) or per-tile `class` strings of the same names become an optional per-tile flags
+table in the Tilemap blob (`kTilemapHasTileFlags`, `phx/resource/bundle.h`), which
+`TilemapView.tile_flags` serves straight into the physics `TileGrid`. That lets decorative
+non-solid tiles, one-way platforms, and hazards share the gameplay layer — the thing the
+bare "last layer wins" convention couldn't express. Maps without metadata behave exactly
+as before. (`.tmx`/XML input remains unbuilt — export `.tmj` from Tiled.)
 
 ```
- Tiled .tmj                     .phxtmap
- ┌─────────────┐                ┌──────────────────────────────┐
- │ layer: bg    │               │ hdr: w,h,tilew,tileh,layers   │
- │ layer: main  │  phxtile ──►  │ layer[i]: u16 indices         │
- │ layer: coll  │ (as built:    │ (+ optional per-layer parallax│
- │ objects      │  last layer   │    factor table)              │
- │              │  = solid)     │ spawns: {prefab_hash, x,y}    │
- └─────────────┘                └──────────────────────────────┘
-```
-
-The design sketch below (a dedicated `collision: bitset/shapeids` blob field, independent
-of layer order) is not implemented — it would let a level keep a visible-but-non-solid
-top layer after the solid one, which the current "last layer wins" convention can't do:
-
-```
- Tiled .tmj/.tmx (design)       .phxtmap (design)
- ┌─────────────┐                ┌────────────────────────────┐
- │ layer: bg    │               │ hdr: w,h,tilew,tileh,layers │
- │ layer: main  │  phxtile ──►  │ layer[i]: u16 indices       │
- │ layer: coll  │               │ collision: bitset/shapeids  │
- │ objects      │               │ spawns: {prefab_hash, x,y}  │
- └─────────────┘                └────────────────────────────┘
+ Tiled .tmj                        .phxtmap
+ ┌────────────────┐                ┌──────────────────────────────┐
+ │ tileset        │                │ hdr: w,h,tilew,tileh,layers   │
+ │  ├ tile props  │               │ layer[i]: u16 indices         │
+ │ layer: bg      │  phxtile ──►  │ (+ optional per-layer parallax│
+ │ layer: main    │               │    factor table)              │
+ │ objects        │               │ (+ optional per-tile collision│
+ │                │               │    flags: solid/oneway/hazard)│
+ └────────────────┘                │ spawns: {type_hash, x,y,w,h}  │
+                                   └──────────────────────────────┘
 ```
 
 ## 5. `phxsnd` — audio bake
@@ -176,10 +168,14 @@ headlessly; see `tools/phxtmap/instructions.md` for usage and controls.
  └──────────────────────────────────────────────────────────┘
 ```
 
-Built today: multi-layer tile paint/erase (drag paints; parallax layer factors
-round-trip), a clickable tile palette, an **entity placement** mode dropping typed
-spawn objects, camera scroll, and save-with-dirty-flag. Planned on top: fill/rect/
-picker tools, collision-shape paint, and prefab refs into `phxentity`.
+Built today: multi-layer tile paint/erase (drag paints; parallax layer factors AND layer
+names round-trip), a clickable tile palette, **bounded undo/redo** (one step per gesture —
+a whole paint stroke undoes at once), **collision-flag authoring** (cycle a GID through
+solid/oneway/hazard; flags show as coloured palette underlines and save as Tiled tileset
+per-tile properties), **add-layer**, an **entity placement** mode dropping typed spawn
+objects (the placeable types come from `--types` plus whatever the loaded map uses — not
+hardcoded), camera scroll, save-with-dirty-flag, and positioned load-error messages
+(`line L, col C`). Planned on top: fill/rect/picker tools and prefab refs into `phxentity`.
 Saves Tiled-compatible `.tmj` → `phxtile` bakes it. Compatibility with Tiled means
 users aren't locked into our editor.
 
@@ -199,7 +195,10 @@ users aren't locked into our editor.
 
 - **Built today:** a keyboard-driven grid editor over the phxbin author JSON (typed
   record tables): cell cursor, ±1/±10 stepping **clamped to each field's declared
-  type**, record clone/delete, save — on the same engine shell as `phxtmap`, with the
+  type**, record clone/delete, save — plus **schema authoring**: `--new NAME --fields
+  a:type,b:type` starts a fresh table with no hand-written JSON, and the document model
+  supports add/remove-field (every record keeps its shape). Malformed input is refused
+  with a positioned `line L, col C` parse error. Same engine shell as `phxtmap`, with the
   document model (`tools/phxentity/editor.h`) unit-tested headlessly and its output
   proven to re-bake through the real `phxbin` builder. See
   `tools/phxentity/instructions.md`.

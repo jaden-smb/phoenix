@@ -109,7 +109,7 @@ auto map = ctx->res->tilemap("level1"_hash).unwrap();         // zero-copy view
 | Asset    | GBA blob (`--target 0`)             | PSP blob (`--target 1`)   | PC blob (`--target 2`) |
 |----------|-------------------------------------|---------------------------|------------------|
 | Texture  | **4bpp paletted 8×8 tiles + 16-colour BGR555 palettes** (`PAL4_TILES`, phx/core/pixel.h) — the PPU's native layout, ~8× less texel data; falls back to RGBA8 when the art isn't tier-0 expressible | **swizzled RGBA8** (`RGBA8_SWZ`, GU block order, sampled zero-copy with the swizzle bit; pure reorder → still bit-identical to the soft golden); linear RGBA8 when the size doesn't block-align | RGBA8 |
-| Tilemap  | `uint16` index layers + optional per-layer Q16 parallax table | same       | same             |
+| Tilemap  | `uint16` index layers + optional per-layer Q16 parallax table + optional per-tile collision-flags table (solid/oneway/hazard, from Tiled tileset properties) | same       | same             |
 | Sound SFX| mono 16-bit PCM **resampled to the 18157 Hz device rate at bake** | mono 16-bit PCM @ source rate | mono 16-bit PCM @ source rate |
 | Music    | (same PCM path as SFX today)         | same                      | same             |
 | Font     | a texture atlas — encodes like any texture | atlas               | atlas            |
@@ -184,8 +184,11 @@ are **reused from the previous bundle** (per-asset incremental), a fully unchang
 list skips the bake entirely ("up to date"), and `phxpack --upgrade old.phxp` re-bakes a
 bundle from its own lock's recorded source list after a tool/format upgrade. CI can flag
 a stale bundle by diffing the lock's `output crc32` against the file. An incremental
-rebake is **byte-identical** to a `--full` bake — asserted by `make phxpack` and the
-pipeline suite — so the lock is an optimization, never a semantic. Bumping either the
+rebake is **byte-identical** to a `--full` bake — asserted by the `make phxpack` gate
+(touch one input, rebake, `cmp` against a `--full` bake) — so the lock is an
+optimization, never a semantic. (The `pipeline_test` suite separately asserts that two
+independent *full* bakes of the same sources are byte-identical to each other; it does
+not exercise the lock/incremental-skip path.) Bumping either the
 tool version (`kPhxpackToolVersion`) or `kBundleVersion` invalidates every lock.
 
 ## 9. Why baked + mmap (justification)

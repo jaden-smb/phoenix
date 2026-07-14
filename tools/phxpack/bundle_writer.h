@@ -77,10 +77,14 @@ public:
     // with the world), e.g. from Tiled's parallaxx/parallaxy. The Q16 table is appended — and
     // the header flag set — only when some factor differs from 1, so bundles without parallax
     // stay byte-identical to the old format.
+    // `tile_flags`: optional per-tile collision flags (kTileFlag*, indexed by tile index),
+    // e.g. from Tiled tileset per-tile properties. Same rule: appended — 4-aligned, a uint32
+    // count then the bytes — and flagged only when some flag is non-zero.
     void add_tilemap(const std::string& name, const uint16_t* indices,
                      uint16_t w, uint16_t h, uint8_t layers,
                      uint8_t tile_w, uint8_t tile_h, const std::string& tileset,
-                     const std::vector<std::pair<double,double>>* parallax = nullptr) {
+                     const std::vector<std::pair<double,double>>* parallax = nullptr,
+                     const std::vector<uint8_t>* tile_flags = nullptr) {
         phx::TilemapBlobHeader mh{};
         mh.width = w; mh.height = h; mh.layers = layers;
         mh.tile_w = tile_w; mh.tile_h = tile_h;
@@ -88,11 +92,20 @@ public:
         bool want_par = false;
         if (parallax)
             for (auto& p : *parallax) if (p.first != 1.0 || p.second != 1.0) want_par = true;
-        if (want_par) mh.flags |= phx::kTilemapHasParallax;
+        bool want_flags = false;
+        if (tile_flags)
+            for (uint8_t f : *tile_flags) if (f) want_flags = true;
+        if (want_par)   mh.flags |= phx::kTilemapHasParallax;
+        if (want_flags) mh.flags |= phx::kTilemapHasTileFlags;
+
         const size_t n = size_t(w) * h * layers;
-        const size_t par_off = (sizeof(mh) + n * sizeof(uint16_t) + 3) & ~size_t(3);  // 4-align
-        std::vector<uint8_t> blob(want_par ? par_off + size_t(layers) * 2 * sizeof(int32_t)
-                                           : sizeof(mh) + n * sizeof(uint16_t));
+        size_t end = sizeof(mh) + n * sizeof(uint16_t);
+        const size_t par_off = (end + 3) & ~size_t(3);                        // 4-align
+        if (want_par) end = par_off + size_t(layers) * 2 * sizeof(int32_t);
+        const size_t flg_off = (end + 3) & ~size_t(3);                        // 4-align
+        if (want_flags) end = flg_off + sizeof(uint32_t) + tile_flags->size();
+
+        std::vector<uint8_t> blob(end, 0);
         std::memcpy(blob.data(), &mh, sizeof(mh));
         std::memcpy(blob.data() + sizeof(mh), indices, n * sizeof(uint16_t));
         if (want_par) {
@@ -102,6 +115,11 @@ public:
                 pq[l * 2 + 0] = int32_t(pr.first  * 65536.0 + (pr.first  < 0 ? -0.5 : 0.5));
                 pq[l * 2 + 1] = int32_t(pr.second * 65536.0 + (pr.second < 0 ? -0.5 : 0.5));
             }
+        }
+        if (want_flags) {
+            const uint32_t count = uint32_t(tile_flags->size());
+            std::memcpy(blob.data() + flg_off, &count, sizeof(count));
+            std::memcpy(blob.data() + flg_off + sizeof(count), tile_flags->data(), count);
         }
         push(name, phx::AssetType::Tilemap, std::move(blob));
     }

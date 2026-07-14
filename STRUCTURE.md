@@ -46,11 +46,13 @@ phoenix/
 │   │                              front end (renderer.cpp): sort/batch + camera zoom/shake +
 │   │                              per-layer parallax — Q16 tier-exact, inherited by every backend
 │   ├── ecs/                      Sparse-set World, components, systems
-│   ├── input/                    phx_input_raw -> semantic Button/edge/axis/pointer state
+│   ├── input/                    phx_input_raw -> semantic Button/edge/axis/pointer state,
+│   │                             remappable via InputMap (+ integer stick->dpad synthesis)
 │   ├── audio/                    Software mixer (mixer.h) + SPSC ring streaming (stream.h) + lock-free command queue (command_queue.h)
 │   ├── resource/                 .phxp bundle mount, mmap/zero-copy views (incl. per-layer parallax), LZSS codec
 │   ├── scene/                    Scene stack, transitions, persistent blackboard
-│   ├── physics/                  AABB + swept tile collision; overlap queries
+│   ├── physics/                  AABB + swept tile collision (per-tile flags: solid/one-way/
+│   │                             hazard, or the solid_from fallback); overlap queries
 │   ├── anim/                     Sprite-sheet frames + animation state machine
 │   └── ui/                       Immediate-mode menus/text/HUD + typewriter dialogue + profiler overlay
 │
@@ -60,7 +62,9 @@ phoenix/
 │   │                             builders.h = the ONE shared bake path (DEFLATE/PNG/JSON/Tiled/WAV importers);
 │   │                             bundle_writer.h does the per-target encode; bundle_reader.h merges.
 │   ├── phxsprite/                CONVERTER: PNG + .sprdef/json sidecar -> .phxspr (atlas + animation clips)
-│   ├── phxtile/                  CONVERTER: Tiled .tmj -> .phxtmap (layers + parallax + spawns; solid tiles = collision)
+│   ├── phxtile/                  CONVERTER: Tiled .tmj -> .phxtmap (layers + parallax + spawns +
+│   │                             per-tile collision flags from tileset properties; flag-less
+│   │                             maps: non-empty tiles on the gameplay layer = solid)
 │   ├── phxsnd/                   CONVERTER: WAV -> .phxsnd (mono16; tier 0 resamples to the GBA device
 │   │                             rate at bake time — ADPCM is future)
 │   ├── phxbin/                   CONVERTER: JSON -> .phxbin flat table (+ generated .gen.h accessor)

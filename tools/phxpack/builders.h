@@ -138,18 +138,21 @@ inline bool build_tmj(BundleWriter& w, const std::string& in, const std::string&
     std::vector<uint8_t> bytes;
     if (!read_file(in, bytes)) { std::fprintf(stderr, "phx: cannot read '%s'\n", in.c_str()); return false; }
     TiledMap tm;
-    if (!tiled_load(std::string(bytes.begin(), bytes.end()), tm)) {
-        std::fprintf(stderr, "phx: bad/unsupported Tiled map '%s'\n", in.c_str()); return false; }
+    std::string terr;
+    if (!tiled_load(std::string(bytes.begin(), bytes.end()), tm, &terr)) {
+        std::fprintf(stderr, "phx: bad Tiled map '%s': %s\n", in.c_str(), terr.c_str()); return false; }
     const std::string nm = name.empty() ? stem(in) : name;
     std::vector<uint16_t> flat;
     flat.reserve(tm.layers.size() * size_t(tm.width) * size_t(tm.height));
     for (const auto& L : tm.layers) flat.insert(flat.end(), L.begin(), L.end());
     w.add_tilemap(nm, flat.data(), uint16_t(tm.width), uint16_t(tm.height),
                   uint8_t(tm.layers.size()), uint8_t(tm.tile_w), uint8_t(tm.tile_h), tm.tileset,
-                  tm.has_parallax() ? &tm.layer_parallax : nullptr);
-    std::printf("  + tilemap %-12s %dx%d tiles x%u layers%s, tileset '%s'  (%s, Tiled)\n",
+                  tm.has_parallax() ? &tm.layer_parallax : nullptr,
+                  tm.has_tile_flags() ? &tm.tile_flags : nullptr);
+    std::printf("  + tilemap %-12s %dx%d tiles x%u layers%s%s, tileset '%s'  (%s, Tiled)\n",
                 nm.c_str(), tm.width, tm.height, unsigned(tm.layers.size()),
-                tm.has_parallax() ? " (parallax)" : "", tm.tileset.c_str(), in.c_str());
+                tm.has_parallax() ? " (parallax)" : "",
+                tm.has_tile_flags() ? " (tile collision flags)" : "", tm.tileset.c_str(), in.c_str());
     if (!tm.spawns.empty()) {
         std::vector<phx::SpawnDef> sd;
         for (const auto& s : tm.spawns)
@@ -208,13 +211,17 @@ inline bool load_sprdef(const std::string& path, SprDef& out) {
 // JSON sidecar (docs/08 §3): { "image", "tile" | ["fw","fh"], "animations": { name: {frames,fps,loop} } }.
 // `frames` is a list of frame indices; we bake it as a [first,count] run (contiguous), matching
 // the SpriteClipDef model. Non-contiguous frame lists are rejected (caught offline).
-inline bool load_sprjson(const std::string& path, SprDef& out) {
+inline bool load_sprjson(const std::string& path, SprDef& out, std::string* err = nullptr) {
+    auto fail = [&](const std::string& why) { if (err) *err = why; return false; };
     std::vector<uint8_t> bytes;
-    if (!read_file(path, bytes)) return false;
+    if (!read_file(path, bytes)) return fail("cannot read file");
     JsonValue root;
-    if (!JsonParser::parse(std::string(bytes.begin(), bytes.end()), root) || !root.is_obj()) return false;
+    std::string jerr;
+    if (!JsonParser::parse(std::string(bytes.begin(), bytes.end()), root, &jerr))
+        return fail("malformed JSON: " + jerr);
+    if (!root.is_obj()) return fail("top level is not a JSON object");
     out.sheet = root.str_at("image");
-    if (out.sheet.empty()) return false;
+    if (out.sheet.empty()) return fail("missing \"image\" (the sheet PNG path)");
     if (const JsonValue* t = root.find("tile")) { out.fw = out.fh = t->as_int(); }
     out.fw = root.int_at("frame_w", out.fw);
     out.fh = root.int_at("frame_h", out.fh);
@@ -223,10 +230,13 @@ inline bool load_sprjson(const std::string& path, SprDef& out) {
         for (const auto& kv : anims->members) {
             const JsonValue& a = kv.second;
             const JsonValue* frames = a.find("frames");
-            if (!frames || !frames->is_arr() || frames->arr.empty()) return false;
+            if (!frames || !frames->is_arr() || frames->arr.empty())
+                return fail("animation '" + kv.first + "' needs a non-empty \"frames\" array");
             int first = frames->arr.front().as_int();
             for (size_t k = 0; k < frames->arr.size(); ++k)        // require a contiguous run
-                if (frames->arr[k].as_int() != first + int(k)) return false;
+                if (frames->arr[k].as_int() != first + int(k))
+                    return fail("animation '" + kv.first + "': \"frames\" must be a contiguous run "
+                                "(e.g. [4,5,6]) — the baked clip model is [first,count]");
             phx::SpriteClipDef c{};
             c.name  = phx::fnv1a(kv.first.c_str());
             c.first = uint16_t(first);
@@ -238,15 +248,22 @@ inline bool load_sprjson(const std::string& path, SprDef& out) {
     }
     if (!out.sheet.empty() && out.sheet[0] != '/' && out.sheet.find('/') == std::string::npos)
         out.sheet = dir_of(path) + out.sheet;
-    return out.fw > 0 && out.fh > 0;
+    if (out.fw <= 0 || out.fh <= 0)
+        return fail("missing/invalid frame size (\"tile\" or \"frame_w\"/\"frame_h\" must be > 0)");
+    return true;
 }
 
 // Bakes the sheet texture + the Sprite metadata. The sprite asset is named `name` (default: the
 // def's stem); the texture is named after the sheet PNG's stem (so several sprites can share it).
 inline bool build_sprite(BundleWriter& w, const std::string& in, const std::string& name = "") {
     SprDef sd;
-    const bool ok = ends_with(in, ".json") ? load_sprjson(in, sd) : load_sprdef(in, sd);
-    if (!ok) { std::fprintf(stderr, "phx: bad sprite def '%s'\n", in.c_str()); return false; }
+    std::string serr;
+    const bool ok = ends_with(in, ".json") ? load_sprjson(in, sd, &serr) : load_sprdef(in, sd);
+    if (!ok) {
+        std::fprintf(stderr, "phx: bad sprite def '%s'%s%s\n", in.c_str(),
+                     serr.empty() ? "" : ": ", serr.c_str());
+        return false;
+    }
     std::vector<uint8_t> bytes;
     if (!read_file(sd.sheet, bytes)) { std::fprintf(stderr, "phx: sprite def '%s' cannot read sheet '%s'\n", in.c_str(), sd.sheet.c_str()); return false; }
     std::vector<uint32_t> px; uint16_t iw, ih;
@@ -296,8 +313,11 @@ inline bool build_bin(BundleWriter& w, const std::string& in, const std::string&
     std::vector<uint8_t> bytes;
     if (!read_file(in, bytes)) { std::fprintf(stderr, "phx: cannot read '%s'\n", in.c_str()); return false; }
     JsonValue root;
-    if (!JsonParser::parse(std::string(bytes.begin(), bytes.end()), root) || !root.is_obj()) {
-        std::fprintf(stderr, "phx: bad/malformed JSON '%s'\n", in.c_str()); return false; }
+    std::string jerr;
+    if (!JsonParser::parse(std::string(bytes.begin(), bytes.end()), root, &jerr)) {
+        std::fprintf(stderr, "phx: malformed JSON '%s': %s\n", in.c_str(), jerr.c_str()); return false; }
+    if (!root.is_obj()) {
+        std::fprintf(stderr, "phx: '%s': top level is not a JSON object\n", in.c_str()); return false; }
     const std::string sname = root.str_at("struct");
     const JsonValue* fields = root.find("fields");
     const JsonValue* recs   = root.find("records");

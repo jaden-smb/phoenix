@@ -34,9 +34,21 @@ enum BodyFlags : uint8_t {
 // the game's choice. `tile` is reserved for a future tile-hit channel.
 struct Hit { ecs::Entity a, b; bool tile = false; };
 
+// Per-tile collision flags. The values MIRROR the baked bundle constants (kTileFlag* in
+// phx/resource/bundle.h) — physics stays resource-free by design, so the pair is guarded by
+// a unit-test static_assert instead of an include. Feed TilemapView.tile_flags straight in.
+enum TileFlags : uint8_t {
+    kTileSolid  = 1u << 0,   // blocks all movement
+    kTileOneWay = 1u << 1,   // blocks only downward motion entering from above (platforms)
+    kTileHazard = 1u << 2,   // gameplay-defined (spikes/damage); physics only reports it
+};
+
 // --- Collision tile grid (caller-owned view) ------------------------------------------
-// Solid iff tile index >= solid_from (so index 0 is empty/air by convention). Out-of-range
-// tiles are solid, making the map a closed box.
+// Two collision modes: WITHOUT a flags table (flags == nullptr), solid iff tile index >=
+// solid_from (so index 0 is empty/air by convention). WITH one (e.g. authored as Tiled
+// tileset per-tile properties and served by TilemapView.tile_flags), each tile index maps
+// to its TileFlags byte — decorative tiles, one-way platforms, and hazards mix freely in
+// one layer. Out-of-range tiles are solid either way, making the map a closed box.
 struct TileGrid {
     const uint16_t* tiles  = nullptr;
     int             w      = 0;     // in tiles
@@ -44,11 +56,18 @@ struct TileGrid {
     int             tile_w = 8;
     int             tile_h = 8;
     uint16_t        solid_from = 1;
+    const uint8_t*  flags      = nullptr;   // per-tile-index TileFlags (or null: solid_from mode)
+    uint32_t        flag_count = 0;         // entries in `flags`; indices past it read as 0
 
-    bool solid(int tx, int ty) const {
-        if (!tiles || tx < 0 || ty < 0 || tx >= w || ty >= h) return true;
-        return tiles[ty * w + tx] >= solid_from;
+    // Flags of the tile at (tx, ty); out-of-range cells read as solid walls.
+    uint8_t flags_at(int tx, int ty) const {
+        if (!tiles || tx < 0 || ty < 0 || tx >= w || ty >= h) return uint8_t(kTileSolid);
+        const uint16_t idx = tiles[ty * w + tx];
+        if (flags) return idx < flag_count ? flags[idx] : uint8_t(0);
+        return idx >= solid_from ? uint8_t(kTileSolid) : uint8_t(0);
     }
+    bool solid(int tx, int ty)  const { return (flags_at(tx, ty) & kTileSolid) != 0; }
+    bool oneway(int tx, int ty) const { return (flags_at(tx, ty) & kTileOneWay) != 0; }
 };
 
 // --- The physics step ------------------------------------------------------------------
@@ -70,9 +89,13 @@ public:
     bool overlap(ecs::World& w, const aabb& box, uint16_t mask,
                  ecs::Entity ignore = ecs::kInvalid) const;
 
+    // OR of the TileFlags over every tile the box touches (kTileHazard checks: "is the
+    // player standing in spikes?"). Out-of-range tiles contribute kTileSolid.
+    uint8_t tile_flags_in(const aabb& box) const;
+
 private:
     void resolve_x(Transform&, Body&, const AABBColl&) const;
-    void resolve_y(Transform&, Body&, const AABBColl&) const;
+    void resolve_y(Transform&, Body&, const AABBColl&, scalar prev_bot) const;
 
     TileGrid grid_;
     vec2     gravity_{};

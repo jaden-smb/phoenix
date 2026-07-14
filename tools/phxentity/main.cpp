@@ -4,6 +4,7 @@
 // games use. The document logic lives in editor.h and is unit-tested headlessly.
 //
 //   phxentity [--out FILE.json] FILE.json
+//   phxentity --new NAME --fields a:type,b:type [--out FILE.json]     start a fresh table
 //
 //   arrows/WASD   move the cell cursor (record row / field column)
 //   Z (A)         +1 on the cell        X key (B)   -1 on the cell
@@ -22,6 +23,7 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 using namespace phx;
 
@@ -133,31 +135,67 @@ uint32_t EntityGame::g_font_px[phxtool::kDebugFontW * phxtool::kDebugFontH];
 
 } // namespace
 
+// "a:u8,b:u16" -> {"a:u8","b:u16"} (empty pieces dropped).
+static std::vector<std::string> split_fields(const std::string& csv) {
+    std::vector<std::string> out;
+    size_t p = 0;
+    while (p <= csv.size()) {
+        size_t c = csv.find(',', p);
+        if (c == std::string::npos) c = csv.size();
+        if (c > p) out.emplace_back(csv.substr(p, c - p));
+        p = c + 1;
+    }
+    return out;
+}
+
 int main(int argc, char** argv) {
     EntityGame game;
     const char* in_path = nullptr;
+    std::string new_struct, new_fields;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "--out" && i + 1 < argc) game.out_path = argv[++i];
+        if (a == "--out" && i + 1 < argc)         game.out_path = argv[++i];
+        else if (a == "--new" && i + 1 < argc)    new_struct = argv[++i];
+        else if (a == "--fields" && i + 1 < argc) new_fields = argv[++i];
         else if (a == "--help") {
-            std::printf("usage: phxentity [--out FILE.json] FILE.json\n");
+            std::printf("usage: phxentity [--out FILE.json] FILE.json\n"
+                        "       phxentity --new NAME --fields a:type,b:type [--out FILE.json]\n"
+                        "  --new     start a fresh record table named NAME (no input file needed)\n"
+                        "  --fields  its schema; types: u8/i8/u16/i16/u32/i32\n");
             return 0;
         } else in_path = argv[i];
     }
-    if (!in_path) { std::fprintf(stderr, "phxentity: need an input .json (see --help)\n"); return 1; }
 
-    std::string text;
-    if (FILE* f = std::fopen(in_path, "rb")) {
-        int c; while ((c = std::fgetc(f)) != EOF) text += char(c);
-        std::fclose(f);
+    if (!new_struct.empty()) {
+        std::string err;
+        if (!phxtool::BinDoc::blank(new_struct, split_fields(new_fields), game.doc, &err)) {
+            std::fprintf(stderr, "phxentity: bad --new schema: %s\n", err.c_str());
+            return 1;
+        }
+        game.doc.add_record(0);                    // one zeroed row so the cursor has a home
+        std::printf("phxentity: new table '%s' (%zu fields) -> %s\n",
+                    new_struct.c_str(), game.doc.fields.size(), game.out_path.c_str());
+    } else {
+        if (!in_path) { std::fprintf(stderr, "phxentity: need an input .json or --new (see --help)\n"); return 1; }
+
+        std::string text;
+        if (FILE* f = std::fopen(in_path, "rb")) {
+            int c; while ((c = std::fgetc(f)) != EOF) text += char(c);
+            std::fclose(f);
+        }
+        if (text.empty()) {
+            std::fprintf(stderr, "phxentity: cannot read '%s'\n", in_path);
+            return 1;
+        }
+        std::string err;
+        if (!phxtool::BinDoc::load(text, game.doc, &err)) {
+            std::fprintf(stderr, "phxentity: cannot load '%s': %s\n", in_path, err.c_str());
+            return 1;
+        }
+        if (game.out_path == "prefabs.json") game.out_path = in_path;   // default: save in place
+        std::printf("phxentity: loaded %s ('%s': %zu fields, %zu records)\n", in_path,
+                    game.doc.struct_name.c_str(), game.doc.fields.size(), game.doc.records.size());
     }
-    if (text.empty() || !phxtool::BinDoc::load(text, game.doc)) {
-        std::fprintf(stderr, "phxentity: cannot load '%s'\n", in_path);
-        return 1;
-    }
-    if (game.out_path == "prefabs.json") game.out_path = in_path;   // default: save in place
-    std::printf("phxentity: loaded %s ('%s': %zu fields, %zu records)\n", in_path,
-                game.doc.struct_name.c_str(), game.doc.fields.size(), game.doc.records.size());
 
     Config cfg = Config::from_defaults();
     cfg.title = "phxentity"; cfg.width = kViewW; cfg.height = kViewH;

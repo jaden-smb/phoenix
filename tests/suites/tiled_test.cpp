@@ -127,8 +127,54 @@ int main() {
         check((reinterpret_cast<uintptr_t>(pm.parallax_q16) & 3u) == 0, "Q16 table is 4-aligned");
     }
 
-    // The original (no-parallax) map must NOT grow a table — old-format blobs read back as-is.
+    // Collision metadata: Tiled tileset per-tile `class` strings AND boolean `properties`
+    // both map to the baked flags table. The map ALSO carries parallax so both optional
+    // sections coexist (fixed order: parallax, then flags, each 4-aligned).
+    {
+        const char* kColTmj =
+        "{ \"width\":3, \"height\":1, \"tilewidth\":8, \"tileheight\":8,"
+        "  \"tilesets\":[ { \"firstgid\":1, \"name\":\"tiles\", \"tiles\":["
+        "     { \"id\":0, \"class\":\"solid\" },"
+        "     { \"id\":1, \"properties\":[ { \"name\":\"oneway\", \"type\":\"bool\", \"value\":true } ] },"
+        "     { \"id\":2, \"properties\":[ { \"name\":\"hazard\", \"type\":\"bool\", \"value\":true },"
+        "                                  { \"name\":\"solid\",  \"type\":\"bool\", \"value\":false } ] } ] } ],"
+        "  \"layers\":[ { \"type\":\"tilelayer\", \"name\":\"ground\", \"width\":3, \"height\":1,"
+        "                \"parallaxx\":0.5, \"data\":[1,2,3] } ] }";
+        phxtool::TiledMap ctm;
+        std::string cerr;
+        check(phxtool::tiled_load(kColTmj, ctm, &cerr), "tiled_load (collision map)");
+        check(ctm.has_tile_flags(), "importer sees the tileset collision metadata");
+        check(ctm.tile_flags.size() == 4, "flags table sized to max GID + 1");
+        check(ctm.tile_flags.size() == 4 &&
+              ctm.tile_flags[1] == phx::kTileFlagSolid &&      // class:"solid"
+              ctm.tile_flags[2] == phx::kTileFlagOneWay &&     // property oneway:true
+              ctm.tile_flags[3] == phx::kTileFlagHazard,       // property hazard:true, solid:false
+              "class + bool properties -> the right flag bits");
+
+        const char* cbundle = "build/test_tiled_col.phxp";
+        phxtool::BundleWriter cw(/*tier*/2);
+        cw.add_tilemap("colmap", ctm.layers[0].data(), 3, 1, 1, 8, 8, "tiles",
+                       &ctm.layer_parallax, &ctm.tile_flags);
+        check(cw.write(cbundle), "bake collision tilemap");
+
+        ResourceCache* cc = ResourceCache::create(arena).unwrap();
+        check(cc->mount(plat, cbundle) == Status::Ok, "mount collision bundle");
+        auto cv = cc->tilemap("colmap"_hash);
+        check(cv.ok(), "tilemap('colmap') found");
+        TilemapView cm = cv.unwrap();
+        check(cm.parallax_q16 && cm.parallax_q16[0] == (1 << 15), "parallax coexists with flags");
+        check(cm.tile_flags != nullptr && cm.tile_flag_count == 4, "flags table present in the view");
+        check(cm.tile_flags && cm.tile_flags[0] == 0 &&
+              cm.tile_flags[1] == phx::kTileFlagSolid &&
+              cm.tile_flags[2] == phx::kTileFlagOneWay &&
+              cm.tile_flags[3] == phx::kTileFlagHazard,
+              "per-tile flags survive bake -> mount");
+    }
+
+    // The original (no-parallax, no-metadata) map must NOT grow tables — old-format blobs
+    // read back as-is.
     check(m.parallax_q16 == nullptr, "map without factors has no parallax table");
+    check(m.tile_flags == nullptr && m.tile_flag_count == 0, "map without metadata has no flags table");
 
     // Render the imported map and confirm the tiles reach the framebuffer.
     auto rr = Renderer::create(plat->gfx(), arena, caps());

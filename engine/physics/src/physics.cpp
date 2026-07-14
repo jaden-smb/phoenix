@@ -61,7 +61,8 @@ PHX_HOT_CODE void PhysicsWorld::resolve_x(Transform& t, Body& b, const AABBColl&
         }
 }
 
-PHX_HOT_CODE void PhysicsWorld::resolve_y(Transform& t, Body& b, const AABBColl& c) const {
+PHX_HOT_CODE void PhysicsWorld::resolve_y(Transform& t, Body& b, const AABBColl& c,
+                                          scalar prev_bot) const {
     if (!gt0(b.vel.y) && !lt0(b.vel.y)) return;
     const scalar left = t.pos.x - c.half.x, right = t.pos.x + c.half.x;
     const int tx0 = tile_of(left, grid_.tile_w) - 1;
@@ -71,9 +72,16 @@ PHX_HOT_CODE void PhysicsWorld::resolve_y(Transform& t, Body& b, const AABBColl&
 
     for (int ty = ty0; ty <= ty1; ++ty)
         for (int tx = tx0; tx <= tx1; ++tx) {
-            if (!grid_.solid(tx, ty)) continue;
+            const uint8_t f = grid_.flags_at(tx, ty);
+            const bool is_solid = (f & kTileSolid) != 0;
+            // A one-way platform blocks only a body moving DOWN whose bottom edge was at or
+            // above the platform's top before this step (so jumping up through it, or walking
+            // off a lower ledge into its tile, passes freely).
+            const bool is_oneway = (f & kTileOneWay) != 0;
+            if (!is_solid && !is_oneway) continue;
             const scalar tl = s_from_int(tx * grid_.tile_w), tr = s_from_int((tx + 1) * grid_.tile_w);
             const scalar tt = s_from_int(ty * grid_.tile_h), tb = s_from_int((ty + 1) * grid_.tile_h);
+            if (!is_solid && !(gt0(b.vel.y) && !gt0(prev_bot - tt))) continue;
             const scalar top = t.pos.y - c.half.y, bot = t.pos.y + c.half.y;
             if (!strict_overlap(left, top, right, bot, tl, tt, tr, tb)) continue;
             if (gt0(b.vel.y)) { t.pos.y = tt - c.half.y; b.on_ground = true; }  // landed
@@ -94,8 +102,9 @@ PHX_HOT_CODE uint32_t PhysicsWorld::step(ecs::World& w, scalar dt, Span<Hit> out
         if (c) resolve_x(t, b, *c);
 
         b.on_ground = false;
+        const scalar prev_bot = c ? t.pos.y + c->half.y : scalar{};   // for one-way platforms
         t.pos.y += b.vel.y * dt;
-        if (c) resolve_y(t, b, *c);
+        if (c) resolve_y(t, b, *c, prev_bot);
     });
 
     // 4: AABB-vs-AABB overlap pass (entity triggers). O(n²) over a bounded set — fine for
@@ -123,6 +132,17 @@ PHX_HOT_CODE uint32_t PhysicsWorld::step(ecs::World& w, scalar dt, Span<Hit> out
             ++hits;
         }
     return hits;
+}
+
+uint8_t PhysicsWorld::tile_flags_in(const aabb& box) const {
+    const int tx0 = tile_of(box.min.x, grid_.tile_w);
+    const int tx1 = tile_of(box.max.x, grid_.tile_w);
+    const int ty0 = tile_of(box.min.y, grid_.tile_h);
+    const int ty1 = tile_of(box.max.y, grid_.tile_h);
+    uint8_t f = 0;
+    for (int ty = ty0; ty <= ty1; ++ty)
+        for (int tx = tx0; tx <= tx1; ++tx) f |= grid_.flags_at(tx, ty);
+    return f;
 }
 
 bool PhysicsWorld::overlap(ecs::World& w, const aabb& box, uint16_t mask,

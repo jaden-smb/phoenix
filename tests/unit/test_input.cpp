@@ -1,4 +1,5 @@
-// tests/test_input.cpp — semantic input: held/pressed/released edges + axis normalization.
+// tests/test_input.cpp — semantic input: held/pressed/released edges, axis normalization,
+// button remapping, and integer stick→dpad synthesis.
 #include "phx_test.h"
 #include "phx/input/input.h"
 
@@ -54,4 +55,43 @@ PHX_TEST(input_axis_normalization) {
     in.update(r);
     CHECK_NEAR(s_to_double(in.lstick.x),  1.0, 0.001);
     CHECK_NEAR(s_to_double(in.lstick.y), -1.0, 0.001);
+}
+
+PHX_TEST(input_remap_swaps_buttons) {
+    InputState in;
+    in.map.remap(Button::A, Button::B);       // logical A fed by physical B
+    in.map.remap(Button::B, Button::A);       // and vice versa (swapped confirm/cancel)
+
+    in.update(raw_with(button_bit(Button::A)));   // PHYSICAL A pressed
+    CHECK(in.down(Button::B));                    // ...reads as logical B
+    CHECK(!in.down(Button::A));
+    CHECK(in.just(Button::B));                    // edges are computed on the LOGICAL mask
+
+    in.map.reset();                                // identity restores 1:1
+    in.update(raw_with(button_bit(Button::A)));
+    CHECK(in.down(Button::A));
+    CHECK(!in.down(Button::B));
+}
+
+PHX_TEST(input_stick_synthesizes_dpad) {
+    InputState in;
+    phx_input_raw r{};
+    r.axis[0] = 30000;                          // stick hard right
+    r.axis[1] = -30000;                         // and up
+    in.update(r);
+    CHECK(in.down(Button::Right));
+    CHECK(in.down(Button::Up));
+    CHECK(!in.down(Button::Left));
+    CHECK(in.just(Button::Right));              // synthesis feeds the same edge detection
+
+    r.axis[0] = 8000; r.axis[1] = -8000;        // inside the default deadzone (16384)
+    in.update(r);
+    CHECK(!in.down(Button::Right));
+    CHECK(in.up(Button::Right));                // release edge as the stick recenters
+
+    in.map.stick_to_dpad = 0;                   // synthesis can be disabled entirely
+    r.axis[0] = 30000;
+    in.update(r);
+    CHECK(!in.down(Button::Right));
+    CHECK_NEAR(s_to_double(in.lstick.x), 30000.0 / 32768.0, 0.001);   // raw stick still exposed
 }

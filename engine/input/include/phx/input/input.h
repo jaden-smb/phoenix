@@ -31,19 +31,46 @@ inline scalar axis_norm(int16_t a) {
 #endif
 }
 
+// Remappable controls (docs/10 §1): for each LOGICAL Button the game reads, the PHYSICAL
+// button (bit position in phx_input_raw::buttons, i.e. the platform's canonical layout)
+// that feeds it. Plain POD — identity by default (zero setup), save-file friendly (persist
+// it through the platform save seam to remember a player's layout), and applied centrally
+// in InputState::update() so every backend and both scalar tiers get remapping for free.
+// Stick→dpad synthesis works on the RAW axis units (int16), so it is integer-deterministic.
+struct InputMap {
+    uint8_t physical[uint32_t(Button::Count)] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    uint8_t stick_to_dpad  = 1;       // left stick also drives Up/Down/Left/Right (pads on PC/PSP)
+    uint8_t pad_[1]        = { 0 };
+    int16_t stick_deadzone = 16384;   // raw axis units the stick must exceed (~50%)
+
+    // Feed logical `l` from physical `p` (e.g. remap(Button::A, Button::B) to swap confirm).
+    void remap(Button l, Button p) { physical[uint32_t(l)] = uint8_t(p); }
+    void reset() { *this = InputMap{}; }
+};
+
 // Frame-stable input. update() is called once per frame, before the fixed-step sim,
 // so every sub-step sees a consistent snapshot (determinism).
 struct InputState {
-    uint32_t held     = 0;     // bitmask over Button
+    uint32_t held     = 0;     // bitmask over LOGICAL Button (after `map`)
     uint32_t pressed  = 0;     // edge: down this frame, up last frame
     uint32_t released = 0;     // edge: up this frame, down last frame
     vec2     lstick   {};
     vec2     rstick   {};
     vec2     pointer  {};
     bool     pointer_down = false;
+    InputMap map;              // the active remap (identity by default)
 
     void update(const phx_input_raw& raw) {
-        uint32_t now = raw.buttons;
+        uint32_t now = 0;
+        for (uint32_t b = 0; b < uint32_t(Button::Count); ++b)
+            if (raw.buttons & (1u << map.physical[b])) now |= 1u << b;
+        if (map.stick_to_dpad) {   // integer thresholds on the raw axis: tier-exact
+            const int16_t dz = map.stick_deadzone;
+            if (raw.axis[0] <= int16_t(-dz)) now |= button_bit(Button::Left);
+            if (raw.axis[0] >= dz)           now |= button_bit(Button::Right);
+            if (raw.axis[1] <= int16_t(-dz)) now |= button_bit(Button::Up);
+            if (raw.axis[1] >= dz)           now |= button_bit(Button::Down);
+        }
         pressed  = now & ~held;
         released = ~now & held;
         held     = now;

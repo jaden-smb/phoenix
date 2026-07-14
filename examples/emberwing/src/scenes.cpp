@@ -229,6 +229,7 @@ public:
         g.tiles = tv.indices + size_t(tv.layers - 1) * tv.width * tv.height;
         g.w = tv.width; g.h = tv.height;
         g.tile_w = tv.tile_w; g.tile_h = tv.tile_h; g.solid_from = 1;
+        g.flags = tv.tile_flags; g.flag_count = tv.tile_flag_count;   // authored per-tile collision
         c->physics->set_tilemap(g);
         c->physics->set_gravity(vec2{ s_from_int(0), kGravity });
         c->level_w = tv.width * tv.tile_w; c->level_h = tv.height * tv.tile_h;

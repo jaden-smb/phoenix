@@ -41,6 +41,7 @@ struct SdlState {
     uint64_t      freq = 1;                   // performance-counter frequency
     uint64_t      base = 0;                   // counter at init (clock origin)
     int           quit = 0;
+    SDL_GameController* pad = nullptr;        // first connected controller (hotplugged)
 };
 SdlState g;
 
@@ -92,6 +93,12 @@ int sdl_init(const phx_platform_desc* desc) {
                 title, w, h, w * kScale, h * kScale, desc->vsync);
 #endif
 
+    // Controllers are optional: a failure here (no evdev access, headless CI) must not take
+    // the window down, so init the subsystem separately and just log the outcome. Already-
+    // connected pads arrive as SDL_CONTROLLERDEVICEADDED events on the first pump.
+    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
+        std::fprintf(stderr, "[phx.sdl] no controller support: %s\n", SDL_GetError());
+
     g.freq = SDL_GetPerformanceFrequency();
     g.base = SDL_GetPerformanceCounter();
     g.quit = 0;
@@ -99,6 +106,7 @@ int sdl_init(const phx_platform_desc* desc) {
 }
 
 void sdl_shutdown(void) {
+    if (g.pad) { SDL_GameControllerClose(g.pad); g.pad = nullptr; }
 #if defined(PHX_HAVE_GL)
     if (g.glctx) SDL_GL_DeleteContext(g.glctx);
     g.glctx = nullptr;
@@ -126,6 +134,16 @@ int sdl_pump_events(void) {
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) g.quit = 1;
         else if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) g.quit = 1;
+        else if (e.type == SDL_CONTROLLERDEVICEADDED && !g.pad) {
+            g.pad = SDL_GameControllerOpen(e.cdevice.which);
+            if (g.pad) std::printf("[phx.sdl] controller: %s\n", SDL_GameControllerName(g.pad));
+        } else if (e.type == SDL_CONTROLLERDEVICEREMOVED && g.pad &&
+                   e.cdevice.which == SDL_JoystickInstanceID(
+                       SDL_GameControllerGetJoystick(g.pad))) {
+            SDL_GameControllerClose(g.pad);
+            g.pad = nullptr;                       // a still-connected pad re-adds on hotplug
+            std::printf("[phx.sdl] controller disconnected\n");
+        }
     }
     return g.quit ? 0 : 1;
 }
@@ -176,6 +194,31 @@ void sdl_poll_input(phx_input_raw* out) {
     set(B_R,     k[SDL_SCANCODE_E]);
     set(B_START, k[SDL_SCANCODE_RETURN]);
     set(B_SELECT,k[SDL_SCANCODE_RSHIFT] || k[SDL_SCANCODE_TAB]);
+
+    // Game controller: OR'd with the keyboard (both always live; no mode switch). Face
+    // buttons map by POSITION (SDL's A = south), matching the console layouts the canonical
+    // order mirrors; the left stick ALSO reaches the dpad via the input module's synthesis.
+    if (g.pad) {
+        SDL_GameController* p = g.pad;
+        auto pb = [&](SDL_GameControllerButton btn) { return SDL_GameControllerGetButton(p, btn) != 0; };
+        set(B_UP,     pb(SDL_CONTROLLER_BUTTON_DPAD_UP));
+        set(B_DOWN,   pb(SDL_CONTROLLER_BUTTON_DPAD_DOWN));
+        set(B_LEFT,   pb(SDL_CONTROLLER_BUTTON_DPAD_LEFT));
+        set(B_RIGHT,  pb(SDL_CONTROLLER_BUTTON_DPAD_RIGHT));
+        set(B_A,      pb(SDL_CONTROLLER_BUTTON_A));
+        set(B_B,      pb(SDL_CONTROLLER_BUTTON_B));
+        set(B_X,      pb(SDL_CONTROLLER_BUTTON_X));
+        set(B_Y,      pb(SDL_CONTROLLER_BUTTON_Y));
+        set(B_L,      pb(SDL_CONTROLLER_BUTTON_LEFTSHOULDER));
+        set(B_R,      pb(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER));
+        set(B_START,  pb(SDL_CONTROLLER_BUTTON_START));
+        set(B_SELECT, pb(SDL_CONTROLLER_BUTTON_BACK));
+        out->axis[0] = SDL_GameControllerGetAxis(p, SDL_CONTROLLER_AXIS_LEFTX);
+        out->axis[1] = SDL_GameControllerGetAxis(p, SDL_CONTROLLER_AXIS_LEFTY);
+        out->axis[2] = SDL_GameControllerGetAxis(p, SDL_CONTROLLER_AXIS_RIGHTX);
+        out->axis[3] = SDL_GameControllerGetAxis(p, SDL_CONTROLLER_AXIS_RIGHTY);
+        out->connected_pads = 1;
+    }
     out->buttons = b;
 
     int mx = 0, my = 0;
