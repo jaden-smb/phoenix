@@ -24,6 +24,7 @@ add_executable(phx_tests
   unit/test_input.cpp unit/test_physics.cpp unit/test_anim.cpp unit/test_scene.cpp
   unit/test_ui.cpp unit/test_audio.cpp unit/test_stream.cpp unit/test_lz.cpp
   unit/test_png.cpp unit/test_json.cpp unit/test_wav.cpp unit/test_cmdqueue.cpp
+  unit/test_version.cpp
 )
 target_include_directories(phx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${_phxpack_inc})
 target_link_libraries(phx_tests PRIVATE

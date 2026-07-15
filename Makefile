@@ -51,6 +51,11 @@ CXXFLAGS += $(EXTRA_CXXFLAGS)   # hook for wrapper targets (e.g. `sanitize` adds
 
 BUILD  := build
 
+# Engine version — single-sourced from the version header (see RELEASING.md). Parsed, never
+# hand-copied, so the Makefile, CMake, and the release workflow can't disagree with the code.
+PHX_VERSION_H := engine/core/include/phx/core/version.h
+PHX_VERSION   := $(shell sed -nE 's/^\#define PHX_VERSION_(MAJOR|MINOR|PATCH) +([0-9]+).*/\2/p' $(PHX_VERSION_H) | paste -sd. -)
+
 # Host objects are compiled into a per-(tier,release) directory so the float (pc) / fixed-point
 # (gba_sim) tiers, AND the debug/release configs, can never contaminate each other: without
 # this, `make test TIER=gba_sim` or `make test RELEASE=1` followed by a plain `make check`
@@ -83,7 +88,8 @@ TEST_SRC   := tests/unit/main.cpp \
               tests/unit/test_png.cpp \
               tests/unit/test_json.cpp \
               tests/unit/test_wav.cpp \
-              tests/unit/test_cmdqueue.cpp
+              tests/unit/test_cmdqueue.cpp \
+              tests/unit/test_version.cpp
 
 # The unit-test binary does not link the App/loop entry (no main collision).
 UNIT_ENGINE := engine/core/src/assert.cpp \
@@ -345,7 +351,7 @@ GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/
             $(patsubst tests/suites/render_test.cpp,tests/suites/gu_test.cpp,$(RENDER_SRC)))
 GU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(GU_SRC))
 
-.PHONY: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck
+.PHONY: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck version dist dist-win dist-gba dist-psp
 
 # Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstones + audio + resource + dep gate.
 check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu audio texcache png sprite tiled resource phxpack pipeline tools depcheck
@@ -1008,6 +1014,67 @@ tools: pipeline $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXPACK)
 	@./$(PHXBIN)    --out $(BUILD)/c_items.phxbin  --name items --header $(BUILD)/c_items.gen.h build/p_items.json
 	@./$(PHXPACK)   --out $(BUILD)/c_assets.phxp $(BUILD)/c_hero.phxspr $(BUILD)/c_level.phxtmap $(BUILD)/c_tone.phxsnd $(BUILD)/c_items.phxbin
 	@head -c4 $(BUILD)/c_assets.phxp | grep -q PHXP && echo "TOOLS PASS (4 converters -> merged bundle)" || (echo "TOOLS FAIL"; exit 1)
+
+# --- release packaging (`make dist*`) --------------------------------------------------------
+# Stages per-target release bundles under build/dist/ and archives them, named
+# phoenix-<version>-<what>[-<os>-<arch>]. These are exactly the files the tag-driven release
+# workflow (.github/workflows/release.yml) attaches to the GitHub release — build one locally
+# to see what a release ships. Archives are tar.gz for the host, zip elsewhere (Windows users
+# and emulator frontends expect zip); zipping uses python3's zipfile so no new tool dependency.
+DIST      := $(BUILD)/dist
+HOST_OS   := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+HOST_ARCH := $(shell uname -m)
+PHX_ZIP    = python3 -m zipfile -c
+
+version:
+	@echo $(PHX_VERSION)
+
+# Host tools SDK: the five asset-pipeline CLIs + license/readme. (The full dev SDK with headers
+# + static libs installs via CMake: cmake --install / cpack — see RELEASING.md.)
+dist: tools
+	@rm -rf $(DIST)/phoenix-$(PHX_VERSION)-tools-$(HOST_OS)-$(HOST_ARCH)
+	@mkdir -p $(DIST)/phoenix-$(PHX_VERSION)-tools-$(HOST_OS)-$(HOST_ARCH)/bin
+	@cp $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) \
+	  $(DIST)/phoenix-$(PHX_VERSION)-tools-$(HOST_OS)-$(HOST_ARCH)/bin/
+	@cp LICENSE README.md $(DIST)/phoenix-$(PHX_VERSION)-tools-$(HOST_OS)-$(HOST_ARCH)/
+	@tar -C $(DIST) -czf $(DIST)/phoenix-$(PHX_VERSION)-tools-$(HOST_OS)-$(HOST_ARCH).tar.gz \
+	  phoenix-$(PHX_VERSION)-tools-$(HOST_OS)-$(HOST_ARCH)
+	@echo "dist: $(DIST)/phoenix-$(PHX_VERSION)-tools-$(HOST_OS)-$(HOST_ARCH).tar.gz"
+
+# Windows tools (statically linked PE32+, no runtime DLLs). Depends on `make win`, which
+# cross-builds everything; only the tools ship — the desktop games need the SDL platform
+# backend, which the MinGW static build doesn't carry.
+dist-win: win
+	@rm -rf $(DIST)/phoenix-$(PHX_VERSION)-tools-windows-x86_64
+	@mkdir -p $(DIST)/phoenix-$(PHX_VERSION)-tools-windows-x86_64/bin
+	@cp $(BUILD)/win/phxpack.exe $(BUILD)/win/phxsprite.exe $(BUILD)/win/phxtile.exe \
+	  $(BUILD)/win/phxsnd.exe $(BUILD)/win/phxbin.exe \
+	  $(DIST)/phoenix-$(PHX_VERSION)-tools-windows-x86_64/bin/
+	@cp LICENSE README.md $(DIST)/phoenix-$(PHX_VERSION)-tools-windows-x86_64/
+	@cd $(DIST) && $(PHX_ZIP) phoenix-$(PHX_VERSION)-tools-windows-x86_64.zip \
+	  phoenix-$(PHX_VERSION)-tools-windows-x86_64
+	@echo "dist: $(DIST)/phoenix-$(PHX_VERSION)-tools-windows-x86_64.zip"
+
+# GBA: the two shipping PPU ROMs (the software-render variants are dev references, not releases).
+dist-gba: gba-platformer-ppu gba-emberwing-ppu
+	@rm -rf $(DIST)/phoenix-$(PHX_VERSION)-gba
+	@mkdir -p $(DIST)/phoenix-$(PHX_VERSION)-gba
+	@cp $(BUILD)/gba/phx-platformer-ppu.gba $(BUILD)/gba/phx-emberwing-ppu.gba \
+	  $(DIST)/phoenix-$(PHX_VERSION)-gba/
+	@cp LICENSE $(DIST)/phoenix-$(PHX_VERSION)-gba/
+	@cd $(DIST) && $(PHX_ZIP) phoenix-$(PHX_VERSION)-gba.zip phoenix-$(PHX_VERSION)-gba
+	@echo "dist: $(DIST)/phoenix-$(PHX_VERSION)-gba.zip"
+
+# PSP: EBOOT.PBP must keep its exact name, one folder per game (drop the folder into
+# ms0:/PSP/GAME/ or point PPSSPP at it).
+dist-psp: psp-platformer psp-emberwing
+	@rm -rf $(DIST)/phoenix-$(PHX_VERSION)-psp
+	@mkdir -p $(DIST)/phoenix-$(PHX_VERSION)-psp/platformer $(DIST)/phoenix-$(PHX_VERSION)-psp/emberwing
+	@cp $(BUILD)/psp/platformer/EBOOT.PBP $(DIST)/phoenix-$(PHX_VERSION)-psp/platformer/
+	@cp $(BUILD)/psp/emberwing/EBOOT.PBP  $(DIST)/phoenix-$(PHX_VERSION)-psp/emberwing/
+	@cp LICENSE $(DIST)/phoenix-$(PHX_VERSION)-psp/
+	@cd $(DIST) && $(PHX_ZIP) phoenix-$(PHX_VERSION)-psp.zip phoenix-$(PHX_VERSION)-psp
+	@echo "dist: $(DIST)/phoenix-$(PHX_VERSION)-psp.zip"
 
 build: $(BIN) $(SMOKE) $(RENDER) $(PPU) $(GU) $(PLAYABLE) $(PHYSICS) $(ANIM) $(SCENE) $(UI) $(PLATFORMER) $(PLATAPP) $(EMBERWING) $(EMBERWING_PPU) $(EWAPP) $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) $(RESOURCE) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PIPELINE)
 

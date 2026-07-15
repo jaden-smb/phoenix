@@ -153,6 +153,18 @@ across power cycles, which emulators can't prove — and a physical PSP). Post-1
 tracker music, particles, a job system, scripting, DS/Vita/Android — is in the
 [roadmap](docs/09-roadmap.md).
 
+## Releases & contributing
+
+Releases are tagged `vX.Y.Z` and ship prebuilt artifacts on the
+[releases page](https://github.com/jaden-smb/phoenix/releases): the asset-pipeline CLIs for
+Linux/Windows, a CMake SDK (`find_package(phoenix)`), and ready-to-run GBA ROMs + PSP EBOOTs.
+The same bundles build locally via `make dist` / `dist-win` / `dist-gba` / `dist-psp`. The
+version is single-sourced from [`phx/core/version.h`](engine/core/include/phx/core/version.h);
+history is in [CHANGELOG.md](CHANGELOG.md).
+
+Contributions welcome — [CONTRIBUTING.md](CONTRIBUTING.md) covers the build, the test gates,
+and the portability rules; [RELEASING.md](RELEASING.md) covers cutting a release.
+
 ## License
 
 [MIT](LICENSE).

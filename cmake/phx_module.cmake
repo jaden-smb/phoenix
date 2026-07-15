@@ -13,7 +13,12 @@ function(phx_add_module name)
   cmake_parse_arguments(M "" "" "SRC;DEPS;BACKENDS" ${ARGN})
 
   add_library(phx_${name} STATIC ${M_SRC})
-  target_include_directories(phx_${name} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  # BUILD_INTERFACE/INSTALL_INTERFACE split so the target is exportable: installed consumers
+  # (find_package(phoenix), see the root CMakeLists' install section) resolve headers from
+  # <prefix>/include instead of this source tree.
+  target_include_directories(phx_${name} PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
   target_compile_features(phx_${name} PUBLIC cxx_std_17)
   if(M_DEPS)
     target_link_libraries(phx_${name} PUBLIC ${M_DEPS})

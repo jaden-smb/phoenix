@@ -1,7 +1,22 @@
 # Phoenix Engine — root build. One tree -> four runtime binaries + host tools.
 # See docs/07-build-system.md for the full strategy.
 cmake_minimum_required(VERSION 3.20)
-project(PhoenixEngine LANGUAGES C CXX)
+
+# Version is single-sourced from the version header (see RELEASING.md) — parsed, never copied.
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/engine/core/include/phx/core/version.h _phx_version_h)
+foreach(_part MAJOR MINOR PATCH)
+  string(REGEX MATCH "#define PHX_VERSION_${_part} +([0-9]+)" _ "${_phx_version_h}")
+  set(_v "${CMAKE_MATCH_1}")   # if(MATCHES) below re-clobbers CMAKE_MATCH_1 — copy out first
+  if(NOT _v MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "could not parse PHX_VERSION_${_part} from phx/core/version.h")
+  endif()
+  set(PHX_VERSION_${_part} ${_v})
+endforeach()
+
+project(PhoenixEngine
+  VERSION ${PHX_VERSION_MAJOR}.${PHX_VERSION_MINOR}.${PHX_VERSION_PATCH}
+  LANGUAGES C CXX)
+message(STATUS "Phoenix version: ${PROJECT_VERSION}")
 
 # ---- target selection ------------------------------------------------------
 set(PHX_TARGET "linux" CACHE STRING "Target platform: linux | windows | gba | psp")
@@ -71,6 +86,54 @@ if(NOT CMAKE_CROSSCOMPILING)
   add_subdirectory(tools/phxbin)      # JSON            -> .phxbin (+ .gen.h)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+# ---- install / package (host SDK only) -------------------------------------
+# `cmake --install` lays down a host SDK: the 13 static module libs + public headers + the five
+# asset-pipeline CLIs + a find_package(phoenix) config; `cpack` wraps the same tree in a
+# versioned tar.gz. Console targets deliberately have no install flow — their shippable
+# artifacts are the ROM/EBOOT bundles from `make dist-gba` / `make dist-psp` (see RELEASING.md).
+if(NOT CMAKE_CROSSCOMPILING)
+  include(GNUInstallDirs)
+  include(CMakePackageConfigHelpers)
+  # GNUInstallDirs derives DOCDIR from PROJECT_NAME ("PhoenixEngine"); ship as plain "phoenix".
+  set(CMAKE_INSTALL_DOCDIR ${CMAKE_INSTALL_DATAROOTDIR}/doc/phoenix)
+
+  set(_phx_modules core memory platform render ecs input audio resource scene physics anim ui runtime)
+  foreach(_m ${_phx_modules})
+    install(TARGETS phx_${_m} EXPORT phoenix-targets
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(DIRECTORY engine/${_m}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+  endforeach()
+
+  install(TARGETS phxpack phxsprite phxtile phxsnd phxbin
+          RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+  # find_package(phoenix CONFIG) support: import the libs as phoenix::phx_<module>.
+  install(EXPORT phoenix-targets
+          FILE phoenix-targets.cmake
+          NAMESPACE phoenix::
+          DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/phoenix)
+  configure_package_config_file(cmake/phoenix-config.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/phoenix-config.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/phoenix)
+  # Pre-1.0: any MINOR bump may break API/asset formats, so compatibility is same-minor.
+  write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/phoenix-config-version.cmake
+    COMPATIBILITY SameMinorVersion)
+  install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/phoenix-config.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/phoenix-config-version.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/phoenix)
+  install(FILES LICENSE README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
+  set(CPACK_PACKAGE_NAME phoenix)
+  set(CPACK_PACKAGE_VENDOR "Phoenix Engine")
+  set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+  set(CPACK_GENERATOR TGZ)
+  string(TOLOWER ${CMAKE_SYSTEM_NAME} _phx_os)
+  set(CPACK_PACKAGE_FILE_NAME phoenix-${PROJECT_VERSION}-sdk-${_phx_os}-${CMAKE_SYSTEM_PROCESSOR})
+  include(CPack)
 endif()
 
 # ---- architectural law: acyclic module dependency graph (CI gate) ----------

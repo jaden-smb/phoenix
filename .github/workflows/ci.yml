@@ -65,6 +65,13 @@ jobs:
           wine build/win/phx_platformer.exe
           wine build/win/phx_emberwing.exe
           wine build/win/phx_emberwing_ppu.exe
+      - name: Package the Windows tools zip
+        run: make dist-win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-tools
+          path: build/dist/*.zip
+          retention-days: 14
 
   # GBA: cross-compile both shipping PPU ROMs (the platformer MVP slice + Emberwing, the
   # console proof-of-scale game) and enforce the budget on each (docs/09 MVP gate). The
@@ -81,6 +88,11 @@ jobs:
         run: make size-gate
       - name: Build Emberwing PPU ROM + enforce size gate
         run: make size-gate-emberwing
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gba-roms
+          path: build/gba/*.gba
+          retention-days: 14
 
   # PSP: cross-compile both example EBOOTs (MIPS Allegrex). The pspdev image provides the
   # toolchain + PRX packaging; we add a host compiler + python3 for the offline bake and the
@@ -103,3 +115,10 @@ jobs:
         run: make psp-platformer
       - name: Build PSP Emberwing EBOOT
         run: make psp-emberwing
+      - uses: actions/upload-artifact@v4
+        with:
+          name: psp-eboots
+          path: |
+            build/psp/platformer/EBOOT.PBP
+            build/psp/emberwing/EBOOT.PBP
+          retention-days: 14

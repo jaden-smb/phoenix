@@ -6,7 +6,9 @@
 #              so a build always succeeds and the test suite runs without a display; pass
 #              -DPHX_USE_SDL=ON for the real SDL2 window/input/audio backend.
 add_library(phx_platform STATIC)
-target_include_directories(phx_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(phx_platform PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
 target_link_libraries(phx_platform PUBLIC phx_core)
 
 option(PHX_USE_SDL "Desktop: link the SDL2 platform backend (window/input/audio device)" OFF)
