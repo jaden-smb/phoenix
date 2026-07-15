@@ -14,6 +14,8 @@ immediate-mode UI the games use. The document model (`editor.h: BinDoc`) is sepa
 this GUI shell and unit-tested headlessly (load → step/clamp → clone/delete → save →
 re-load). Values are stepped, never typed: each field **clamps to its declared type's range**
 (`u8 i8 u16 i16 u32 i32`), so an edit can never produce a value the baked struct cannot hold.
+String fields (`str8 str16 str32` — baked as NUL-terminated `char[N]`) display read-only;
+author the strings in the JSON.
 
 The table on screen: one row per record (row index on the left), one column per field
 (header row shows the field names; the selected column highlights), the struct name at the
@@ -32,7 +34,12 @@ make entity                                # -> build/phxentity
 ```
 
 `--new NAME --fields a:type,b:type` starts a **fresh table** from a schema — no input file or
-hand-written JSON needed (types: `u8 i8 u16 i16 u32 i32`; it opens with one zeroed record).
+hand-written JSON needed (types: `u8 i8 u16 i16 u32 i32 str8 str16 str32`; it opens with one
+zeroed record).
+
+**Prefab schemas:** give a table a string `type` (or `name`) column and it becomes the game's
+prefab vocabulary — `phxtmap --prefabs table.json` places those types as spawns, and the game
+matches `fnv1a(record.type)` against the baked spawn-type hash. One author file, both editors.
 An existing input must have the phxbin shape (`struct` + `fields` + `records`); a malformed
 file is refused with a `line L, col C` parse error. For reference, the shape is:
 

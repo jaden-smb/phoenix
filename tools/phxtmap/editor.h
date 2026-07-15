@@ -10,9 +10,11 @@
 
 #include "tiled.h"   // tools/phxpack — the one Tiled importer (+ kTileFlag* via bundle.h)
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace phxtool {
@@ -64,6 +66,49 @@ public:
         if (layer < 0 || layer >= int(layers.size()) || !in_bounds(x, y)) return;
         layers[size_t(layer)][size_t(y) * width + x] = gid;
         dirty = true;
+    }
+
+    // ---- area tools (the picker is just tile()) ----
+    // 4-connected flood fill of the contiguous same-GID region containing (x, y). Returns
+    // the number of cells changed — 0 when out of bounds or the region is already `gid`,
+    // so the GUI can drop the undo step for a no-op click.
+    int flood_fill(int layer, int x, int y, uint16_t gid) {
+        if (layer < 0 || layer >= int(layers.size()) || !in_bounds(x, y)) return 0;
+        std::vector<uint16_t>& L = layers[size_t(layer)];
+        const uint16_t from = L[size_t(y) * width + x];
+        if (from == gid) return 0;
+        int changed = 0;
+        std::vector<std::pair<int, int>> stack{ { x, y } };
+        while (!stack.empty()) {
+            const auto [cx, cy] = stack.back();
+            stack.pop_back();
+            if (!in_bounds(cx, cy)) continue;
+            uint16_t& cell = L[size_t(cy) * width + cx];
+            if (cell != from) continue;
+            cell = gid;
+            ++changed;
+            stack.push_back({ cx + 1, cy }); stack.push_back({ cx - 1, cy });
+            stack.push_back({ cx, cy + 1 }); stack.push_back({ cx, cy - 1 });
+        }
+        dirty = true;
+        return changed;
+    }
+    // Paint the axis-aligned rectangle spanning the two corner cells (either order; clamped
+    // to the map). Returns the number of cells whose value actually changed.
+    int fill_rect(int layer, int x0, int y0, int x1, int y1, uint16_t gid) {
+        if (layer < 0 || layer >= int(layers.size())) return 0;
+        if (x0 > x1) std::swap(x0, x1);
+        if (y0 > y1) std::swap(y0, y1);
+        x0 = std::max(x0, 0);          y0 = std::max(y0, 0);
+        x1 = std::min(x1, width - 1);  y1 = std::min(y1, height - 1);
+        int changed = 0;
+        for (int y = y0; y <= y1; ++y)
+            for (int x = x0; x <= x1; ++x) {
+                uint16_t& cell = layers[size_t(layer)][size_t(y) * width + x];
+                if (cell != gid) { cell = gid; ++changed; }
+            }
+        if (changed) dirty = true;
+        return changed;
     }
 
     void add_spawn(const std::string& type, int x, int y) {

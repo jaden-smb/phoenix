@@ -1,6 +1,6 @@
 # Phoenix project assessment
 
-*Repository-wide review — updated 13 Jul 2026.*
+*Repository-wide review — updated 15 Jul 2026.*
 
 Phoenix is a compact, from-scratch C++17 retro 2D engine whose real differentiator is one
 gameplay codebase spanning a 256 KB GBA, PSP, Windows and Linux. It is already a convincing
@@ -8,18 +8,22 @@ vertical-slice engine; it is not yet a polished, externally consumable 1.0 produ
 
 ## Current verified state
 
-`make check` passes (120,354 unit checks across 106 cases plus all Make integration gates);
+`make check` passes (120,383 unit checks across 113 cases plus all Make integration gates —
+the pipeline suite is at 135 checks and the platformer capstone at five scripted runs);
 `make determinism` passes with 11 suite outcomes and a byte-identical rendered frame across
-float and Q16 tiers (that run also caught and fixed a real GBA-tier `Mat3` bug — see below); a
-fresh Release CMake build passes 21/21 CTest tests; `make release` passes the whole check suite
-built with `PHX_BUILD_RELEASE=1`; `make sanitize` (ASan+UBSan) is clean. The working tree began
-clean at the original review and after every workstream below.
+float and Q16 tiers (an earlier run in this series also caught and fixed a real GBA-tier `Mat3`
+bug — see below); a fresh Release CMake build passes 21/21 CTest tests; `make release` passes the
+whole check suite built with `PHX_BUILD_RELEASE=1`; `make sanitize` (ASan+UBSan) is clean. All
+GBA ROMs (smoke, platformer, platformer-PPU, Emberwing soft+PPU) and PSP EBOOTs (smoke, GU,
+platformer, Emberwing) rebuild warning-free after this update, and the GBA size-gate passes
+(`make win` not re-run locally — MinGW is not installed on this machine; CI covers it). The
+working tree began clean at the original review and after every workstream below.
 
 | Metric | Value |
 |---|---|
 | Advertised platforms | 4 (GBA, PSP, Windows, Linux) |
 | Render paths | 4 (software, GL, PSP GU, GBA PPU) |
-| Registered unit cases | 106 |
+| Registered unit cases | 113 |
 | Practical release maturity | Pre-0.1 |
 
 ## Progress so far
@@ -43,6 +47,13 @@ clean at the original review and after every workstream below.
   paletted tiles + palettes, tier-1 GU-swizzled RGBA8; bundle format v2), the
   lock-file/incremental/manifest/`--upgrade` pipeline in `phxpack`, and the GL 3.3/Vulkan
   ambition dropped from the docs as a decided non-goal. Details below.
+- [x] **Finish the 2D authoring loop** — done across two sessions. Per-tile collision
+  metadata (solid/one-way/hazard) in physics + bundle + `phxtmap` authoring; SDL gamepad +
+  engine-side `InputMap`; and now (this update) the four remaining gaps: **fill/rect/picker
+  paint tools** in `phxtmap`, **prefab schemas** shared between `phxentity` and `phxtmap`
+  (phxbin string fields + `--prefabs`), a **remap options UI with save persistence** in the
+  shipped platformer, and **hazard tiles wired into shipped gameplay** via
+  `tile_flags_in()`. Details below.
 - [ ] **Physical target sign-off** — in progress. See below.
 
 ## What it is
@@ -80,11 +91,11 @@ described as covered also need stronger scripted assertions. See `examples/ember
 | Core + memory | Strong | Fixed/Q16 math, arenas, bounded allocators, fixed-step loop; `PHX_BUILD_RELEASE` wired (asserts/logs strip on GBA/PSP/host Release); Mat3 identity bug on the fixed16 tier fixed | Physical-hardware sign-off; enforce failure behavior |
 | Architecture | Strong | 13-module acyclic graph; dependency law is a build gate | Add explicit platform conformance contract |
 | Rendering | Strong for 2D | Software golden + GL + PSP GU + GBA PPU | Screen-space path, transitions, modern PC batching only if needed |
-| Platform ports | Advanced | Linux/Windows/GBA/PSP paths exist and emulator/device seams were exercised | Physical GBA sign-off; PSP save/render smoke on real hardware; pin toolchains |
-| Gameplay systems | Functional/minimal | Input, mixer, scenes, tile physics, animation, UI; ECS deferred despawns now auto-flush every fixed step | Remapping/controllers, richer collision, an actual transition-render implementation (honestly documented as unbuilt for now) |
-| Resources | Strong | Packed typed assets, LZSS, zero-copy views; CRC32/bounds/tier validation + mount/unmount; **per-target texture encode implemented** (tier-0 4bpp paletted, tier-1 swizzled; format v2) | ADPCM/tracker audio codecs if ever needed |
-| Asset tools | Usable, reproducible | Five CLIs, direct/2-stage bake, Tiled `.tmj`/PNG/WAV/JSON; **lock-file incremental rebakes, manifest sidecar, `--upgrade`, byte-reproducibility asserted in CI suites** | Editor usability (P2 below) |
-| Editors | Prototype/MVP | Tile and table editors dogfood engine UI | Real tilesets, undo/redo, fill/rect/picker, prefab schemas, GUI tests |
+| Platform ports | Advanced | Linux/Windows/GBA/PSP paths exist and emulator/device seams were exercised; SDL now reads the first connected gamepad (hot-plug, OR'd with keyboard) | Physical GBA sign-off; PSP save/render smoke on real hardware; multi-pad support; pin toolchains |
+| Gameplay systems | Functional, growing | Input (engine-side `InputMap` remapping + stick-to-dpad, plus `raw_pressed` physical edges for rebind capture), mixer, scenes, tile physics, animation, UI; ECS deferred despawns auto-flush every fixed step; per-tile collision flags (solid/one-way/hazard, `solid_from` still supported); **the platformer consumes hazard tiles via `tile_flags_in()` and ships a working remap options scene persisted in its save** | An actual transition-render implementation (honestly documented as unbuilt) |
+| Resources | Strong | Packed typed assets, LZSS, zero-copy views; CRC32/bounds/tier validation + mount/unmount; per-target texture encode (tier-0 4bpp paletted, tier-1 swizzled; format v2); **tilemap blob now carries an optional per-tile-index collision-flags section**, byte-identical to before when unused | ADPCM/tracker audio codecs if ever needed |
+| Asset tools | Usable, reproducible | Five CLIs, direct/2-stage bake, Tiled `.tmj`/PNG/WAV/JSON; lock-file incremental rebakes, manifest sidecar, `--upgrade`; Tiled collision-flag import; positioned JSON parse errors; `phxentity` schema API; **phxbin string fields (`str8/16/32` → NUL-terminated `char[N]` + `.gen.h` char arrays) enabling named prefab records** | Editor usability polish (below) |
+| Editors | MVP, growing | Tile and table editors dogfood engine UI; collision authoring, undo/redo, add-layer, `--types` harvesting, positioned load errors; **fill/rect/pick paint tools** (4-connected flood fill, drag-marquee rectangle, eyedropper — all honouring the erase modifier); **`--prefabs` reads the placeable spawn vocabulary from a shared `phxentity` record table** | GUI tests, >8-layer editing (currently render-capped, though it still saves correctly), text entry for string cells (author them in JSON for now) |
 | Games | Strong proof | Reference platformer plus Emberwing polished vertical slice; Emberwing now also proven on Windows/GBA/PSP CI | Content/polish if the goal is a shipped game, not only an engine proof |
 | Release product | Pre-0.1 | MIT license, broad build surface, and a release-mode gate (`make release`) | Versioning, install/package flow, artifacts, contributor docs, release tags |
 
@@ -132,16 +143,60 @@ for a different tier); and the GL 3.3/Vulkan ambition **dropped from the docs fo
 Docs/00, 02, 03, 06, 07, 08, 09, graphics-engine and the diagrams now describe the
 implemented behavior with no "designed, not built" texture/pipeline caveats left.
 
+**Resolved — explicit per-tile collision metadata is real AND consumed by a shipped game.**
+`TileGrid` supports two collision modes: the original `solid_from` index threshold (used
+when no flags table is baked — fully back-compatible, byte-identical bundles for maps without
+metadata), and an optional per-tile-index `TileFlags` byte (`kTileSolid`, `kTileOneWay`,
+`kTileHazard`) imported from Tiled tileset `class`/`type`/boolean properties. One-way platforms
+and hazard queries are proven through the *real* physics system in `tests/unit/test_physics.cpp`.
+This update closed the remaining gap: **the platformer's level now bakes tileset collision
+classes (ground solid, a lava tile hazard-not-solid) and its gameplay hurts the player through
+`PhysicsWorld::tile_flags_in()`** — no spawned entity; the level data itself is the hazard —
+proven by a scripted walk-into-the-lava-pit run (platformer suite run 3) plus a guard that the
+golden playthrough never touches it. The spike stays an *entity* hazard deliberately, so both
+authoring styles are exercised; Emberwing also keeps entity hazards by design (merged lava
+rects with instant-kill semantics and timed geysers don't map onto a boolean tile byte).
+**Caveat (unchanged):** once a map bakes any flag metadata, every solid tile must be
+explicitly flagged — an unflagged non-empty GID becomes non-solid.
+
+**Resolved — SDL gamepad input, an engine-side remap layer, and now a shipped options UI.**
+The SDL backend reads the first connected controller (hot-plug aware, OR'd with keyboard).
+`InputMap` on `App` remaps logical buttons and tunes the stick deadzone; `InputState` now also
+exposes `raw_pressed`/`raw_held` — the pre-remap physical edge mask a rebind screen's "press
+any button" capture needs (the remap shift is masked so even a corrupt saved map cannot be UB).
+The platformer ships a working **options scene** (pause → OPTIONS): rebind JUMP/PAUSE by
+pressing any button, cycle the stick deadzone, reset — and persists the `InputMap` in its
+SaveData (v2), restored at boot. Proven end-to-end by two scripted suite runs driving the real
+focus-ring UI: rebind JUMP to R, jump with R, save, "power cycle", assert the layout came back.
+The exercise also caught a real immediate-mode UI trap now documented in docs/10: an options
+overlay must not `render_below` over a menu with focus buttons, or the menu underneath eats
+the same confirm press. **Caveat:** first-pad-only (no multiplayer), no rumble, GBA/PSP
+backends untouched (their fixed layouts still flow through the same remap layer).
+
+**Resolved — `phxtmap` has the full paint toolset and a shared prefab schema.** The
+fill/rect/pick tools landed in the headlessly-tested document model (4-connected flood fill
+and marquee-rectangle fill both report changed-cell counts so no-op gestures drop their undo
+step; the eyedropper hops back to the brush) with GUI wiring (X+C cycles the tool, marquee
+preview, status-line tool name) — the docs' "Planned" label is gone. **Prefab schemas** are
+real via phxbin string fields: one record table with a `type` column is simultaneously
+`phxentity`'s editable stats table, `phxtmap --prefabs`'s placeable-entity vocabulary
+(`BinDoc::name_column()`), and a baked blob whose `char[N]` name the game hashes to match
+spawn types — a third party adds an entity kind by adding one JSON record. **Still missing:**
+GUI tests; >8-layer maps save correctly but only the first 8 render in the editor; string
+cells display but aren't editable in the GUI (author them in JSON); prefab *component
+introspection* (`PHX_REFLECT`) remains future work.
+
 **Still open — memory discipline is strong but overstated.** The hot path is bounded and
 arena-oriented, but the platform descriptor's root arena is passed as null and backends
 allocate framebuffers/files separately. Desktop "map" is a loaded heap buffer, not an OS
 memory map.
 
 **Still open — several public seams remain placeholders.** Font is an asset enum without a
-typed resource path; `connected_pads` is unused; SDL has no controller path; UI has no pointer
-widgets; physics remains intentionally platformer-minimal. Scene transitions are still recorded
-but not rendered — that gap is now honestly documented rather than silently overstated, but
-building the actual fade/slide render step is still open work.
+typed resource path; UI has no pointer widgets; physics remains intentionally
+platformer-minimal (no ladders, slopes, or shape IDs — flags are boolean-per-tile-index only).
+Scene transitions are still recorded but not rendered — that gap is now honestly documented
+rather than silently overstated, but building the actual fade/slide render step is still open
+work.
 
 **In progress — physical target sign-off.** Real PSP hardware bring-up has already happened in
 earlier sessions (see STATUS.md #41–43): a real user on real PSP hardware found and fixed three
@@ -188,7 +243,7 @@ kept as an explicitly-labeled future-work note, not deleted).
 | Done | P1 | Resolve API footguns | Wired ECS deferred-command flushing into `App::run`; defined `Mat3::translate`/`scale` (fixed a GBA-tier identity bug found in the process); documented scene `Transition` as a recorded-only hint | Public APIs cannot silently require hidden lifecycle steps or fail at link time |
 | Open (in progress) | P1 | Physical target sign-off | Real GBA cart including SRAM power-cycle persistence; physical PSP input/audio/save/render smoke | 0.1 hardware evidence |
 | Done | P1 | Make the drift-corrected designs real | Per-target texture bake (tier-0 PAL4 tiles, tier-1 swizzle; format v2), lock-file incremental pipeline (+manifest/`--upgrade`), GL 3.3/Vulkan dropped from the docs as a decided non-goal | Docs and code in lockstep; equivalence + reproducibility asserted by `make ppu`/`gu`/`render`/`pipeline`/`phxpack` |
-| Open | P2 | Finish the 2D authoring loop | Editor usability, controller/remap support, collision metadata, better diagnostics | A third party can build a game without source-level workarounds |
+| Done | P2 | Finish the 2D authoring loop | Collision metadata + `phxtmap` authoring; SDL pad + `InputMap`; positioned JSON errors; fill/rect/picker tools; prefab schemas (phxbin str fields + `--prefabs`); remap options UI persisted in the save; hazard tiles consumed by shipped gameplay (`tile_flags_in()`) | A third party can build a game without source-level workarounds |
 | Open | P2 | Ship 0.1 properly | Version macros, changelog, install/export package, API reference, binary artifacts and tagged release | Consumable engine release |
 | Later | Later | Expand scope carefully | Particles/palette FX first; then 2.5D/affine, jobs, scripting, new platforms | Growth without weakening the GBA-first design |
 
@@ -200,10 +255,15 @@ hardening the existing small engine and making one third-party workflow excellen
 
 ## Best next feature after hardening
 
-Finish the 2D authoring loop: real tileset rendering, undo/redo and fill/rect/picker in
-`phxtmap`; prefab schemas shared with `phxentity`; controller/remapping support; explicit
-collision metadata. These directly improve the ability to make games without diluting the
-architecture.
+The 2D authoring loop is closed: a third party can lay out a level with real paint tools and
+per-tile collision in `phxtmap` (or Tiled), define entity kinds and stats in one shared prefab
+table `phxentity` edits and `phxtmap` places from, bake it all with the reproducible pipeline,
+have the engine's physics honour the authored collision (including hazard tiles with no code),
+and ship a game whose players can rebind controls in-game and keep that layout across power
+cycles. The two workstreams that remain P1/P2 are **physical target sign-off** (GBA cart SRAM
+persistence; PSP save/render on real hardware; classify the `psp-fixup-imports` warning) and
+**shipping 0.1 properly** (version macros, changelog, install/export package, API reference,
+tagged release). Those, not more features, are the gate to a consumable release.
 
 ## Evidence index
 
@@ -234,6 +294,27 @@ architecture.
 
 **Physical hardware bring-up (real PSP, prior sessions):** `STATUS.md` entries #41–43 ·
 `engine/platform/src/psp/psp_platform.cpp` · `engine/memory/src/memory_root.cpp`
+
+**Collision metadata + controller/remap (prior update):**
+`engine/physics/include/phx/physics/physics.h` · `engine/physics/src/physics.cpp` ·
+`engine/resource/include/phx/resource/bundle.h` · `tools/phxpack/tiled.h` ·
+`tools/phxtmap/editor.h` · `tools/phxtmap/main.cpp` ·
+`engine/input/include/phx/input/input.h` · `engine/platform/src/sdl/sdl_platform.cpp` ·
+`engine/runtime/include/phx/runtime/app.h` · `tests/unit/test_physics.cpp` ·
+`tests/unit/test_input.cpp` · `tests/suites/tiled_test.cpp`
+
+**Authoring-loop completion (this update):**
+`tools/phxtmap/editor.h` (`flood_fill`/`fill_rect`) · `tools/phxtmap/main.cpp` (tool modes,
+marquee, `--prefabs`) · `tools/phxentity/editor.h` (string cells, `name_column()`) ·
+`tools/phxpack/builders.h` (`str8/16/32` bake + `.gen.h` char arrays) ·
+`engine/input/include/phx/input/input.h` (`raw_pressed`/`raw_held`, masked remap shift) ·
+`examples/platformer/src/systems.cpp` (`OptionsScene`, tile-hazard damage) ·
+`examples/platformer/src/bake.h` (tileset collision classes, lava tile) ·
+`examples/platformer/src/components.h` (SaveData v2 with `InputMap`) ·
+`tests/suites/pipeline_test.cpp` (area tools, prefab seam) ·
+`tests/suites/platformer_test.cpp` (runs 3–5: lava, remap, persistence) ·
+`tests/unit/test_input.cpp` · `docs/08-tooling.md` · `docs/10-gameplay-systems.md` ·
+`tools/phxtmap/instructions.md` · `tools/phxentity/instructions.md`
 
 ---
 

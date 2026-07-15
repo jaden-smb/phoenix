@@ -29,10 +29,14 @@ make tmap                                  # -> build/phxtmap
 ./build/phxtmap --out new.tmj --size 30x20 # start a blank 30x20 map
 ./build/phxtmap --out copy.tmj level.tmj   # edit one file, save to another
 ./build/phxtmap --types hero,door,gem …    # the spawn types placeable in entity mode
+./build/phxtmap --prefabs prefabs.json …   # …or read them from the shared prefab table
 ```
 
 Spawn types are **never hardcoded into your workflow**: the placeable list is `--types` (or
-the player/coin/enemy/spike defaults) **plus every type the loaded map already uses**.
+the player/coin/enemy/spike defaults) **plus every type the loaded map already uses** — or,
+with `--prefabs`, the string `type`/`name` column of a `phxentity` record table (the shared
+prefab schema: one JSON file defines the game's entity kinds and their stats, both editors
+read it, and the game matches spawns against `fnv1a(record.type)` from the baked table).
 
 `PHX_MAX_FRAMES=120 ./build/phxtmap …` runs a bounded smoke (boots, runs, exits) for scripts.
 
@@ -40,9 +44,10 @@ the player/coin/enemy/spike defaults) **plus every type the loaded map already u
 
 | Input | Action |
 |-------|--------|
-| **LMB** (click/drag) | paint the selected tile — or pick a tile from the palette strip |
-| **hold X + LMB** | erase tiles (entity mode: remove the spawn under the cursor) |
+| **LMB** (click/drag) | apply the active **tool** — or pick a tile from the palette strip |
+| **hold X + LMB** | erase tiles (works with every tool; entity mode: remove the spawn under the cursor) |
 | **C** | cycle the selected tile GID (1–16) |
+| **X + C** | cycle the **tool**: PAINT → FILL → RECT → PICK (shown in the status line) |
 | **Tab** | cycle the edited layer (parallax layers keep their factors) |
 | **X + Tab** | **add a layer** (becomes the edited layer) |
 | **Z** | **undo** (one step per gesture — a whole paint stroke undoes at once) |
@@ -55,10 +60,16 @@ the player/coin/enemy/spike defaults) **plus every type the loaded map already u
 | **Enter** | **save** to `--out` (a `*` in the status line = unsaved edits) |
 | window close | quit |
 
-The status line (bottom right) shows the mode, current layer/GID (plus its collision flag:
-`SOL`/`ONE`/`HAZ`) or spawn type, and the dirty flag. Spawn markers draw as small boxes with
-the type's initial. In the palette strip, a coloured underline marks each GID's collision:
-**white = solid, yellow = one-way platform, red = hazard**.
+The four tools: **PAINT** is the per-cell brush (drag paints; one undo step per stroke).
+**FILL** flood-fills the 4-connected region of same-GID cells under the click. **RECT**
+drags a yellow marquee; releasing fills it (either drag direction, clamped to the map).
+**PICK** eyedrops the clicked cell's GID from the edited layer and hops back to PAINT.
+Fill and rect with the erase modifier held paint GID 0.
+
+The status line (bottom right) shows the mode, active tool, current layer/GID (plus its
+collision flag: `SOL`/`ONE`/`HAZ`) or spawn type, and the dirty flag. Spawn markers draw as
+small boxes with the type's initial. In the palette strip, a coloured underline marks each
+GID's collision: **white = solid, yellow = one-way platform, red = hazard**.
 
 ## Conventions it preserves
 

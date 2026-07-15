@@ -44,6 +44,7 @@ struct EngineCtx {
     vec2     player_spawn{};                    // where the player (re)spawns on death
     uint16_t enemies_killed = 0;               // stomped enemies (HUD/score + tests)
     uint16_t player_deaths  = 0;               // respawns so far (tests)
+    uint16_t hazard_tile_hits = 0;             // damage taken from hazard-FLAGGED tiles (tests)
     bool     show_profiler  = false;           // Select toggles the frame profiler overlay
 
     // hero animation, loaded from the Sprite asset at startup (clips outlive the Animator)
@@ -103,15 +104,18 @@ struct Hazard {};
 
 // Persistent save blob (POD, fixed layout — written verbatim to the platform save store). The
 // magic+version let load() tell a real save from fresh storage (uninitialised SRAM / no file).
+// v2 added the control remap (InputMap is save-file-friendly POD by design, docs/10 §1), so a
+// player's layout survives a power cycle; a v1 save is simply not restored (fresh run).
 struct SaveData {
     uint32_t magic;     // kSaveMagic
     uint16_t version;   // kSaveVersion
     uint16_t score;
     uint16_t deaths;
     uint16_t pad;
+    InputMap map;       // v2: the player's control remap + stick deadzone
 };
 constexpr uint32_t kSaveMagic   = 0x53584850u;   // 'PHXS' (little-endian)
-constexpr uint16_t kSaveVersion = 1;
+constexpr uint16_t kSaveVersion = 2;
 
 // systems (systems.cpp)
 void player_system(EngineCtx*, scalar dt);
@@ -129,6 +133,7 @@ void camera_system(EngineCtx*, scalar dt);
 Scene* make_level_scene(EngineCtx*);
 Scene* make_title_scene(EngineCtx*);
 Scene* make_pause_scene(EngineCtx*);
+Scene* make_options_scene(EngineCtx*);   // remap/deadzone options (pushed from pause)
 
 // The engine's Game hook: owns the higher subsystems, mounts the bundle, and drives the
 // scene stack. Subsystems the App doesn't own (physics/scenes/UI live here, not in runtime).
@@ -160,6 +165,7 @@ struct PlatformerGame : Game {
     int      health() const;          // current player HP (-1 if no player)
     int      enemies_killed() const;  // patrollers stomped
     int      deaths() const;          // player respawns
+    int      hazard_tile_hits() const; // hits taken from hazard-flagged tiles (lava)
     bool     was_loaded() const;      // a saved game was restored at boot
 };
 

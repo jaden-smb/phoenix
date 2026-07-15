@@ -315,6 +315,40 @@ int main() {
         check(u.undo_depth() == depth - 1, "drop_undo discards the no-op gesture");
     }
 
+    // phxtmap editor: the area paint tools (fill/rect; the picker is tile() + GUI wiring).
+    // Flood fill is 4-connected and bounded by different GIDs; rect fill normalizes its
+    // corners and clamps to the map; both report how many cells actually changed so a no-op
+    // click can drop its undo step.
+    {
+        using phxtool::TmapDoc;
+        TmapDoc d = TmapDoc::blank(6, 4, 8, 8, "tiles");
+        // a vertical wall of GID 2 at x=3 splits the empty map into two regions
+        for (int y = 0; y < 4; ++y) d.set_tile(0, 3, y, 2);
+        check(d.flood_fill(0, 0, 0, 5) == 12, "flood fill floods the left region only (3x4)");
+        check(d.tile(0, 2, 3) == 5 && d.tile(0, 4, 0) == 0 && d.tile(0, 3, 1) == 2,
+              "fill stops at the wall; the far side is untouched");
+        check(d.flood_fill(0, 0, 0, 5) == 0, "re-filling with the same GID is a no-op (0 changed)");
+        check(d.flood_fill(0, -1, 0, 5) == 0 && d.flood_fill(9, 0, 0, 5) == 0,
+              "out-of-bounds / bad layer fill is refused");
+        check(d.flood_fill(0, 3, 1, 7) == 4, "filling the wall itself follows its 4 connected cells");
+
+        TmapDoc r = TmapDoc::blank(6, 4, 8, 8, "tiles");
+        check(r.fill_rect(0, 4, 2, 1, 1, 9) == 8, "rect fill normalizes swapped corners (4x2)");
+        check(r.tile(0, 1, 1) == 9 && r.tile(0, 4, 2) == 9 && r.tile(0, 0, 0) == 0,
+              "rect fill covers exactly the marquee");
+        check(r.fill_rect(0, 1, 1, 4, 2, 9) == 0, "repainting the same rect changes nothing");
+        check(r.fill_rect(0, -3, -3, 99, 0, 4) == 6, "rect fill clamps to the map (top row)");
+        check(r.fill_rect(2, 0, 0, 1, 1, 4) == 0, "rect fill on a missing layer is refused");
+        r.dirty = false;
+        check(r.fill_rect(0, 0, 0, 0, 0, 4) == 0 && !r.dirty,
+              "a no-change rect fill leaves the doc clean");
+
+        // the fill round-trips through the real importer like any other edit
+        TmapDoc rr;
+        check(TmapDoc::load(r.save_tmj(), rr) && rr.tile(0, 3, 0) == 4 && rr.tile(0, 2, 1) == 9,
+              "area-tool edits survive save -> import");
+    }
+
     // phxentity editor document model: load the items table, edit (clamped to the field's
     // declared type), clone + delete records, save — and prove the saved JSON still BAKES
     // through the real phxbin builder (editors emit author formats the converters accept).
@@ -378,6 +412,79 @@ int main() {
         check(!BinDoc::load("{ \"struct\":\"X\",\n  \"fields\":[{\"name\":\"a\" \"type\":\"u8\"}] }", m, &err) &&
               err.find("line 2") != std::string::npos,
               "parse errors carry line/col positions");
+    }
+
+    // The PREFAB SCHEMA seam (docs/08 §8): ONE phxbin record table with a string "type"
+    // column is (a) phxentity's editable stats table, (b) the vocabulary phxtmap places in
+    // entity mode (name_column), and (c) a baked blob whose char[N] name the game hashes to
+    // match spawn types. Prove all three from the same author JSON.
+    {
+        const char* kPrefabs =
+        "{ \"struct\":\"Prefab\","
+        "  \"fields\":[ {\"name\":\"type\",\"type\":\"str16\"},"
+        "               {\"name\":\"hp\",\"type\":\"u16\"}, {\"name\":\"speed\",\"type\":\"i16\"} ],"
+        "  \"records\":[ {\"type\":\"player\",\"hp\":3,\"speed\":70},"
+        "                {\"type\":\"enemy\",\"hp\":1,\"speed\":28},"
+        "                {\"type\":\"a-very-long-prefab-name\",\"hp\":9,\"speed\":0} ] }";
+        write_file("build/p_prefabs.json", kPrefabs, std::strlen(kPrefabs));
+
+        // (a) the entity editor loads/edits/saves it, strings preserved verbatim
+        using phxtool::BinDoc;
+        BinDoc d;
+        check(BinDoc::load(kPrefabs, d), "prefab table loads in the entity editor");
+        check(d.field_is_str(0) && !d.field_is_str(1), "str16 column recognized");
+        check(d.str_cell(0, 0) == "player" && d.records[0][1] == 3, "string + int cells coexist");
+        d.step(0, 0, +1);
+        check(d.str_cell(0, 0) == "player" && !d.dirty, "stepping a string cell is a no-op");
+        d.add_record(1);                                  // clone 'enemy'
+        d.set_str(3, 0, "boss");
+        d.step(3, 1, +9);
+        BinDoc r;
+        check(BinDoc::load(d.save_json(), r) && r.str_cell(3, 0) == "boss" && r.records[3][1] == 10,
+              "string cells survive the save round-trip");
+        check(BinDoc::blank("P", { "type:str16", "hp:u8" }, r), "str fields allowed in --new specs");
+        BinDoc esc; esc.struct_name = "E";
+        esc.fields = { BinDoc::Field{ "type", "str8" } };
+        esc.add_record(99); esc.set_str(0, 0, "a\"b\\c");
+        check(BinDoc::load(esc.save_json(), r) && r.str_cell(0, 0) == "a\"b\\c",
+              "quotes/backslashes in a name survive save -> load");
+
+        // (b) the tilemap editor's placeable vocabulary comes from the same table
+        auto names = d.name_column();
+        check(names.size() == 4 && names[0] == "player" && names[3] == "boss",
+              "name_column harvests the type column for phxtmap --prefabs");
+
+        // (c) phxbin bakes the string column as inline NUL-terminated char[N]
+        phxtool::BundleWriter wp(2);
+        check(phxtool::build_bin(wp, "build/p_prefabs.json", "prefabs", "build/p_prefabs.gen.h"),
+              "prefab table bakes through phxbin");
+        check(wp.write("build/p_prefabs.phxp"), "write prefab bundle");
+        ResourceCache* cp = ResourceCache::create(arena).unwrap();
+        check(cp->mount(plat, "build/p_prefabs.phxp") == Status::Ok, "mount prefab bundle");
+        auto pb = cp->blob("prefabs"_hash);
+        check(pb.ok(), "blob('prefabs') baked");
+        if (pb.ok()) {
+            const uint8_t* p = static_cast<const uint8_t*>(pb.unwrap().data);
+            uint32_t count = 0, stride = 0;
+            std::memcpy(&count, p + 0, 4); std::memcpy(&stride, p + 4, 4);
+            // Prefab natural C layout: char type[16] @0, u16 hp @16, i16 speed @18 -> stride 20.
+            check(count == 3 && stride == 20, "prefab count/stride (char[16] inline)");
+            const char* t0 = reinterpret_cast<const char*>(p + 8);
+            const char* t2 = reinterpret_cast<const char*>(p + 8 + 2 * stride);
+            check(std::strcmp(t0, "player") == 0, "record 0 name baked NUL-terminated");
+            check(phx::fnv1a(t0) == "player"_hash, "baked name hashes to the spawn-type hash");
+            check(std::strlen(t2) == 15 && std::memcmp(t2, "a-very-long-pre", 15) == 0,
+                  "overlong name truncates to N-1 chars + NUL");
+            uint16_t hp0 = 0; std::memcpy(&hp0, p + 8 + 16, 2);
+            check(hp0 == 3, "int field after the string column reads back");
+        }
+        bool gen_str = false;
+        if (FILE* h = std::fopen("build/p_prefabs.gen.h", "rb")) {
+            std::string s; int c; while ((c = std::fgetc(h)) != EOF) s += char(c); std::fclose(h);
+            gen_str = s.find("char      type[16];") != std::string::npos &&
+                      s.find("static_assert(sizeof(Prefab) == 20") != std::string::npos;
+        }
+        check(gen_str, "generated header declares char type[16] with the right stride");
     }
 
     // the generated accessor header exists and declares the struct

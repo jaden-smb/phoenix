@@ -149,6 +149,13 @@ flat binary the engine reads as a `BlobView` with a generated accessor struct:
 No runtime JSON parser ships. The generated header guarantees the struct and the blob
 agree (versioned).
 
+Field types: `u8 i8 u16 i16 u32 i32 f32`, plus **`str8 str16 str32`** — an inline
+NUL-terminated `char[N]` (overlong values truncate to N−1). A string column **names**
+records, which is what turns a stats table into a **prefab schema**: the game hashes the
+name (`fnv1a`) to match baked spawn types, and `phxtmap --prefabs table.json` reads the
+same table as its placeable-entity vocabulary — one author file shared by both editors
+and the bake.
+
 ## 7. `phxtmap` — Tilemap Editor (GUI)
 
 Lightweight desktop tool built **on the engine itself** — the same App loop, SDL
@@ -169,13 +176,16 @@ headlessly; see `tools/phxtmap/instructions.md` for usage and controls.
 ```
 
 Built today: multi-layer tile paint/erase (drag paints; parallax layer factors AND layer
-names round-trip), a clickable tile palette, **bounded undo/redo** (one step per gesture —
+names round-trip), the **fill / rect / pick tools** (4-connected flood fill; a drag-marquee
+rectangle fill; an eyedropper that hops back to the brush — all honouring the erase
+modifier), a clickable tile palette, **bounded undo/redo** (one step per gesture —
 a whole paint stroke undoes at once), **collision-flag authoring** (cycle a GID through
 solid/oneway/hazard; flags show as coloured palette underlines and save as Tiled tileset
 per-tile properties), **add-layer**, an **entity placement** mode dropping typed spawn
 objects (the placeable types come from `--types` plus whatever the loaded map uses — not
 hardcoded), camera scroll, save-with-dirty-flag, and positioned load-error messages
-(`line L, col C`). Planned on top: fill/rect/picker tools and prefab refs into `phxentity`.
+(`line L, col C`). **`--prefabs table.json`** reads the placeable types from a `phxentity`
+record table's string `type`/`name` column instead — the shared prefab schema (§6/§8).
 Saves Tiled-compatible `.tmj` → `phxtile` bakes it. Compatibility with Tiled means
 users aren't locked into our editor.
 
@@ -202,6 +212,13 @@ users aren't locked into our editor.
   document model (`tools/phxentity/editor.h`) unit-tested headlessly and its output
   proven to re-bake through the real `phxbin` builder. See
   `tools/phxentity/instructions.md`.
+- **Built today — the shared prefab schema:** string fields (`str8/str16/str32`, §6) let a
+  record table carry a `type` name column. That one table is the seam between the tools:
+  `phxentity` edits the stats, `phxtmap --prefabs` places the named types as spawns, the
+  bake hashes the spawn type, and the game matches it against `fnv1a(record.type)` from the
+  baked table — a third party defines a new entity kind by adding one JSON record, no
+  source edits. String cells display in the GUI but are authored in the JSON (a cell
+  cursor has no text entry).
 - **Planned on top:** component schemas **introspected** from a reflection table
   (`PHX_REFLECT(Component, fields...)`) so prefabs become named component lists with
   defaults, and placing one in `phxtmap` writes `{prefab_hash, x, y, overrides}`.

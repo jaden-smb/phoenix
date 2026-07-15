@@ -54,6 +54,9 @@ struct InputState {
     uint32_t held     = 0;     // bitmask over LOGICAL Button (after `map`)
     uint32_t pressed  = 0;     // edge: down this frame, up last frame
     uint32_t released = 0;     // edge: up this frame, down last frame
+    uint32_t raw_held    = 0;  // bitmask over PHYSICAL buttons (before `map`)
+    uint32_t raw_pressed = 0;  // physical edge — what a rebind UI's "press any button"
+                               // capture reads, since logical edges are already remapped
     vec2     lstick   {};
     vec2     rstick   {};
     vec2     pointer  {};
@@ -61,9 +64,12 @@ struct InputState {
     InputMap map;              // the active remap (identity by default)
 
     void update(const phx_input_raw& raw) {
+        raw_pressed = raw.buttons & ~raw_held;
+        raw_held    = raw.buttons;
         uint32_t now = 0;
         for (uint32_t b = 0; b < uint32_t(Button::Count); ++b)
-            if (raw.buttons & (1u << map.physical[b])) now |= 1u << b;
+            if (raw.buttons & (1u << (map.physical[b] & 31u))) now |= 1u << b;   // &31: no UB
+                                                               // on out-of-range saved maps
         if (map.stick_to_dpad) {   // integer thresholds on the raw axis: tier-exact
             const int16_t dz = map.stick_deadzone;
             if (raw.axis[0] <= int16_t(-dz)) now |= button_bit(Button::Left);

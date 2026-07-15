@@ -11,7 +11,9 @@
 //   Q (L) / E (R) -10 / +10             C key (X)   NEW record (clone of the cursor row)
 //   V (Y)         DELETE the cursor row Enter       SAVE to --out
 //
-// Values clamp to the field's declared type range. Unsaved edits show a '*'.
+// Values clamp to the field's declared type range. String fields (str8/str16/str32 — e.g. a
+// prefab table's "type" column) display but don't step: author the strings in the JSON.
+// Unsaved edits show a '*'.
 #include "phx/runtime/app.h"
 #include "phx/ui/ui.h"
 #include "phx/render/renderer.h"
@@ -115,7 +117,10 @@ struct EntityGame final : Game {
             n = 0; put_int(rec); line[n] = 0;
             ui.text(vec2{ s_from_int(4), s_from_int(y) }, font, line, rgba(120, 120, 140), 20);
             for (size_t f = 0; f < doc.fields.size(); ++f) {
-                n = 0; put_int(doc.records[size_t(rec)][f]); line[n] = 0;
+                n = 0;
+                if (doc.field_is_str(f)) put(doc.str_cell(size_t(rec), f).c_str());
+                else                     put_int(doc.records[size_t(rec)][f]);
+                line[n] = 0;
                 const bool cur = rec == row && int(f) == col;
                 ui.text(vec2{ s_from_int(40 + int(f) * col_w), s_from_int(y) }, font, line,
                         cur ? rgba(255, 255, 255) : rgba(200, 200, 215), 20);
@@ -161,7 +166,9 @@ int main(int argc, char** argv) {
             std::printf("usage: phxentity [--out FILE.json] FILE.json\n"
                         "       phxentity --new NAME --fields a:type,b:type [--out FILE.json]\n"
                         "  --new     start a fresh record table named NAME (no input file needed)\n"
-                        "  --fields  its schema; types: u8/i8/u16/i16/u32/i32\n");
+                        "  --fields  its schema; types: u8/i8/u16/i16/u32/i32, str8/str16/str32\n"
+                        "            (a str field named 'type' makes the table a prefab schema\n"
+                        "             phxtmap --prefabs can place from)\n");
             return 0;
         } else in_path = argv[i];
     }

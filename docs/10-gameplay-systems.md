@@ -24,6 +24,7 @@ struct InputMap {                         // remappable controls (POD, save-file
 };
 struct InputState {
     uint32_t held, pressed, released;     // bitmasks over LOGICAL Button (after `map`)
+    uint32_t raw_held, raw_pressed;       // PHYSICAL bits (before `map`) — rebind capture
     vec2     lstick, rstick;              // [-1,1], zero on GBA
     vec2     pointer; bool pointer_down;  // mouse/touch; off on GBA
     InputMap map;                         // the active remap (App::input_map() mutates it)
@@ -51,6 +52,15 @@ and platform-agnostic**: `InputState::update()` routes each physical bit through
 before edge detection, and synthesizes dpad bits from the left stick using an integer
 deadzone on the raw axis (tier-exact — no float in the path). A game's options scene rebinds
 via `App::input_map()` and can persist the POD `InputMap` through the platform save seam.
+For a "press any button to bind" capture, read `raw_pressed` — the pre-remap physical edge
+mask that exists exactly for this (logical edges are already remapped, so they can't tell
+you which physical button the player just hit). The platformer example ships a working
+options scene (`examples/platformer/src/systems.cpp`, `OptionsScene`): pause → OPTIONS →
+rebind JUMP/PAUSE, cycle the stick deadzone, reset — persisted in its SaveData (v2) and
+proven end-to-end by scripted runs 4/5 of the platformer suite, including one gotcha worth
+copying around: an options overlay must **not** set `render_below` over a menu with focus
+buttons, because immediate-mode confirms happen inside `render()` and the menu underneath
+would eat the same press.
 
 Edge detection (`pressed`/`released`) is computed against last frame, so gameplay reads
 "jump pressed this frame" identically on every device. Input is sampled once per frame

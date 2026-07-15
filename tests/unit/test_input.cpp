@@ -73,6 +73,29 @@ PHX_TEST(input_remap_swaps_buttons) {
     CHECK(!in.down(Button::B));
 }
 
+PHX_TEST(input_raw_edges_for_rebind_capture) {
+    InputState in;
+    in.map.remap(Button::A, Button::R);           // logical A fed by physical R
+
+    in.update(raw_with(button_bit(Button::R)));   // PHYSICAL R pressed
+    CHECK(in.just(Button::A));                    // logical view is remapped...
+    CHECK(in.raw_pressed == button_bit(Button::R));   // ...raw view is NOT (rebind capture)
+    CHECK(in.raw_held    == button_bit(Button::R));
+
+    in.update(raw_with(button_bit(Button::R)));   // held: no raw edge
+    CHECK(in.raw_pressed == 0);
+    CHECK(in.raw_held    == button_bit(Button::R));
+
+    in.update(raw_with(0));
+    CHECK(in.raw_held == 0);
+
+    // an out-of-range physical index in a (corrupt) saved map must not be UB — the shift
+    // masks to a valid bit position (200 & 31 == 8, i.e. physical L here, which is up)
+    in.map.physical[uint32_t(Button::A)] = 200;
+    in.update(raw_with(button_bit(Button::A)));
+    CHECK(!in.down(Button::A));
+}
+
 PHX_TEST(input_stick_synthesizes_dpad) {
     InputState in;
     phx_input_raw r{};

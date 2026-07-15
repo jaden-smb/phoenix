@@ -4,20 +4,23 @@
 // register's mitigation for editor maintenance). The document logic lives in editor.h and is
 // unit-tested headlessly; this file is only the interactive shell.
 //
-//   phxtmap [--out FILE.tmj] [--size WxH] [--types a,b,c] [FILE.tmj]
+//   phxtmap [--out FILE.tmj] [--size WxH] [--types a,b,c] [--prefabs TABLE.json] [FILE.tmj]
 //
-//   mouse LMB        paint the selected tile (drag paints) / pick from the palette strip
-//                    (entity mode: place a spawn of the selected type)
-//   hold X key (B)   + LMB: erase tiles / remove spawns
+//   mouse LMB        apply the active tool (drag paints; rect drags a marquee) / pick from
+//                    the palette strip (entity mode: place a spawn of the selected type)
+//   hold X key (B)   + LMB: erase tiles (works with every tool) / remove spawns
 //   C key (X)        cycle the selected tile GID          E key (R)  toggle tile/entity mode
+//   X+C              cycle the TOOL (paint/fill/rect/pick)
 //   Q key (L)        cycle the spawn type                 Tab        cycle the edited layer
 //   Z key (A)        UNDO                                 X+Z        REDO
 //   V key (Y)        cycle the selected GID's collision   X+Tab      ADD a layer
 //                    (none -> solid -> oneway -> hazard)
 //   arrows/WASD      scroll the camera                    Enter      SAVE to --out
 //
-// Spawn types come from --types plus whatever the loaded map already uses — nothing is
-// hardcoded. Collision flags show as a coloured underline in the palette (white=solid,
+// Spawn types come from --types, from a --prefabs table (the phxentity/phxbin record table
+// whose string "type" column names the game's prefabs — ONE author file shared by both
+// editors and the bake), plus whatever the loaded map already uses — nothing is hardcoded.
+// Collision flags show as a coloured underline in the palette (white=solid,
 // yellow=oneway, red=hazard) and are saved as Tiled tileset per-tile properties, which the
 // bake turns into the engine's per-tile collision table.
 //
@@ -29,8 +32,9 @@
 #include "phx/platform/platform.h"
 #include "phx/input/input.h"
 
-#include "editor.h"       // TmapDoc (tools/phxtmap)
-#include "debug_font.h"   // tools/common
+#include "editor.h"                 // TmapDoc (tools/phxtmap)
+#include "../phxentity/editor.h"    // BinDoc — the shared prefab-schema table (--prefabs)
+#include "debug_font.h"             // tools/common
 
 #include <algorithm>
 #include <cstdio>
@@ -58,6 +62,12 @@ Rgba swatch_colour(int gid) {
     return kPal[(gid - 1) % kPaletteN];
 }
 
+// The paint tools (docs/08 §1): paint = per-cell brush (drag paints), fill = 4-connected
+// flood fill, rect = drag a marquee then release to fill it, pick = eyedrop a GID from the
+// map (and hop back to paint). All honour the erase modifier by painting GID 0.
+enum Tool : uint8_t { kToolPaint, kToolFill, kToolRect, kToolPick, kToolCount };
+const char* const kToolNames[kToolCount] = { "PAINT", "FILL", "RECT", "PICK" };
+
 struct EditorGame final : Game {
     phxtool::TmapDoc doc;
     std::string      out_path = "level.tmj";
@@ -75,6 +85,10 @@ struct EditorGame final : Game {
     int  spawn_type = 0;
     bool entity_mode = false;
     bool prev_down = false;
+    Tool tool = kToolPaint;
+    bool     rect_active = false;              // a rect-tool marquee drag is in progress
+    int      rect_x0 = 0, rect_y0 = 0, rect_x1 = 0, rect_y1 = 0;   // marquee corners (cells)
+    uint16_t rect_gid = 0;                     // GID captured at press (erase state then)
 
     static uint32_t g_font_px[phxtool::kDebugFontW * phxtool::kDebugFontH];
     static uint32_t g_tiles_px[kPaletteN * 8 * 8];
@@ -159,7 +173,10 @@ struct EditorGame final : Game {
                 layer = (layer + 1) % int(doc.layers.size());
             }
         }
-        if (in.just(Button::X))      gid = gid % kPaletteN + 1;
+        if (in.just(Button::X)) {                  // C: cycle GID, X+C: cycle the tool
+            if (mod) { tool = Tool((tool + 1) % kToolCount); rect_active = false; }
+            else     gid = gid % kPaletteN + 1;
+        }
         if (in.just(Button::R))      entity_mode = !entity_mode;
         if (in.just(Button::L))      spawn_type = (spawn_type + 1) % int(spawn_types.size());
         if (in.just(Button::A)) {                  // Z: undo, X+Z: redo
@@ -197,15 +214,51 @@ struct EditorGame final : Game {
                         else       doc.add_spawn(spawn_types[size_t(spawn_type)], wx, wy);
                         if (!changed) doc.drop_undo();
                     }
-                } else if (wx >= 0 && wy >= 0) {                      // drag paints
+                } else if (wx >= 0 && wy >= 0) {
                     const int tx = wx / doc.tile_w, ty = wy / doc.tile_h;
+                    const uint16_t paint = erase ? uint16_t(0) : uint16_t(gid);
                     if (doc.in_bounds(tx, ty)) {
-                        if (press) doc.push_undo();                   // a stroke = one undo step
-                        doc.set_tile(layer, tx, ty, erase ? uint16_t(0) : uint16_t(gid));
-                        reflatten();                                  // live into the soft backend
+                        switch (tool) {
+                        case kToolPaint:                              // drag paints
+                            if (press) doc.push_undo();               // a stroke = one undo step
+                            doc.set_tile(layer, tx, ty, paint);
+                            reflatten();                              // live into the soft backend
+                            break;
+                        case kToolFill:                               // 4-connected flood fill
+                            if (press) {
+                                doc.push_undo();
+                                if (doc.flood_fill(layer, tx, ty, paint) == 0) doc.drop_undo();
+                                else reflatten();
+                            }
+                            break;
+                        case kToolRect:                               // press anchors, drag sizes
+                            if (press) {
+                                rect_active = true;
+                                rect_x0 = rect_x1 = tx; rect_y0 = rect_y1 = ty;
+                                rect_gid = paint;                     // erase state AT press
+                            } else if (rect_active) {
+                                rect_x1 = tx; rect_y1 = ty;
+                            }
+                            break;
+                        case kToolPick:                               // eyedrop -> back to paint
+                            if (press) {
+                                const uint16_t got = doc.tile(layer, tx, ty);
+                                if (got >= 1 && got <= kPaletteN) { gid = got; tool = kToolPaint; }
+                            }
+                            break;
+                        default: break;
+                        }
                     }
                 }
             }
+        }
+        if (!in.pointer_down && prev_down && rect_active) {           // release commits the rect
+            rect_active = false;
+            doc.push_undo();
+            if (doc.fill_rect(layer, rect_x0, rect_y0, rect_x1, rect_y1, rect_gid) == 0)
+                doc.drop_undo();
+            else
+                reflatten();
         }
         prev_down = in.pointer_down;
     }
@@ -228,6 +281,23 @@ struct EditorGame final : Game {
                             vec2{ s_from_int(8), s_from_int(8) } }, rgba(240, 240, 240, 160), 190);
             char init[2] = { char(s.type.empty() ? '?' : (s.type[0] & ~0x20)), 0 };   // upper-case
             ui.text(vec2{ s_from_int(sx), s_from_int(sy - 1) }, font, init, rgba(20, 20, 30), 191);
+        }
+
+        // rect-tool marquee: a 1px yellow outline over the dragged cell rectangle
+        if (rect_active) {
+            const int x0 = (rect_x0 < rect_x1 ? rect_x0 : rect_x1) * doc.tile_w - cam_x;
+            const int y0 = (rect_y0 < rect_y1 ? rect_y0 : rect_y1) * doc.tile_h - cam_y;
+            const int x1 = ((rect_x0 > rect_x1 ? rect_x0 : rect_x1) + 1) * doc.tile_w - cam_x;
+            const int y1 = ((rect_y0 > rect_y1 ? rect_y0 : rect_y1) + 1) * doc.tile_h - cam_y;
+            const Rgba mc = rgba(255, 255, 90, 200);
+            ui.rect(UIRect{ vec2{ s_from_int(x0), s_from_int(y0) },
+                            vec2{ s_from_int(x1 - x0), s_from_int(1) } }, mc, 195);
+            ui.rect(UIRect{ vec2{ s_from_int(x0), s_from_int(y1 - 1) },
+                            vec2{ s_from_int(x1 - x0), s_from_int(1) } }, mc, 195);
+            ui.rect(UIRect{ vec2{ s_from_int(x0), s_from_int(y0) },
+                            vec2{ s_from_int(1), s_from_int(y1 - y0) } }, mc, 195);
+            ui.rect(UIRect{ vec2{ s_from_int(x1 - 1), s_from_int(y0) },
+                            vec2{ s_from_int(1), s_from_int(y1 - y0) } }, mc, 195);
         }
 
         // palette strip + status line
@@ -256,6 +326,7 @@ struct EditorGame final : Game {
         put(entity_mode ? "ENT " : "TILE ");
         if (entity_mode) { put(spawn_types[size_t(spawn_type)].c_str()); }
         else {
+            put(kToolNames[tool]); put(" ");
             put("L"); status[n++] = char('0' + layer); put(" G");
             if (gid >= 10) status[n++] = char('0' + gid / 10);
             status[n++] = char('0' + gid % 10);
@@ -297,6 +368,7 @@ int main(int argc, char** argv) {
     EditorGame game;
     int bw = 24, bh = 18;
     const char* in_path = nullptr;
+    const char* prefabs_path = nullptr;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--out" && i + 1 < argc)       game.out_path = argv[++i];
@@ -304,12 +376,40 @@ int main(int argc, char** argv) {
         else if (a == "--types" && i + 1 < argc) {
             auto ts = split_types(argv[++i]);
             if (!ts.empty()) game.spawn_types = std::move(ts);
-        } else if (a == "--help") {
-            std::printf("usage: phxtmap [--out FILE.tmj] [--size WxH] [--types a,b,c] [FILE.tmj]\n"
-                        "  --types  the spawn types placeable in entity mode (default:\n"
-                        "           player,coin,enemy,spike, plus any the loaded map uses)\n");
+        } else if (a == "--prefabs" && i + 1 < argc) prefabs_path = argv[++i];
+        else if (a == "--help") {
+            std::printf("usage: phxtmap [--out FILE.tmj] [--size WxH] [--types a,b,c]\n"
+                        "               [--prefabs TABLE.json] [FILE.tmj]\n"
+                        "  --types    the spawn types placeable in entity mode (default:\n"
+                        "             player,coin,enemy,spike, plus any the loaded map uses)\n"
+                        "  --prefabs  read the placeable types from a phxentity record table's\n"
+                        "             string 'type'/'name' column (the shared prefab schema)\n");
             return 0;
         } else in_path = argv[i];
+    }
+
+    if (prefabs_path) {                          // the prefab table IS the vocabulary
+        std::string text;
+        if (FILE* f = std::fopen(prefabs_path, "rb")) {
+            int c; while ((c = std::fgetc(f)) != EOF) text += char(c);
+            std::fclose(f);
+        }
+        phxtool::BinDoc prefabs;
+        std::string err;
+        if (text.empty() || !phxtool::BinDoc::load(text, prefabs, &err)) {
+            std::fprintf(stderr, "phxtmap: cannot load prefab table '%s'%s%s\n", prefabs_path,
+                         err.empty() ? "" : ": ", err.c_str());
+            return 1;
+        }
+        auto names = prefabs.name_column();
+        if (names.empty()) {
+            std::fprintf(stderr, "phxtmap: prefab table '%s' has no string 'type'/'name' "
+                         "column (or no named records)\n", prefabs_path);
+            return 1;
+        }
+        game.spawn_types = std::move(names);
+        std::printf("phxtmap: %zu prefab types from %s ('%s')\n",
+                    game.spawn_types.size(), prefabs_path, prefabs.struct_name.c_str());
     }
 
     if (in_path) {

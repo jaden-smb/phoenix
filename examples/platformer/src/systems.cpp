@@ -110,6 +110,16 @@ void interaction_system(EngineCtx* c, scalar /*dt*/) {
             hurt_player(c, pe, *pl);
         }
     }
+
+    // Tile hazards: standing in a hazard-FLAGGED tile (authored as Tiled tileset collision
+    // metadata, baked into the Tilemap asset) hurts like a spike — no entity is spawned;
+    // the level data itself is the hazard. This is the tile_flags_in() consumption path.
+    w.each<Player, Transform, AABBColl>([&](ecs::Entity pe, Player& pl, Transform& t, AABBColl& cb) {
+        if (c->physics->tile_flags_in(aabb::from_center(t.pos, cb.half)) & kTileHazard) {
+            if (!(pl.invuln > s_from_int(0))) ++c->hazard_tile_hits;   // a hit that lands
+            hurt_player(c, pe, pl);
+        }
+    });
 }
 
 void animation_system(EngineCtx* c, scalar dt) {
@@ -143,6 +153,7 @@ void save_game(EngineCtx* c) {
     sd.magic = kSaveMagic; sd.version = kSaveVersion;
     sd.score  = uint16_t(bb.get_int("score"_hash));
     sd.deaths = c->player_deaths;
+    sd.map    = c->app->input_map();               // v2: the player's control layout
     plat->save(c->save_path, &sd, uint32_t(sizeof sd));
 }
 
@@ -157,6 +168,7 @@ bool load_game(EngineCtx* c) {
     if (got < sizeof sd || sd.magic != kSaveMagic || sd.version != kSaveVersion) return false;
     c->scenes->persistent().set_int("score"_hash, int(sd.score));
     c->player_deaths = sd.deaths;
+    c->app->input_map() = sd.map;                  // restore the control layout (v2)
     c->loaded = true;
     return true;
 }
@@ -320,10 +332,11 @@ public:
     PauseScene() { render_below = true; }   // gameplay stays visible, frozen, behind us
     void render(EngineCtx* c, scalar) override {
         ui_.begin(*c->render, *c->input);
-        ui_.rect(UIRect{ vec2{ s_from_int(30), s_from_int(28) }, vec2{ s_from_int(68), s_from_int(40) } }, rgba(10, 10, 20));
+        ui_.rect(UIRect{ vec2{ s_from_int(30), s_from_int(28) }, vec2{ s_from_int(68), s_from_int(52) } }, rgba(10, 10, 20));
         ui_.text(vec2{ s_from_int(44), s_from_int(32) }, *c->font, "PAUSED", rgba(255, 255, 255));
-        if (ui_.button(UIRect{ vec2{ s_from_int(36), s_from_int(44) }, vec2{ s_from_int(56), s_from_int(8) } }, *c->font, "RESUME")) c->scenes->pop();
-        if (ui_.button(UIRect{ vec2{ s_from_int(36), s_from_int(56) }, vec2{ s_from_int(56), s_from_int(8) } }, *c->font, "QUIT"))   { save_game(c); c->app->request_quit(); }
+        if (ui_.button(UIRect{ vec2{ s_from_int(36), s_from_int(44) }, vec2{ s_from_int(56), s_from_int(8) } }, *c->font, "RESUME"))  c->scenes->pop();
+        if (ui_.button(UIRect{ vec2{ s_from_int(36), s_from_int(56) }, vec2{ s_from_int(56), s_from_int(8) } }, *c->font, "OPTIONS")) c->scenes->push(make_options_scene(c));
+        if (ui_.button(UIRect{ vec2{ s_from_int(36), s_from_int(68) }, vec2{ s_from_int(56), s_from_int(8) } }, *c->font, "QUIT"))    { save_game(c); c->app->request_quit(); }
         ui_.end();
     }
     void update(EngineCtx* c, scalar) override {
@@ -331,9 +344,80 @@ public:
     }
 };
 
+// The options/remap scene (docs/10 §1): rebind the game's actions to any physical button
+// (a "press a button" capture reads InputState::raw_pressed — the pre-remap edge mask that
+// exists exactly for this), cycle the stick deadzone, or reset to the default layout. The
+// remap lives on App::input_map() (takes effect next frame) and persists in the SaveData
+// blob (v2) whenever the game saves, so a player's layout survives a power cycle.
+class OptionsScene final : public Scene {
+    UI  ui_;
+    int listening_ = -1;    // row being rebound: 0 = JUMP (logical A), 1 = PAUSE (Start)
+    int cool_ = 0;          // frames to swallow confirms after a capture (the new binding
+                            // may make the captured press read as a logical A next frame)
+    // short physical-button names, indexed by bit position in phx_input_raw::buttons
+    static constexpr const char* kPhys[12] = { "UP", "DN", "LT", "RT", "A", "B", "X", "Y",
+                                               "L", "R", "ST", "SE" };
+public:
+    // NOT render_below: immediate-mode buttons confirm inside render(), so letting the
+    // pause menu keep rendering underneath would let its focused button eat the same A
+    // press that operates this menu (a real bug this comment commemorates).
+    OptionsScene() { render_below = false; }
+
+    void update(EngineCtx* c, scalar) override {
+        if (cool_ > 0) --cool_;
+        if (listening_ < 0) return;
+        const uint32_t rp = c->input->raw_pressed;
+        if (!rp) return;
+        uint32_t bit = 0;
+        while (!(rp & (1u << bit))) ++bit;                 // lowest pressed physical wins
+        if (bit < uint32_t(Button::Count)) {
+            c->app->input_map().remap(listening_ == 0 ? Button::A : Button::Start, Button(bit));
+            listening_ = -1;
+            cool_ = 2;
+        }
+    }
+
+    void render(EngineCtx* c, scalar) override {
+        InputMap& m = c->app->input_map();
+        ui_.begin(*c->render, *c->input);
+        ui_.rect(UIRect{ vec2{ s_from_int(24), s_from_int(12) }, vec2{ s_from_int(80), s_from_int(76) } }, rgba(10, 10, 20));
+        ui_.text(vec2{ s_from_int(36), s_from_int(15) }, *c->font, "OPTIONS", rgba(255, 255, 255));
+
+        // build "ACTION NAME" labels without STL (fmt_uint-style, game-path rule)
+        char jump_l[12], pause_l[12], dz_l[8];
+        auto mk = [](char* out, const char* a, const char* b) {
+            int n = 0;
+            while (*a) out[n++] = *a++;
+            while (*b) out[n++] = *b++;
+            out[n] = 0;
+        };
+        mk(jump_l,  "JUMP ",  kPhys[m.physical[uint32_t(Button::A)] % 12]);
+        mk(pause_l, "PAUSE ", kPhys[m.physical[uint32_t(Button::Start)] % 12]);
+        mk(dz_l, "DZ ", "");
+        fmt_uint(dz_l + 3, unsigned(int(m.stick_deadzone) * 100 / 32768));   // percent
+
+        const bool act = listening_ < 0 && cool_ == 0;     // ignore confirms while capturing
+        auto row = [](int i) {
+            return UIRect{ vec2{ s_from_int(32), s_from_int(25 + i * 11) },
+                           vec2{ s_from_int(64), s_from_int(9) } };
+        };
+        if (ui_.button(row(0), *c->font, jump_l)  && act) listening_ = 0;
+        if (ui_.button(row(1), *c->font, pause_l) && act) listening_ = 1;
+        if (ui_.button(row(2), *c->font, dz_l)    && act)                    // 25% → 50% → 75%
+            m.stick_deadzone = int16_t(m.stick_deadzone >= 24576 ? 8192 : m.stick_deadzone + 8192);
+        if (ui_.button(row(3), *c->font, "RESET") && act) m.reset();
+        if (ui_.button(row(4), *c->font, "BACK")  && act) c->scenes->pop();
+        if (listening_ >= 0)
+            ui_.text(vec2{ s_from_int(28), s_from_int(81) }, *c->font, "PRESS A BUTTON",
+                     rgba(255, 255, 120));
+        ui_.end();
+    }
+};
+
 Scene* make_level_scene(EngineCtx* c) { return c->app->mem().persistent().make<LevelScene>(); }
 Scene* make_title_scene(EngineCtx* c) { return c->app->mem().persistent().make<TitleScene>(); }
 Scene* make_pause_scene(EngineCtx* c) { return c->app->mem().persistent().make<PauseScene>(); }
+Scene* make_options_scene(EngineCtx* c) { return c->app->mem().persistent().make<OptionsScene>(); }
 
 // ---- composition root -----------------------------------------------------------------
 void PlatformerGame::on_start(App& app) {
@@ -419,6 +503,7 @@ int      PlatformerGame::health() const {
 }
 int      PlatformerGame::enemies_killed() const { return int(ctx.enemies_killed); }
 int      PlatformerGame::deaths() const { return int(ctx.player_deaths); }
+int      PlatformerGame::hazard_tile_hits() const { return int(ctx.hazard_tile_hits); }
 bool     PlatformerGame::was_loaded() const { return ctx.loaded; }
 
 } // namespace game

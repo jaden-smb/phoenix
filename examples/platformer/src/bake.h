@@ -43,9 +43,16 @@ inline bool add_wav_sound(phxtool::BundleWriter& w, const char* name, const std:
 // speed, Tiled's native `parallaxx`) UNDER the solid ground layer — + an object group with
 // the player, coins, an enemy, and a spike. Authored as JSON so the bake runs the real Tiled
 // importer. Convention: the LAST tile layer is the gameplay/solid one (physics reads it).
+//
+// The tileset carries per-tile collision CLASSES (Tiled 1.9 `class`): tile 1 solid, tile 3
+// hazard (lava). Once any flag is authored, solidity is explicit — decorative tiles stay
+// passable — and the lava pit at tile (0,10), left of the player spawn, damages through
+// `tile_flags_in()` with NO spawned entity (the spike stays an entity for contrast: both
+// hazard styles are legitimate and now both are exercised).
 inline std::string build_level_tmj() {
     std::string j = "{ \"width\":16, \"height\":12, \"tilewidth\":8, \"tileheight\":8,";
-    j += "\"tilesets\":[{\"firstgid\":1,\"name\":\"tiles\"}],";
+    j += "\"tilesets\":[{\"firstgid\":1,\"name\":\"tiles\",\"tiles\":["
+         "{\"id\":0,\"class\":\"solid\"},{\"id\":2,\"class\":\"hazard\"}]}],";
     j += "\"layers\":[";
     j += "{\"type\":\"tilelayer\",\"name\":\"backdrop\",\"width\":16,\"height\":12,";
     j += "\"parallaxx\":0.5,\"data\":[";
@@ -59,7 +66,8 @@ inline std::string build_level_tmj() {
     for (int y = 0; y < 12; ++y)
         for (int x = 0; x < 16; ++x) {
             if (!(x == 0 && y == 0)) j += ",";
-            j += (y >= 10) ? "1" : "0";        // bottom two rows are the ground (tile 1)
+            if (x == 0 && y == 10)  j += "3";  // the lava pit (tile 3, hazard, NOT solid)
+            else                    j += (y >= 10) ? "1" : "0";   // ground rows (tile 1, solid)
         }
     j += "]},";
     j += "{\"type\":\"objectgroup\",\"name\":\"entities\",\"objects\":[";
@@ -77,17 +85,22 @@ inline bool bake_platformer_assets(const char* path, uint8_t tier = 2) {
     using namespace phx;
     phxtool::BundleWriter w{tier};   // tier drives per-target encoding (e.g. sound rates)
 
-    // tileset: two 8x8 tiles side by side — cell 0 the solid ground (tilemap index 1),
-    // cell 1 a pale cloud puff for the parallax backdrop (tilemap index 2).
-    uint32_t tiles[16 * 8];
+    // tileset: three 8x8 tiles side by side — cell 0 the solid ground (tilemap index 1),
+    // cell 1 a pale cloud puff for the parallax backdrop (tilemap index 2), cell 2 lava
+    // (tilemap index 3 — the hazard-flagged tile).
+    uint32_t tiles[24 * 8];
     for (int y = 0; y < 8; ++y)
-        for (int x = 0; x < 16; ++x) {
-            if (x < 8) { tiles[y * 16 + x] = rgba(150, 90, 50); continue; }   // ground
+        for (int x = 0; x < 24; ++x) {
+            if (x < 8) { tiles[y * 24 + x] = rgba(150, 90, 50); continue; }   // ground
+            if (x >= 16) {                                                    // lava: hot surface
+                tiles[y * 24 + x] = (y < 2) ? rgba(250, 200, 60) : rgba(220, 80, 30);
+                continue;
+            }
             const int cx = x - 8;
             const bool puff = (y >= 2 && y <= 5 && cx >= 1 && cx <= 6);       // rounded blob
-            tiles[y * 16 + x] = puff ? rgba(200, 205, 220) : 0u;              // rest transparent
+            tiles[y * 24 + x] = puff ? rgba(200, 205, 220) : 0u;              // rest transparent
         }
-    w.add_texture("tiles", tiles, 16, 8);
+    w.add_texture("tiles", tiles, 24, 8);
 
     // hero: 32x8 four-frame walk sheet, each frame a distinct blue so motion is visible
     uint32_t hero[32 * 8];
@@ -137,7 +150,8 @@ inline bool bake_platformer_assets(const char* path, uint8_t tier = 2) {
     for (auto& L : tm.layers) flat.insert(flat.end(), L.begin(), L.end());
     w.add_tilemap("level", flat.data(), uint16_t(tm.width), uint16_t(tm.height),
                   uint8_t(tm.layers.size()), uint8_t(tm.tile_w), uint8_t(tm.tile_h), tm.tileset,
-                  tm.has_parallax() ? &tm.layer_parallax : nullptr);
+                  tm.has_parallax() ? &tm.layer_parallax : nullptr,
+                  tm.has_tile_flags() ? &tm.tile_flags : nullptr);
     std::vector<phx::SpawnDef> spawns;
     for (auto& s : tm.spawns)
         spawns.push_back(phx::SpawnDef{ phx::fnv1a(s.type.c_str()), int16_t(s.x), int16_t(s.y),
