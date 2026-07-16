@@ -22,7 +22,7 @@ gate in `make check`):
 - [x] Renderer: sprites + tilemap + parallax + bitmap text on GL, GU, and GBA PPU
       (plus camera zoom/shake beyond the checklist).
 - [x] ECS: sparse-set world, fixed-step systems, deferred structural changes.
-- [x] Resource: `.phxp` bundle baked by `phxpack`; mmap/zero-copy load; per-target
+- [x] Resource: `.phxp` bundle baked by `phxpack`; zero-copy in-place load; per-target
       encode (tier-0 sound rate + 4bpp paletted textures, tier-1 swizzled textures;
       lock-file incremental rebakes — ADPCM/tracker codecs remain post-MVP).
 - [x] Input/Audio/Scene/Physics/Anim/UI at the depth in `docs/10` (incl. dialogue).
@@ -53,7 +53,7 @@ across power cycles, physical PSP) and the license.
 | M0| Foundations                        | repo, CMake, toolchains (4), `core/types`, `fixed16`, log, math, **memory allocators** + tests | 4 | 4 |
 | M1| Platform seam + windows up         | `phx_platform` C seam; SDL + GBA + PSP backends; clock/input/file; conformance suite; a window that clears to a color on all four | 5 | 9 |
 | M2| Rendering                          | unified API; GL + GU + GBA PPU backends; sprite batcher, tilemap+parallax, bitmap text; golden-image tests | 6 | 15 |
-| M3| ECS + resources                    | sparse-set World; `.phxp` format; `phxpack` + `phxsprite`/`phxtile`/`phxsnd`/`phxbin` CLIs; cache/mmap; round-trip tests | 5 | 20 |
+| M3| ECS + resources                    | sparse-set World; `.phxp` format; `phxpack` + `phxsprite`/`phxtile`/`phxsnd`/`phxbin` CLIs; cache/in-place load; round-trip tests | 5 | 20 |
 | M4| Gameplay systems                   | input semantics, audio mixer, scene stack, AABB/tile physics, animation SM, UI (menu/HUD/dialogue) | 6 | 26 |
 | M5| **Example game (MVP gate)**        | full platformer slice; save system; runs+fits on all 4; size gate green | 4 | 30 |
 | M6| Tools GUI + polish                 | `phxtmap` + `phxentity` editors; profiler overlay; docs pass; perf tuning | 5 | 35 |
@@ -144,7 +144,8 @@ the porting cost is the **platform seam + toolchain**, not graphics.
 - API frozen, semver from here; the `phx_platform` seam and public headers are stable.
 - All listed platforms build in CI and pass conformance + golden + determinism suites.
 - Two complete sample games (the platformer + one 2.5D demo) ship in `examples/`.
-- A written manual (these `docs/` + per-API reference generated from headers).
+- A written manual (these `docs/` + the per-API reference `make docs` already generates
+  from the public headers).
 - A new contributor can port to a new tier-2 platform in **< 2 weeks** using only the
   porting checklist (`docs/02` §6) — the ultimate test that the architecture delivered
   on its portability pillar.

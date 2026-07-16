@@ -7,6 +7,20 @@ All notable changes to Phoenix are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `make docs`: Doxygen API reference generated from the public headers (`engine/*/include`
+  only — the same boundary depcheck enforces) plus the `docs/` manual, output in
+  `build/docs/html`. `tools/common/doxyfilter.py` promotes the house `//` header comments
+  to doc comments so the existing prose is the reference; the version is injected from
+  `phx/core/version.h` (first slice of the roadmap's v1.0 "written manual" item).
+
+### Fixed
+- Docs/comments corrected to match the implementation: desktop `map()` is a load-once heap
+  buffer (there is no OS mmap), PSP bundles are linked into the EBOOT (not read via `sceIo` at
+  mount), platform backends allocate init-time state outside the root arena
+  (`phx_platform_desc.root_arena` is reserved/unused today), and the PC bundle image counts
+  against RAM — it is not OS-backed as `docs/06-resources.md` previously claimed.
+
 ## [0.1.0] - 2026-07-15
 
 First tagged release: the complete engine slice proven on all four targets.

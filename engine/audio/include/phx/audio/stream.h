@@ -68,7 +68,7 @@ private:
 
 // A streaming audio source: resamples a SoundView to the output rate into its ring on pump(),
 // and hands output-rate mono samples to the mixer on read(). The source can be a zero-copy
-// view straight into a mmap'd bundle blob — so the "resource system refills the stream" is
+// view straight into a mounted bundle blob — so the "resource system refills the stream" is
 // literally pump() reading from the mounted asset.
 class AudioStream {
 public:

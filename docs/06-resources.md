@@ -1,13 +1,14 @@
 # Phoenix Engine — Resources & Asset Format
 
 > `engine/resource/` (runtime) + the pack format produced by `tools/` (offline).
-> Principle: **assets are baked offline, loaded by mmap/zero-copy, never parsed at
-> runtime.** PNG/JSON/WAV/Tiled `.tmj` exist only on the developer's machine (no XML
+> Principle: **assets are baked offline, resident as one stable in-memory image, read
+> in place by zero-copy views, never parsed at runtime.** PNG/JSON/WAV/Tiled `.tmj` exist only on the developer's machine (no XML
 > input anywhere in the pipeline today — Tiled maps are read as `.tmj`, not `.tmx`).
 
 ## 1. The `.phxp` bundle format
 
-A bundle is a flat, append-only container the engine memory-maps. Layout:
+A bundle is a flat, append-only container the engine reads in place from a stable
+in-memory image (heap-loaded once on PC; linked into the program image on GBA/PSP). Layout:
 
 ```
  offset 0
@@ -73,12 +74,13 @@ class ResourceCache {
 public:
     static Result<ResourceCache*> create(ArenaAllocator&);
 
-    // mmap (PC) or load-once (PSP/GBA), fully validated (§2) before anything is visible.
+    // load-once heap image (PC) or linked-in bundle (PSP EBOOT / GBA ROM pointer),
+    // fully validated (§2) before anything is visible.
     Status mount(const phx_platform*, const char* bundle_path, bool verify_checksum = true);
     Status unmount(const phx_platform*, const char* bundle_path);
     Status unmount_all(const phx_platform*);
 
-    // O(1) typed views into the mmap'd blob — no copy, no parse:
+    // O(1) typed views into the mounted blob — no copy, no parse:
     Result<TextureView> texture(NameHash);
     Result<TilemapView> tilemap(NameHash);
     Result<SoundDataView> sound(NameHash);
@@ -129,14 +131,18 @@ tier. A game's code is byte-for-byte identical.
 ```
  ResourceCache budget (from Config.cache_bytes)
  ┌───────────────────────────────────────────────────────────┐
- │ mmap'd bundle (PC: not counted — OS-backed; PSP/GBA: in-arena)│
+ │ bundle image (PC: heap buffer, bundle-sized, OUTSIDE the root  │
+ │ arena and this budget; PSP: inside the loaded EBOOT; GBA: ROM) │
  │ ───────────────────────────────────────────────────────────│
  │ decoded GPU resources (LRU)   │ free                         │
  │  tex#1  tex#2  tex#3  ...      │                              │
  └───────────────────────────────────────────────────────────┘
 ```
 
-- **Zero-copy assets** (tilemaps, fonts, PCM on PC) cost nothing beyond the mmap.
+- **Zero-copy assets** (tilemaps, fonts, PCM on PC) cost nothing beyond the resident
+  bundle image. On PC that image is a real heap buffer the size of the bundle — budget
+  for it when sizing total RAM; it is not OS-backed (there is no mmap in the SDL
+  backend, by design — see docs/02 §3.1).
 - **Decoded/uploaded assets** (GPU textures, decompressed audio) live in an LRU bounded
   by `cache_bytes`. Eviction frees the least-recently-used until the new asset fits;
   if a single asset can't fit, that's a boot-time budgeting bug, surfaced loudly.
@@ -161,7 +167,7 @@ the audio mixer's pattern player.
 ## 7. Compression
 
 - **Per-blob, optional, type-aware.** TOC `flags` bit marks compression; `size` is
-  compressed, `uncompressed_size` is the mmap-decode target.
+  compressed, `uncompressed_size` is the decode target.
 - **Algorithm:** LZ77-family (we ship a tiny in-tree decompressor, ~1 KB, no external
   dep) — decompresses fast on ARM7TDMI. The GBA BIOS also has built-in LZ77/Huffman
   decoders (`SWI LZ77UnCompVram`) which the GBA backend uses for free.
@@ -191,15 +197,15 @@ independent *full* bakes of the same sources are byte-identical to each other; i
 not exercise the lock/incremental-skip path.) Bumping either the
 tool version (`kPhxpackToolVersion`) or `kBundleVersion` invalidates every lock.
 
-## 9. Why baked + mmap (justification)
+## 9. Why baked + read-in-place (justification)
 
 | Approach          | Runtime cost            | RAM            | GBA viable | Determinism |
 |-------------------|-------------------------|----------------|------------|-------------|
 | Parse PNG/JSON at runtime | decode + allocate | high, transient | no (no libpng/heap) | no |
-| **Baked + mmap (Phoenix)** | pointer cast      | zero extra (OS-backed) | yes (ROM ptr) | yes |
+| **Baked + in-place (Phoenix)** | pointer cast | the bundle image only, no transient parse allocations (free on GBA — it's ROM) | yes (ROM ptr) | yes |
 
 Baking moves all parsing/validation to the developer's machine where errors are
 caught early and where we can afford slow, thorough optimization. The console does the
-minimum: map and cast. This is the RenderWare/classic-SDK discipline, updated.
+minimum: point and cast. This is the RenderWare/classic-SDK discipline, updated.
 
 See `docs/08-tooling.md` for the converters that produce these blobs.

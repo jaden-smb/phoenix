@@ -30,7 +30,9 @@ phx_main()
   └─ phx::Config cfg = Config::from_defaults() [+ overlay platform caps]
   └─ phx::App app(cfg)
        ├─ MemoryRoot::boot(cfg.total_ram)        // single OS allocation (or static buf on GBA)
-       ├─ platform_create(&plat, &root_arena)    // C seam: window/gfx/input/audio/file
+       ├─ phx_platform_get()->init(&desc)        // C seam: window/gfx/input/audio/file
+       │                                          //   (backend state is malloc'd backend-side
+       │                                          //    today; desc.root_arena is null/unused)
        ├─ Log::init(plat.log_sink)
        ├─ Renderer::create(plat.gfx, sub_alloc)  // tier-selected backend
        ├─ Audio::create(plat.audio, sub_alloc)

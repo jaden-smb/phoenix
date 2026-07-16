@@ -1,7 +1,7 @@
 # Phoenix Engine — Tooling & Asset Pipeline
 
 > `tools/` — host-only C++17 (STL freely allowed here; these never ship to console).
-> They turn author-friendly formats into the baked `.phxp` blobs the runtime mmaps.
+> They turn author-friendly formats into the baked `.phxp` blobs the runtime reads in place.
 > Philosophy: **do all the expensive, fallible work offline.**
 
 ## 1. Tool inventory

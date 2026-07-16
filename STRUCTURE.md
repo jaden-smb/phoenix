@@ -11,6 +11,7 @@ phoenix/
 ├── LICENSE                       MIT
 ├── Makefile                      Host build + every suite/gate/cross target (day-to-day driver)
 ├── CMakeLists.txt                Root build: target select, module registration (canonical multi-target)
+├── Doxyfile                      API reference config (`make docs` -> build/docs/html; public headers only)
 │
 ├── cmake/                        Build machinery (a new platform = a file here + a backend folder)
 │   ├── phx_module.cmake          phx_add_module(): one-backend-per-module helper
@@ -49,7 +50,7 @@ phoenix/
 │   ├── input/                    phx_input_raw -> semantic Button/edge/axis/pointer state,
 │   │                             remappable via InputMap (+ integer stick->dpad synthesis)
 │   ├── audio/                    Software mixer (mixer.h) + SPSC ring streaming (stream.h) + lock-free command queue (command_queue.h)
-│   ├── resource/                 .phxp bundle mount, mmap/zero-copy views (incl. per-layer parallax), LZSS codec
+│   ├── resource/                 .phxp bundle mount, zero-copy in-place views (incl. per-layer parallax), LZSS codec
 │   ├── scene/                    Scene stack, transitions, persistent blackboard
 │   ├── physics/                  AABB + swept tile collision (per-tile flags: solid/one-way/
 │   │                             hazard, or the solid_from fallback); overlap queries
@@ -73,7 +74,8 @@ phoenix/
 │   ├── phxentity/                GUI entity/prefab TABLE editor over the phxbin author JSON — same
 │   │                             engine shell + doc-model split
 │   └── common/                   depcheck.py (layering gate) · size_gate.py (GBA budget gate) ·
-│                                 bin2s.py (portable asset embedding) · debug_font.h (shared tool font)
+│                                 bin2s.py (portable asset embedding) · debug_font.h (shared tool font) ·
+│                                 doxyfilter.py (promotes '//' header comments for `make docs`)
 │
 ├── examples/
 │   ├── platformer/               The MVP gate: full game slice using ONLY engine systems ✅

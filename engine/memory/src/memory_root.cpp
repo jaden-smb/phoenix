@@ -1,6 +1,6 @@
-// phx/memory/src/memory_root.cpp — host implementation of the root memory carving.
-// On GBA this file is replaced by a variant that uses a static EWRAM buffer instead of
-// malloc (the only difference is where `block_` comes from).
+// phx/memory/src/memory_root.cpp — the root memory carving. This one file is linked on
+// EVERY target: the single boot malloc lands in the newlib EWRAM heap on GBA. A GBA
+// variant sourcing `block_` from a static EWRAM buffer instead is planned, not built.
 #include "phx/memory/memory_root.h"
 
 #include "phx/core/log.h"

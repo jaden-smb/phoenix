@@ -16,7 +16,7 @@ extern "C" {
 typedef struct phx_window phx_window;
 typedef struct phx_gfx    phx_gfx;     /* graphics device, consumed by render backend */
 typedef struct phx_audio  phx_audio;   /* audio device, consumed by audio mixer       */
-typedef struct phx_file   phx_file;    /* file / mmap handle                          */
+typedef struct phx_file   phx_file;    /* file handle (map() = stable in-memory view) */
 
 /* ---- normalized input frame (filled by platform, decoded by input module) ----
  * Canonical button bit order is fixed so Button::Jump means the same everywhere. */
@@ -35,7 +35,10 @@ typedef struct phx_platform_desc {
     int32_t     width;
     int32_t     height;
     int32_t     vsync;
-    void*       root_arena;    /* backends allocate their state here, never via malloc */
+    void*       root_arena;    /* RESERVED, not yet wired: App passes null and no backend
+                                * reads it. Today backends malloc their own init-time state
+                                * (framebuffer, desktop file images); the plan is to carve
+                                * it from here instead. See docs/05-memory.md §0. */
     size_t      root_arena_size;
 } phx_platform_desc;
 

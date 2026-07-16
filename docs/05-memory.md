@@ -21,8 +21,16 @@
 └─────────┘  └──────────────┘  └──────────┘  └──────────────┘   └────────────────────┘
 ```
 
-After boot, **the OS heap is never touched again** (except optionally by host-only
-tools). On GBA there is no heap at all — the root is a `static` array in EWRAM.
+After boot, **engine systems never touch the OS heap again** (host-only tools may).
+Two honest caveats to the diagram above, as built:
+
+- The **platform seam is outside the arena**: backends `malloc` init-time state (the
+  software framebuffer at `init()`, desktop file/bundle images at mount) — load/init
+  time only, never per-frame. `phx_platform_desc.root_arena` is the planned hook to
+  bring this inside the arena; today it is passed as null and no backend reads it.
+- On GBA the root arena is the same single boot `malloc` (newlib heap in EWRAM) as
+  everywhere else — the static-EWRAM-buffer variant mentioned in `memory_root.cpp`'s
+  header is not yet built.
 
 ## 1. Allocator catalog
 

@@ -351,7 +351,7 @@ GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/
             $(patsubst tests/suites/render_test.cpp,tests/suites/gu_test.cpp,$(RENDER_SRC)))
 GU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(GU_SRC))
 
-.PHONY: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck version dist dist-win dist-gba dist-psp
+.PHONY: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
 
 # Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstones + audio + resource + dep gate.
 check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu audio texcache png sprite tiled resource phxpack pipeline tools depcheck
@@ -1028,6 +1028,18 @@ PHX_ZIP    = python3 -m zipfile -c
 
 version:
 	@echo $(PHX_VERSION)
+
+# --- API reference (`make docs`) --------------------------------------------------------------
+# Doxygen over the PUBLIC headers only (engine/*/include — the boundary depcheck enforces; see
+# Doxyfile). tools/common/doxyfilter.py promotes the house '//' comments to '///' so the
+# existing header prose IS the reference. PROJECT_NUMBER is appended here from version.h so
+# the version stays single-sourced. Needs doxygen on PATH (override with DOXYGEN=/path/to).
+DOXYGEN ?= doxygen
+docs:
+	@command -v $(DOXYGEN) >/dev/null 2>&1 || \
+	  { echo "docs: doxygen not found — install it (e.g. apt install doxygen) or set DOXYGEN=<path>"; exit 1; }
+	@( cat Doxyfile; echo "PROJECT_NUMBER=$(PHX_VERSION)" ) | $(DOXYGEN) -
+	@echo "docs: build/docs/html/index.html"
 
 # Host tools SDK: the five asset-pipeline CLIs + license/readme. (The full dev SDK with headers
 # + static libs installs via CMake: cmake --install / cpack — see RELEASING.md.)

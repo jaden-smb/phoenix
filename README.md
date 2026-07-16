@@ -35,7 +35,7 @@ render backend.
 | **Memory** | One root arena at boot; arena/stack/pool/object allocators on top. **Zero hot-path heap allocation**; fragmentation is structurally impossible. |
 | **Render** | One 2D-intent API (sprites · tilemaps · parallax · zoom · shake · palettes) compiling to **GBA PPU**, **PSP GU**, and **PC OpenGL**, all diffed against a software golden reference. |
 | **ECS** | Sparse-set, bounded, cache-friendly: 512 entities on GBA → 65,536 on PC. |
-| **Assets** | Baked offline into `.phxp` bundles, loaded zero-copy (mmap / ROM pointer) or LZSS-decompressed once, and **encoded per target** (tier 0 resamples audio to the GBA's rate at bake time). |
+| **Assets** | Baked offline into `.phxp` bundles, read zero-copy in place (load-once image / ROM pointer) or LZSS-decompressed once, and **encoded per target** (tier 0 resamples audio to the GBA's rate at bake time). |
 | **Tools** | CLI converters + the `phxpack` assembler + two GUI editors **built on the engine itself**. Editors emit open author formats (Tiled `.tmj`, JSON), never engine blobs. |
 | **Build** | One CMake tree, or a plain `Makefile` needing only `g++` + `make` → ELF · `.exe` · `.gba` ROM · PSP `EBOOT.PBP`. |
 
@@ -76,7 +76,8 @@ With SDL2 (and libGL) you also get windowed play and the desktop verifiers — `
 gl`, `make sdl-verify`, `make gl-verify`, `make audio-verify` — plus the two GUI editors, `make
 tmap` (tilemap) and `make entity` (record tables). Every suite is its own target (`make physics`,
 `make ppu`, `make resource`, …); see the [Makefile](Makefile), and the `instructions.md` in each
-tool folder.
+tool folder. With doxygen installed, `make docs` generates the browsable API reference (public
+headers + this manual) into `build/docs/html`.
 
 ## Cross-compiling
 

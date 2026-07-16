@@ -202,6 +202,12 @@ There is no `new`/`malloc` in per-frame code. Instead:
 - Per-frame transient data uses a **double-buffered frame stack** that is reset
   (pointer bump to zero) every frame — free is O(1) and fragmentation is impossible.
 
+One honest exception today: the **platform seam** sits outside the arena. Backends
+`malloc` their init-time state (the software framebuffer at `init()`, desktop file
+images at mount) — load/init-time only, never per-frame, but not counted by the root
+arena. `phx_platform_desc.root_arena` exists to close this gap and is currently
+passed as null and unused.
+
 ```
  Root Arena (e.g. 24 MB on PSP, 224 KB on GBA EWRAM)
  ┌───────────────────────────────────────────────────────────────┐
@@ -284,18 +290,18 @@ for all four. Full strategy in `docs/07-build-system.md`.
 
 ---
 
-## 9. Asset Pipeline (offline → packed → mmap)
+## 9. Asset Pipeline (offline → packed → read in place)
 
 Assets are **never parsed at runtime** in their authoring format. The host tools
-convert PNG/WAV/JSON/Tiled `.tmj` into a packed binary that the engine memory-maps
-(PC/PSP) or links into ROM (GBA). (No XML input anywhere — Tiled maps are read as `.tmj`,
+convert PNG/WAV/JSON/Tiled `.tmj` into a packed binary that the engine loads once
+into a stable heap image (PC) or links into the program image (GBA ROM, PSP EBOOT). (No XML input anywhere — Tiled maps are read as `.tmj`,
 its JSON export, not `.tmx`.)
 
 ```
  author/         host tools (tools/)            runtime (engine/resource)
- ┌──────┐  phxsprite  ┌──────────┐  phxpack   ┌────────────┐   load = mmap
+ ┌──────┐  phxsprite  ┌──────────┐  phxpack   ┌────────────┐  load in place
  │ .png │ ─────────▶  │ .phxspr  │ ─────────▶ │ assets.phxp│ ─────────────▶ zero-copy view
- │ .wav │  phxsnd     │ .phxsnd  │  (bundle)  │  (mmap'd)  │   (no parse)
+ │ .wav │  phxsnd     │ .phxsnd  │  (bundle)  │ (resident) │   (no parse)
  │ .tmj │  phxtile    │ .phxtmap │            └────────────┘
  │ .json│  phxbin     │ .phxbin  │
  └──────┘             └──────────┘

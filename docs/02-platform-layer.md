@@ -18,7 +18,7 @@ extern "C" {
 typedef struct phx_window  phx_window;   // opaque
 typedef struct phx_gfx     phx_gfx;      // opaque graphics device handle
 typedef struct phx_audio   phx_audio;    // opaque audio device handle
-typedef struct phx_file    phx_file;     // opaque file/mmap handle
+typedef struct phx_file    phx_file;     // opaque file handle (stable in-memory view)
 
 typedef struct phx_platform {
     /* lifecycle */
@@ -40,7 +40,7 @@ typedef struct phx_platform {
     /* input snapshot (filled by platform, read by input module) */
     void  (*poll_input)(phx_input_raw* out);
 
-    /* file / asset access (mmap where possible) */
+    /* file / asset access (load-once, stable-pointer views) */
     phx_file* (*open)(const char* path, size_t* out_size);
     const void* (*map)(phx_file*);                  // zero-copy view; ROM ptr on GBA
     void  (*close)(phx_file*);
@@ -101,7 +101,11 @@ engine/platform/src/
   a Vulkan backend is an explicit non-goal (`docs/03` §6 records the decision).
 - `clock_ns` → `SDL_GetPerformanceCounter` scaled.
 - `poll_input` → `SDL_PollEvent` accumulated into `phx_input_raw`.
-- `open`/`map` → `mmap`(linux)/`MapViewOfFile`(win) the `.phxp` bundle, zero-copy.
+- `open`/`map` → stdio read-once into a heap buffer; `map` returns that stable pointer.
+  There is deliberately **no OS mmap** (`mmap`/`MapViewOfFile`) — the seam contract is
+  "map returns a stable view for the mount's lifetime", not how it's backed, and a
+  portable 20-line stdio loader beats two per-OS mapping paths on the one platform
+  where RAM is free. Cost: the bundle is resident heap, counted like any other buffer.
 - `audio` → SDL audio callback pulls from our mixer ring buffer.
 - Rationale: SDL2 is the one *optional but pragmatic* dependency on desktop; it is
   isolated entirely here, so a future GLFW or raw-win32 backend is a sibling folder.
@@ -123,9 +127,10 @@ engine/platform/src/
 - `init` sets up `sceGuInit`, display list, double buffer in VRAM.
 - Requires the **callback thread + exit callback** boilerplate (HOME button); handled
   here so gameplay never sees it.
-- `open`/`map` → `sceIoOpen` + read into an EWRAM arena (PSP can't mmap the MS;
-  `map` therefore loads-once into the resource arena and returns that pointer — the
-  *contract* "map returns a stable view" still holds).
+- `open`/`map` → the `.phxp` bundle is **linked into the EBOOT** and registered before
+  boot via `phx_psp_set_bundle()` (same pattern as the GBA ROM bundle); `map` returns
+  that pointer — no `sceIo` read at mount, and the *contract* "map returns a stable
+  view" still holds.
 - `audio` → `sceAudioChReserve` + blocking output thread fed by the mixer.
 
 ## 4. `phx_input_raw` — the normalized input frame

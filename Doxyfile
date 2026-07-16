@@ -1,0 +1,76 @@
+# Doxyfile — the generated per-API reference (roadmap docs/09 §6: the manual = docs/ + this).
+# Run via `make docs` (which injects PROJECT_NUMBER from phx/core/version.h so the version
+# stays single-sourced); output lands in build/docs/html/index.html.
+#
+# Scope: the PUBLIC headers only — engine/*/include/phx/<mod>/, the same boundary depcheck
+# enforces. src/ is private by rule 1 (STRUCTURE.md) and is excluded. Headers are passed
+# through tools/common/doxyfilter.py, which promotes the house '//' comment style to '///'
+# so the existing prose is the documentation. Undefined tier macros mean the docs show the
+# default PC/float view (PHX_TARGET_GBA / PHX_GBA_HW evaluate to 0), matching the default
+# host build.
+
+PROJECT_NAME           = "Phoenix Engine"
+PROJECT_BRIEF          = "phx — one C++17 codebase for GBA, PSP, Windows, and Linux"
+
+OUTPUT_DIRECTORY       = build/docs
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+GENERATE_TREEVIEW      = YES
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+
+INPUT                  = engine \
+                         docs \
+                         README.md \
+                         STRUCTURE.md \
+                         CHANGELOG.md \
+                         CONTRIBUTING.md \
+                         RELEASING.md \
+                         tests/README.md
+USE_MDFILE_AS_MAINPAGE = README.md
+RECURSIVE              = YES
+FILE_PATTERNS          = *.h *.md
+EXCLUDE_PATTERNS       = */src/*
+FILTER_PATTERNS        = *.h="python3 tools/common/doxyfilter.py"
+
+# Show includes/paths as the caller writes them: #include "phx/<mod>/<hdr>.h".
+FULL_PATH_NAMES        = YES
+STRIP_FROM_PATH        = engine/anim/include \
+                         engine/audio/include \
+                         engine/core/include \
+                         engine/ecs/include \
+                         engine/input/include \
+                         engine/memory/include \
+                         engine/physics/include \
+                         engine/platform/include \
+                         engine/render/include \
+                         engine/resource/include \
+                         engine/runtime/include \
+                         engine/scene/include \
+                         engine/ui/include \
+                         .
+STRIP_FROM_INC_PATH    = engine/anim/include \
+                         engine/audio/include \
+                         engine/core/include \
+                         engine/ecs/include \
+                         engine/input/include \
+                         engine/memory/include \
+                         engine/physics/include \
+                         engine/platform/include \
+                         engine/render/include \
+                         engine/resource/include \
+                         engine/runtime/include \
+                         engine/scene/include \
+                         engine/ui/include
+
+# Everything public is API — the headers ARE the contract, documented or not.
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+JAVADOC_AUTOBRIEF      = YES
+BUILTIN_STL_SUPPORT    = YES
+SOURCE_BROWSER         = YES
+EXCLUDE_SYMBOLS        = PHX_*_H
+
+# Built-in diagrams only; graphviz is optional, not a dependency.
+HAVE_DOT               = NO

@@ -136,7 +136,7 @@ EngineCtx is the POD bag of non-owning pointers threaded into gameplay.
         │           incremental/reproducible rebakes — docs/08 §2/§9)
         ▼
    assets.phxp  ──(GBA: bin2o into ROM | PSP/PC: shipped alongside)──►  runtime
-        │ ResourceCache::mount  =  mmap (PC) / load-once (PSP) / ROM ptr (GBA)
+        │ ResourceCache::mount  =  heap load-once (PC) / linked-in EBOOT data (PSP) / ROM ptr (GBA)
         ▼
    zero-copy typed views (TextureView/TilemapView/SoundView/BlobView)
 ```
@@ -152,7 +152,7 @@ EngineCtx is the POD bag of non-owning pointers threaded into gameplay.
         ▼                         ▼                  ▼                    ▼
   src/sdl/*.cpp           src/{windows,linux}/   src/gba/*.cpp        src/psp/*.cpp
   (SDL2 window/GL/         (timer/paths)         (MMIO/DMA/IRQ/       (sceDisplay/
-   input/audio/mmap)                              ROM-mapped files)    sceCtrl/sceIo)
+   input/audio/file)                              ROM-mapped files)    sceCtrl/sceIo)
 
   Exactly one translation unit defines phx_platform_get(); no runtime branching.
 ```

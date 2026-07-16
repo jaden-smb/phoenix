@@ -1,5 +1,6 @@
 // phx/resource/cache.h — runtime resource access. Mounts a `.phxp` bundle through the
-// platform seam (mmap on PC, load-once on PSP, ROM pointer on GBA) and returns ZERO-COPY
+// platform seam (load-once heap image on PC, linked-in EBOOT data on PSP, ROM pointer
+// on GBA — no OS mmap anywhere, the seam contract is just a stable view) and returns ZERO-COPY
 // typed views into it — assets are never parsed at runtime, only pointer-cast. See
 // docs/06-resources.md. Depends only on core + memory + platform (no render dependency:
 // the caller turns a TextureView into a renderer texture, keeping layering clean).
