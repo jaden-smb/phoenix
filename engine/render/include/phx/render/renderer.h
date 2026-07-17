@@ -100,6 +100,10 @@ public:
     // All-integer Q16 math (like zoom), so both scalar tiers shift by the identical pixel.
     void      set_tilemap_parallax(TilemapId, uint8_t layer, scalar fx, scalar fy);
     void      draw_tilemap(TilemapId, uint8_t layer);
+    // Signal that a retained tilemap's cell indices were mutated in place since upload (the
+    // caller owns that buffer). The software backend reads it live so this is a no-op there;
+    // the GBA PPU re-streams the cached BG window. Enables a per-frame-rebuilt map (spectrogram).
+    void      refresh_tilemap(TilemapId);
 
     // Sprites: recorded, then sorted by (layer, z, tex) and drawn on top at end_frame.
     void      draw_sprite(const DrawSprite&);

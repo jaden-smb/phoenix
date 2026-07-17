@@ -88,6 +88,19 @@ int main() {
            && game.auto_flush_checked
            && game.auto_flush_ok;
 
+    // Regression soak: the loop's profiler clock reads must not leak time into the fixed-step
+    // accumulator. Uncompensated, the 1 µs-per-read ticks added +5 µs/frame, which crossed a
+    // whole extra step every ~3,334 frames — one phantom double-sim-step frame per minute (the
+    // occasional GBA stutter; same virtual-clock convention). Run past that boundary and
+    // require EXACTLY one fixed update per frame.
+    phx_null_set_max_frames(4000);
+    App soak_app(cfg);
+    CountGame soak;
+    int soak_rc = soak_app.run(&soak);
+    std::printf("soak results: rc=%d fixed=%d frames=%llu\n",
+                soak_rc, soak.fixed_updates, (unsigned long long)soak_app.frame());
+    ok = ok && soak_rc == 0 && soak.fixed_updates == 4000 && soak_app.frame() == 4000;
+
     std::printf(ok ? "SMOKE PASS\n\n" : "SMOKE FAIL\n\n");
     return ok ? 0 : 1;
 }

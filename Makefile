@@ -36,7 +36,9 @@ INCLUDES := -Iengine/core/include \
             -Itools/phxpack \
             -Itools/phxtmap \
             -Itools/common \
+            -Itools/phxviz \
             -Iexamples/platformer/src \
+            -Iexamples/miracle-player/src \
             -Itests
 
 TIER ?= pc
@@ -89,6 +91,8 @@ TEST_SRC   := tests/unit/main.cpp \
               tests/unit/test_json.cpp \
               tests/unit/test_wav.cpp \
               tests/unit/test_cmdqueue.cpp \
+              tests/unit/test_viz.cpp \
+              tests/unit/test_particles.cpp \
               tests/unit/test_version.cpp
 
 # The unit-test binary does not link the App/loop entry (no main collision).
@@ -185,6 +189,45 @@ PLATGL_SRC := $(filter-out engine/platform/src/null/null_platform.cpp \
                            engine/render/src/soft/soft_renderer.cpp,$(PLATAPP_SRC)) \
               engine/platform/src/sdl/sdl_platform.cpp \
               engine/render/src/gl/gl_backend.cpp
+
+# ---- miracle-player: the "A Small Miracle" GBA music visualizer ----------------------------
+# The song is a real MP3 in the repo root; decode it to a mono WAV on the host (ffmpeg) — the
+# bake reads that WAV (no MP3 decoder in-tree). If ffmpeg or the MP3 is missing, the bake falls
+# back to a short synthetic tone so the target still builds. The WAV is a build artifact.
+MIRACLE_WAV := $(BUILD)/miracle.wav
+$(MIRACLE_WAV):
+	@mkdir -p $(BUILD)
+	@if command -v ffmpeg >/dev/null 2>&1 && [ -f "A Small Miracle.mp3" ]; then \
+	   ffmpeg -v error -y -i "A Small Miracle.mp3" -ac 1 -ar 44100 $@ && echo "miracle: decoded song -> $@"; \
+	 else echo "miracle: ffmpeg or 'A Small Miracle.mp3' missing — bake will use the synthetic tone"; fi
+
+# Headless build (null platform) — proves the shipping entry compiles/links; loops on null so
+# it is not part of `check`. Uses the headless audio stand-in.
+MIRACLEAPP_SRC := $(APP_SRC) \
+                  engine/resource/src/cache.cpp \
+                  engine/audio/src/mixer.cpp \
+                  engine/audio/src/stream.cpp \
+                  examples/miracle-player/src/miracle.cpp \
+                  examples/miracle-player/src/main.cpp
+MIRACLEAPP_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(MIRACLEAPP_SRC))
+MIRACLEAPP     := $(BUILD)/miracle_headless
+
+# The SDL build: the REAL WINDOW (`make miracle`). Swaps the null backend for SDL + real audio.
+MIRACLESDL_SRC := $(filter-out engine/platform/src/null/null_platform.cpp \
+                               examples/miracle-player/src/main.cpp,$(MIRACLEAPP_SRC)) \
+                 engine/platform/src/sdl/sdl_platform.cpp \
+                 examples/miracle-player/src/desktop_main.cpp
+
+# The miracle suite binary (headless, deterministic): the visualizer under the real loop, with a
+# synthetic tone. Part of `check` and `determinism` (both scalar tiers must match byte-for-byte).
+MIRACLE_TEST_SRC := $(APP_SRC) \
+                    engine/resource/src/cache.cpp \
+                    engine/audio/src/mixer.cpp \
+                    engine/audio/src/stream.cpp \
+                    examples/miracle-player/src/miracle.cpp \
+                    tests/suites/miracle_test.cpp
+MIRACLE_TEST_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(MIRACLE_TEST_SRC))
+MIRACLE_TEST     := $(BUILD)/phx_miracle
 
 # The emberwing binary: the SECOND full-game capstone (examples/emberwing — the Cinder
 # Hollow vertical slice), driven headlessly by a scripted controller. Exercises everything
@@ -314,6 +357,7 @@ PHXSPRITE := $(BUILD)/phxsprite
 PHXTILE   := $(BUILD)/phxtile
 PHXSND    := $(BUILD)/phxsnd
 PHXBIN    := $(BUILD)/phxbin
+PHXVIZ    := $(BUILD)/phxviz     # WAV -> per-frame .phxviz visualization track (miracle-player)
 
 # The two-stage pipeline integration test (converters -> intermediates -> merge -> mount).
 PIPELINE_SRC := engine/core/src/assert.cpp \
@@ -351,16 +395,16 @@ GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/
             $(patsubst tests/suites/render_test.cpp,tests/suites/gu_test.cpp,$(RENDER_SRC)))
 GU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(GU_SRC))
 
-.PHONY: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
+.PHONY: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl miracle miracle-headless miracle-test gba-miracle-ppu size-gate-miracle sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
 
 # Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstones + audio + resource + dep gate.
-check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu audio texcache png sprite tiled resource phxpack pipeline tools depcheck
+check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu miracle-test audio texcache png sprite tiled resource phxpack pipeline tools depcheck
 
 # --- M7 release gates --------------------------------------------------------------------------
 # Determinism gate: the SAME suites under scalar=float (pc) and scalar=fixed16 (gba_sim) must
 # print identical outcomes AND render the byte-identical frame. Cheap to run: the per-tier
 # object dirs mean the second tier is mostly relinks. This is a named release gate (docs/09 §5).
-DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu
+DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu miracle-test
 determinism:
 	@echo "determinism gate: pc (scalar=float) vs gba_sim (scalar=fixed16)"
 	@$(MAKE) -s $(DET_SUITES) TIER=pc      | grep -aE "PASS|FAIL" > $(BUILD)/det-pc.log
@@ -425,6 +469,9 @@ ui: $(UI)
 platformer: $(PLATFORMER)
 	@./$(PLATFORMER)
 
+miracle-test: $(MIRACLE_TEST)
+	@./$(MIRACLE_TEST)
+
 emberwing: $(EMBERWING)
 	@./$(EMBERWING)
 
@@ -454,6 +501,20 @@ sdl:
 	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
 	  $(PLATSDL_SRC) `sdl2-config --libs` -o $(BUILD)/platformer_sdl
 	@echo "built $(BUILD)/platformer_sdl  —  run ./$(BUILD)/platformer_sdl to play (arrows/WASD, Z=jump, Enter=start)"
+
+# The "A Small Miracle" music visualizer in a real SDL window (software renderer + real audio).
+# START=play/pause, A=style, B=chrome, SELECT=profiler. Decodes the song to WAV first (ffmpeg).
+miracle: $(MIRACLE_WAV)
+	@command -v sdl2-config >/dev/null 2>&1 || { echo "miracle needs SDL2 (sdl2-config not found). Install libsdl2-dev."; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
+	  $(MIRACLESDL_SRC) `sdl2-config --libs` -o $(BUILD)/miracle
+	@echo "built $(BUILD)/miracle  —  run ./$(BUILD)/miracle (START=play/pause, A=style, B=chrome)"
+
+# Headless build of the same app (null platform + audio stand-in): compiles the shipping entry
+# and, with PHX_MAX_FRAMES=N, gives a bounded smoke run. Not part of `check` (loops on null).
+miracle-headless: $(MIRACLE_WAV) $(MIRACLEAPP)
+	@echo "built $(MIRACLEAPP)  —  PHX_MAX_FRAMES=N ./$(MIRACLEAPP) for a bounded run"
 
 # Build the windowed GPU (OpenGL) example. Needs SDL2 + libGL.
 gl:
@@ -643,6 +704,21 @@ GBA_EW_PPU_SRC := $(filter-out engine/render/src/soft/soft_renderer.cpp \
                   engine/render/src/gba/gba_ppu.cpp examples/emberwing/src/gba_ppu_main.cpp
 GBA_EW_PPU_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GBA_EW_PPU_SRC))
 
+# The "A Small Miracle" music visualizer as the SHIPPING GBA ROM (native PPU). Engine set like the
+# emberwing PPU ROM + the audio STREAM producer (stream.cpp), the miracle logic TU, and the GBA
+# PPU entry. The spectrogram is a BG tilemap; particles are OBJ sparks; audio is the resident
+# tier-0 song streamed at 18157 Hz. The ~10 MB song lives in cartridge ROM (read zero-copy).
+GBA_MIRACLE_PPU_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
+                engine/memory/src/memory_root.cpp engine/ecs/src/world.cpp \
+                engine/render/src/renderer.cpp engine/render/src/gba/gba_ppu.cpp \
+                engine/physics/src/physics.cpp engine/anim/src/anim.cpp \
+                engine/scene/src/scene.cpp engine/ui/src/ui.cpp engine/runtime/src/app.cpp \
+                engine/resource/src/cache.cpp engine/audio/src/mixer.cpp engine/audio/src/stream.cpp \
+                engine/platform/src/gba/gba_platform.cpp \
+                examples/miracle-player/src/miracle.cpp examples/miracle-player/src/gba_ppu_main.cpp
+GBA_MIRACLE_PPU_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GBA_MIRACLE_PPU_SRC))
+MIRACLEBAKE := $(BUILD)/miraclebake
+
 gba: $(BUILD)/gba/phx-smoke.gba
 	@echo "built $<  —  load in mGBA (d-pad moves the sprite)"
 
@@ -669,6 +745,19 @@ gba-emberwing: $(BUILD)/gba/phx-emberwing.gba
 # Emberwing on the PPU hardware backend — the GBA build to actually play.
 gba-emberwing-ppu: $(BUILD)/gba/phx-emberwing-ppu.gba
 	@echo "built $<  —  native PPU (Mode-0 BGs + OBJ); load in mGBA (arrows move, A/X jump, Start = pause)"
+
+# The "A Small Miracle" music visualizer as a native-PPU GBA ROM (the shipping miracle build).
+gba-miracle-ppu: $(BUILD)/gba/phx-miracle-ppu.gba
+	@echo "built $<  —  music visualizer on the GBA PPU; load in mGBA (START play/pause, L/R seek, A style, B chrome)"
+
+# Size gate for the miracle ROM: the song is legitimately ~10 MB of PCM in cartridge ROM, so the
+# ROM budget is raised to 16 MB (still half the 32 MB cart cap); the scarce RAM budgets are unchanged.
+size-gate-miracle: $(BUILD)/gba/phx-miracle-ppu.gba
+	@python3 tools/common/size_gate.py \
+	  --rom $(BUILD)/gba/phx-miracle-ppu.gba \
+	  --elf $(BUILD)/gba/miracle-ppu.elf \
+	  --rom-budget-mb 16 \
+	  --size-tool $(DEVKITARM)/bin/arm-none-eabi-size
 
 # Enforce the GBA budget (docs/09 MVP gate): classify the ELF's static sections into IWRAM/EWRAM
 # and check the ROM file size, failing if any budget is exceeded. Builds the shippable PPU ROM.
@@ -737,6 +826,27 @@ $(BUILD)/gba/phx-emberwing.gba: $(GBA_EW_OBJ) $(BUILD)/gba/ew_bundle.o
 $(BUILD)/gba/phx-emberwing-ppu.gba: $(GBA_EW_PPU_OBJ) $(BUILD)/gba/ew_bundle.o
 	$(GBA_CXX) $(GBA_FLAGS) -specs=gba.specs $^ -o $(BUILD)/gba/emberwing-ppu.elf
 	$(GBA_OBJCOPY) -O binary $(BUILD)/gba/emberwing-ppu.elf $@
+	$(GBA_FIX) $@ >/dev/null
+	@echo "ROM: $@ ($$(stat -c%s $@) bytes, header fixed)"
+
+# host tool that bakes the miracle .phxp (tier 0: 18157 Hz audio + viz baked at that rate)
+$(MIRACLEBAKE): $(HOSTOBJ)/examples/miracle-player/src/bake_main.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+$(BUILD)/gba/miracle.phxp: $(MIRACLEBAKE) $(MIRACLE_WAV)
+	@mkdir -p $(dir $@)
+	./$(MIRACLEBAKE) $@ 0 $(MIRACLE_WAV)   # tier 0: resample the song to the GBA device rate
+
+# bin2s: the bundle bytes -> a .rodata object (symbol miracle_phxp[]), lives in cartridge ROM
+$(BUILD)/gba/miracle_bundle.o: $(BUILD)/gba/miracle.phxp
+	@command -v $(BIN2S) >/dev/null 2>&1 || { echo "needs devkitPro bin2s ($(BIN2S))"; exit 1; }
+	$(BIN2S) $< > $(BUILD)/gba/miracle_bundle.s
+	$(GBA_CXX) $(GBA_ARCH) -x assembler-with-cpp -c $(BUILD)/gba/miracle_bundle.s -o $@
+
+$(BUILD)/gba/phx-miracle-ppu.gba: $(GBA_MIRACLE_PPU_OBJ) $(BUILD)/gba/miracle_bundle.o
+	$(GBA_CXX) $(GBA_FLAGS) -specs=gba.specs $^ -o $(BUILD)/gba/miracle-ppu.elf
+	$(GBA_OBJCOPY) -O binary $(BUILD)/gba/miracle-ppu.elf $@
 	$(GBA_FIX) $@ >/dev/null
 	@echo "ROM: $@ ($$(stat -c%s $@) bytes, header fixed)"
 
@@ -1007,13 +1117,14 @@ pipeline: $(PIPELINE)
 # proving the executables parse args, link, and produce a valid merged bundle.
 # fixture INPUTS (build/p_*) live at literal build/ — pipeline_test hardcodes that path,
 # so it holds even when a wrapper target overrides $(BUILD) (e.g. `sanitize`).
-tools: pipeline $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXPACK)
+tools: pipeline $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXVIZ) $(PHXPACK)
 	@./$(PHXSPRITE) --out $(BUILD)/c_hero.phxspr  --name hero  build/p_hero.sprdef
 	@./$(PHXTILE)   --out $(BUILD)/c_level.phxtmap --name level build/p_level.tmj
 	@./$(PHXSND)    --out $(BUILD)/c_tone.phxsnd   --name tone  build/p_tone.wav
+	@./$(PHXVIZ)    --out $(BUILD)/c_tone.phxviz   --name toneviz --rate 18157 build/p_tone.wav
 	@./$(PHXBIN)    --out $(BUILD)/c_items.phxbin  --name items --header $(BUILD)/c_items.gen.h build/p_items.json
-	@./$(PHXPACK)   --out $(BUILD)/c_assets.phxp $(BUILD)/c_hero.phxspr $(BUILD)/c_level.phxtmap $(BUILD)/c_tone.phxsnd $(BUILD)/c_items.phxbin
-	@head -c4 $(BUILD)/c_assets.phxp | grep -q PHXP && echo "TOOLS PASS (4 converters -> merged bundle)" || (echo "TOOLS FAIL"; exit 1)
+	@./$(PHXPACK)   --out $(BUILD)/c_assets.phxp $(BUILD)/c_hero.phxspr $(BUILD)/c_level.phxtmap $(BUILD)/c_tone.phxsnd $(BUILD)/c_tone.phxviz $(BUILD)/c_items.phxbin
+	@head -c4 $(BUILD)/c_assets.phxp | grep -q PHXP && echo "TOOLS PASS (5 converters -> merged bundle)" || (echo "TOOLS FAIL"; exit 1)
 
 # --- release packaging (`make dist*`) --------------------------------------------------------
 # Stages per-target release bundles under build/dist/ and archives them, named
@@ -1138,6 +1249,14 @@ $(PLATAPP): $(PLATAPP_OBJ)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(PLATAPP_OBJ) -o $@
 
+$(MIRACLEAPP): $(MIRACLEAPP_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(MIRACLEAPP_OBJ) -o $@
+
+$(MIRACLE_TEST): $(MIRACLE_TEST_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(MIRACLE_TEST_OBJ) -o $@
+
 $(EMBERWING): $(EMBERWING_OBJ)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(EMBERWING_OBJ) -o $@
@@ -1176,7 +1295,8 @@ $(TILED): $(TILED_OBJ)
 
 PHXPACK_HDRS := tools/phxpack/bundle_writer.h tools/phxpack/bundle_reader.h tools/phxpack/builders.h \
                 tools/phxpack/png.h tools/phxpack/tiled.h tools/phxpack/wav.h tools/phxpack/json.h \
-                tools/phxpack/tex_encode.h tools/phxpack/lock.h
+                tools/phxpack/tex_encode.h tools/phxpack/lock.h \
+                tools/phxviz/analyze.h examples/miracle-player/src/viz.h
 
 $(PHXPACK): tools/phxpack/main.cpp $(PHXPACK_HDRS)
 	@mkdir -p $(dir $@)
@@ -1197,6 +1317,10 @@ $(PHXSND): tools/phxsnd/main.cpp $(PHXPACK_HDRS)
 $(PHXBIN): tools/phxbin/main.cpp $(PHXPACK_HDRS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) tools/phxbin/main.cpp -o $@
+
+$(PHXVIZ): tools/phxviz/main.cpp $(PHXPACK_HDRS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) tools/phxviz/main.cpp -o $@
 
 $(PIPELINE): $(PIPELINE_OBJ)
 	@mkdir -p $(dir $@)

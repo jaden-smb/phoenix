@@ -70,6 +70,7 @@ add_subdirectory(engine/runtime)
 
 # ---- the example games -----------------------------------------------------
 add_subdirectory(examples/platformer)
+add_subdirectory(examples/miracle-player)
 add_subdirectory(examples/emberwing)
 
 # ---- host-only tools (always built for the host, even when cross-compiling) -
@@ -84,6 +85,7 @@ if(NOT CMAKE_CROSSCOMPILING)
   add_subdirectory(tools/phxtile)     # Tiled .tmj      -> .phxtmap
   add_subdirectory(tools/phxsnd)      # WAV             -> .phxsnd
   add_subdirectory(tools/phxbin)      # JSON            -> .phxbin (+ .gen.h)
+  add_subdirectory(tools/phxviz)      # WAV             -> .phxviz (visualization track)
   enable_testing()
   add_subdirectory(tests)
 endif()
@@ -106,7 +108,7 @@ if(NOT CMAKE_CROSSCOMPILING)
     install(DIRECTORY engine/${_m}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
   endforeach()
 
-  install(TARGETS phxpack phxsprite phxtile phxsnd phxbin
+  install(TARGETS phxpack phxsprite phxtile phxsnd phxbin phxviz
           RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
   # find_package(phoenix CONFIG) support: import the libs as phoenix::phx_<module>.

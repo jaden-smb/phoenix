@@ -11,6 +11,7 @@
 #include "tiled.h"
 #include "wav.h"
 #include "json.h"
+#include "analyze.h"       // tools/phxviz — offline visualization-track analysis (build_viz)
 
 #include <cctype>
 #include <cstdint>
@@ -175,6 +176,27 @@ inline bool build_wav(BundleWriter& w, const std::string& in, const std::string&
     w.add_sound(nm, mono.data(), uint32_t(mono.size()), rate);
     std::printf("  + sound   %-12s %u frames @ %u Hz  (%s, WAV)\n",
                 nm.c_str(), unsigned(mono.size()), rate, in.c_str());
+    return true;
+}
+
+// ---- visualization track: WAV -> per-video-frame .phxviz analysis blob ----
+// Analyses the song offline (FFT bands / RMS / onset) at the target's audio device rate and
+// stores the result as a generic Blob asset the ROM reads zero-copy (examples/miracle-player).
+// device_rate defaults to the GBA vblank-locked rate so the baked stream lines up with the
+// tier-0 resampled audio; pass the host mixer rate for a PC bundle.
+inline bool build_viz(BundleWriter& w, const std::string& in, const std::string& name = "",
+                      uint32_t device_rate = 18157) {
+    std::vector<uint8_t> bytes;
+    if (!read_file(in, bytes)) { std::fprintf(stderr, "phx: cannot read '%s'\n", in.c_str()); return false; }
+    std::vector<int16_t> mono; uint32_t rate = 0;
+    if (!wav_decode(bytes.data(), bytes.size(), mono, rate)) {
+        std::fprintf(stderr, "phx: bad/unsupported WAV '%s'\n", in.c_str()); return false; }
+    const std::string nm = name.empty() ? stem(in) : name;
+    std::vector<uint8_t> blob = phxviz::analyze_pcm(mono.data(), uint32_t(mono.size()), rate, device_rate);
+    const auto* h = reinterpret_cast<const miracle::VizHeader*>(blob.data());
+    w.add_blob(nm, blob.data(), uint32_t(blob.size()));
+    std::printf("  + viz     %-12s %u frames @ %u Hz  (%s)\n",
+                nm.c_str(), unsigned(h->frame_count), device_rate, in.c_str());
     return true;
 }
 

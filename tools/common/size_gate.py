@@ -53,7 +53,13 @@ def main():
     ap.add_argument("--rom", required=True)
     ap.add_argument("--elf", required=True)
     ap.add_argument("--size-tool", default="arm-none-eabi-size")
+    # A ROM that legitimately links a large baked asset (e.g. the miracle-player song, ~10 MB of
+    # PCM in cartridge ROM) overrides the default 1 MB code/asset-bloat budget. The RAM budgets
+    # (which protect the scarce on-chip memory) are NOT overridable — they still apply.
+    ap.add_argument("--rom-budget-mb", type=float, default=None,
+                    help="override the ROM cartridge budget in MB (default 1 MB); RAM budgets unchanged")
     args = ap.parse_args()
+    rom_budget = int(args.rom_budget_mb * 1024 * 1024) if args.rom_budget_mb else ROM_BUDGET
 
     try:
         with open(args.rom, "rb") as f:
@@ -75,7 +81,7 @@ def main():
         return 1
 
     checks = [
-        ("ROM (cartridge)", rom_bytes, ROM_BUDGET),
+        ("ROM (cartridge)", rom_bytes, rom_budget),
         ("IWRAM static (.data/.bss)", iwram, IWRAM_BUDGET),
         ("EWRAM static", ewram, EWRAM_STATIC_BUDGET),
     ]

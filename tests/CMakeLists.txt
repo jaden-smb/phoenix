@@ -10,6 +10,9 @@
 
 set(_phxpack_inc ${CMAKE_SOURCE_DIR}/tools/phxpack)
 set(_render_src  ${CMAKE_SOURCE_DIR}/engine/render/src)
+# builders.h -> analyze.h (tools/phxviz) -> viz.h (examples/miracle-player): the bake path is
+# shared, so anything including builders.h (or the viz format directly) needs these on its path.
+set(_viz_inc ${CMAKE_SOURCE_DIR}/tools/phxviz ${CMAKE_SOURCE_DIR}/examples/miracle-player/src)
 
 # Several integration tests bake a bundle to "build/<name>.phxp" (a path relative to the cwd)
 # and mount it back. Run every test from the CMake build tree and give it that "build/" subdir,
@@ -24,9 +27,11 @@ add_executable(phx_tests
   unit/test_input.cpp unit/test_physics.cpp unit/test_anim.cpp unit/test_scene.cpp
   unit/test_ui.cpp unit/test_audio.cpp unit/test_stream.cpp unit/test_lz.cpp
   unit/test_png.cpp unit/test_json.cpp unit/test_wav.cpp unit/test_cmdqueue.cpp
+  unit/test_viz.cpp
+  unit/test_particles.cpp
   unit/test_version.cpp
 )
-target_include_directories(phx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${_phxpack_inc})
+target_include_directories(phx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${_phxpack_inc} ${_viz_inc})
 target_link_libraries(phx_tests PRIVATE
   phx_core phx_memory phx_ecs phx_physics phx_anim phx_scene phx_audio phx_input
   phx_ui phx_resource)
@@ -51,6 +56,7 @@ set(_itests
   ui:ui_test
   platformer:platformer_test
   emberwing:emberwing_test
+  miracle:miracle_test
   audio:audio_test
   texcache:texcache_test
   png:png_test
@@ -67,6 +73,7 @@ foreach(spec ${_itests})
   target_include_directories(it_${tname} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${_phxpack_inc}
+    ${_viz_inc}                                     # builders.h -> analyze.h -> viz.h
     ${CMAKE_SOURCE_DIR}/tools/common                # bake.h -> debug_font.h
     ${CMAKE_SOURCE_DIR}/tools/phxtmap               # pipeline_test: the phxtmap editor model
     ${CMAKE_SOURCE_DIR}/examples/platformer/src)   # platformer_test: components.h / bake.h
@@ -87,6 +94,12 @@ target_sources(it_emberwing PRIVATE
   ${CMAKE_SOURCE_DIR}/examples/emberwing/src/systems.cpp
   ${CMAKE_SOURCE_DIR}/examples/emberwing/src/scenes.cpp)
 target_include_directories(it_emberwing PRIVATE ${CMAKE_SOURCE_DIR}/engine/resource/include)
+
+# The miracle visualizer test drives the real MiracleGame, so compile in its logic TU (the rest
+# of the example is header-only) and put the example + viz/tool headers on its include path.
+target_sources(it_miracle PRIVATE ${CMAKE_SOURCE_DIR}/examples/miracle-player/src/miracle.cpp)
+target_include_directories(it_miracle PRIVATE
+  ${CMAKE_SOURCE_DIR}/examples/miracle-player/src ${CMAKE_SOURCE_DIR}/engine/resource/include)
 
 # pipeline_test is in-process; it also drops author-source fixtures into build/. The CLI smoke
 # below then runs the REAL converter + assembler binaries over those fixtures (proving the

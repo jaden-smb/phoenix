@@ -5,7 +5,7 @@
 //         *.sprdef    -> Texture+Sprite          *.wav -> Sound
 //   (b) pre-baked INTERMEDIATE files emitted by the per-format converters
 //       (phxsprite/phxtile/phxsnd/phxbin) — each is itself a one-source bundle, MERGED in:
-//         *.phxspr  *.phxtmap  *.phxsnd  *.phxbin  *.phxp
+//         *.phxspr  *.phxtmap  *.phxsnd  *.phxbin  *.phxviz  *.phxp
 // This is the two-stage pipeline of docs/08: converters -> intermediates -> phxpack -> bundle.
 // Both paths share one bake implementation (builders.h), so output is identical either way.
 //
@@ -39,7 +39,7 @@ namespace {
 bool is_intermediate(const std::string& s) {
     return phxtool::ends_with(s, ".phxspr") || phxtool::ends_with(s, ".phxtmap") ||
            phxtool::ends_with(s, ".phxsnd") || phxtool::ends_with(s, ".phxbin")  ||
-           phxtool::ends_with(s, ".phxp");
+           phxtool::ends_with(s, ".phxviz") || phxtool::ends_with(s, ".phxp");
 }
 
 // Merge a pre-baked converter bundle into the assembler's output (names already hashed).
@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
             std::printf("usage: phxpack --out FILE [--target 0|1|2] [--compress] [--manifest] [--full] <inputs...>\n"
                         "       phxpack --upgrade FILE.phxp [--target 0|1|2] [--compress]\n"
                         "  sources:       .png .ppm .tmcsv .tmj .wav .sprdef\n"
-                        "  intermediates: .phxspr .phxtmap .phxsnd .phxbin .phxp  (merged)\n"
+                        "  intermediates: .phxspr .phxtmap .phxsnd .phxbin .phxviz .phxp  (merged)\n"
                         "  sidecars:      FILE.lock (always; drives incremental rebakes),\n"
                         "                 FILE.manifest.txt (--manifest; hash <-> name <-> source)\n");
             return 0;

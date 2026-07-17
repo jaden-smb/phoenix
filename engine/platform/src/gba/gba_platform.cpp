@@ -74,8 +74,13 @@ GbaGfx   g_gfx = { { nullptr, 0, 0 } };
 // times per frame (accumulator + four profiler stamps), and per-read stepping made the
 // accumulator see ~83 ms/frame — saturating the spiral-of-death clamp at 5 fixed updates
 // EVERY frame, ~5× the sim cost on a 16.78 MHz ARM7 (the "Emberwing runs slow" bug).
-uint64_t g_step_ns = 1000000000ull / 60;
-uint64_t g_vtime   = 0;
+// The read ticks are COMPENSATED at pump time: pump_events() advances step minus the ticks
+// accrued since the last pump, so the accumulator sees exactly one step per frame. Without
+// this, the 5 reads/frame leaked +5 µs/frame into the accumulator, which crossed a whole
+// step every ~3,334 frames — a double-sim-step frame (visible hitch) about once a minute.
+uint64_t g_step_ns    = 1000000000ull / 60;
+uint64_t g_vtime      = 0;
+uint64_t g_read_ticks = 0;                 // ticks accrued since the last pump (see above)
 constexpr uint64_t kCallTickNs = 1000;     // 1 µs per clock read (see above)
 
 const void* g_bundle      = nullptr;     // ROM-embedded asset bundle (no FS on GBA)
@@ -175,17 +180,28 @@ int gba_init(const phx_platform_desc* desc) {
     g_gfx.fb.pixels = static_cast<uint32_t*>(malloc(size_t(w) * size_t(h) * sizeof(uint32_t)));
     if (!g_gfx.fb.pixels) return 1;
     REG_DISPCNT = kMode3 | kBg2On;
-    g_vtime = 0;
+    g_vtime = 0; g_read_ticks = 0;
     return 0;
 }
 void gba_shutdown(void) { free(g_gfx.fb.pixels); g_gfx.fb.pixels = nullptr; }
 
-uint64_t gba_clock_ns(void) { uint64_t t = g_vtime; g_vtime += kCallTickNs; return t; }
+uint64_t gba_clock_ns(void) {
+    uint64_t t = g_vtime;
+    g_vtime += kCallTickNs; g_read_ticks += kCallTickNs;
+    return t;
+}
 void     gba_sleep_ns(uint64_t) {}
 
 // A console runs until power-off; one sim step per frame (frame pacing itself comes from
-// present()'s vblank_wait — this just keeps the accumulator fed at exactly 60 Hz).
-int  gba_pump_events(void) { g_vtime += g_step_ns; return 1; }
+// present()'s vblank_wait — this just keeps the accumulator fed at exactly 60 Hz). The
+// step is reduced by the read ticks already issued, so net time per frame is exactly one
+// step (clamped so time always moves forward even under absurdly many reads).
+int  gba_pump_events(void) {
+    uint64_t adj = g_read_ticks < g_step_ns ? g_read_ticks : g_step_ns - 1;
+    g_vtime += g_step_ns - adj;
+    g_read_ticks = 0;
+    return 1;
+}
 
 // Convert the RGBA8 backbuffer to BGR555 and blit to Mode 3 VRAM, integer-scaled + centered.
 // The body lives in gba_present_hot (IWRAM/ARM, defined at the BOTTOM of this namespace):

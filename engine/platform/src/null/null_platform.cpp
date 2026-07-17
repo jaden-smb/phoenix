@@ -20,11 +20,15 @@ NullGfx g_gfx = { { nullptr, 0, 0 } };
 // Virtual clock: pump_events() (once per frame) advances time by one sim step — exactly
 // one fixed step per frame no matter how many times the loop reads the clock (the frame
 // profiler adds four reads per frame). Each clock_ns() call additionally ticks 1 µs so
-// intra-frame phase deltas stay visible and strictly ordered; that drift (~5 µs per
-// 16667 µs frame) is far below one sim step over any bounded test run. Deterministic.
+// intra-frame phase deltas stay visible and strictly ordered — and pump_events() then
+// SUBTRACTS the ticks accrued since the last pump from its step advance, so net time per
+// frame is exactly one step. (Uncompensated, the 5 reads/frame leaked +5 µs/frame into the
+// accumulator: an extra phantom sim step every ~3,334 frames — a real stutter on GBA, and
+// a broken exact-step assertion in any null-backend run that long.) Deterministic.
 // Configurable via phx_null_set_step_ns() for tests.
-uint64_t g_step_ns = 1000000000ull / 60;   // default ~60 Hz
-uint64_t g_vtime   = 0;
+uint64_t g_step_ns    = 1000000000ull / 60;   // default ~60 Hz
+uint64_t g_vtime      = 0;
+uint64_t g_read_ticks = 0;                 // ticks accrued since the last pump (see above)
 constexpr uint64_t kCallTickNs = 1000;     // 1 µs per clock read (see above)
 
 // Optional frame budget: pump_events returns 0 (quit) after N frames. 0 = run forever.
@@ -39,7 +43,7 @@ const uint32_t* g_btn_script   = nullptr;
 uint32_t        g_btn_script_n = 0;
 
 int null_init(const phx_platform_desc* desc) {
-    g_vtime = 0; g_frames = 0;
+    g_vtime = 0; g_read_ticks = 0; g_frames = 0;
     int w = desc->width  > 0 ? desc->width  : 240;
     int h = desc->height > 0 ? desc->height : 160;
     g_gfx.fb.w = w; g_gfx.fb.h = h;
@@ -53,13 +57,21 @@ void     null_shutdown(void) {
     std::free(g_gfx.fb.pixels);
     g_gfx.fb.pixels = nullptr; g_gfx.fb.w = g_gfx.fb.h = 0;
 }
-uint64_t null_clock_ns(void) { uint64_t t = g_vtime; g_vtime += kCallTickNs; return t; }
+uint64_t null_clock_ns(void) {
+    uint64_t t = g_vtime;
+    g_vtime += kCallTickNs; g_read_ticks += kCallTickNs;
+    return t;
+}
 void     null_sleep_ns(uint64_t) {}
 
 int  null_pump_events(void) {
     if (g_max_frames && g_frames >= g_max_frames) return 0;   // request quit
     ++g_frames;
-    g_vtime += g_step_ns;                                     // one sim step per frame
+    // One sim step per frame NET: compensate the read ticks issued since the last pump
+    // (clamped so time always moves forward even under absurdly many reads per frame).
+    uint64_t adj = g_read_ticks < g_step_ns ? g_read_ticks : g_step_ns - 1;
+    g_vtime += g_step_ns - adj;
+    g_read_ticks = 0;
     return 1;
 }
 void null_present(void) {}

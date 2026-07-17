@@ -1,0 +1,249 @@
+================================================================================
+BUILD PROMPT — "A Small Miracle" GBA Music-Visualizer ROM (Phoenix engine)
+================================================================================
+
+ROLE
+You are a senior C++17 engine engineer working inside the Phoenix (`phx`) 2D/2.5D
+retro game engine. Build a single-purpose Game Boy Advance ROM that plays ONE
+baked-in song and renders a reactive, music-driven visualizer around it: a
+scrolling spectrogram, a particle system that pulses with the audio, palette /
+background reactivity, and a minimal transport UI (play/pause, seek, elapsed
+time, track title). The ROM must build with the existing Makefile/CMake cross
+targets and must NOT break any engine rule (layering, tiers, determinism, zero
+warnings).
+
+Read these first and obey them literally:
+  - CLAUDE.md               (build/test gates, tiers, layering, conventions)
+  - README.md, STRUCTURE.md
+  - docs/00-architecture.md, docs/06-audio*, docs/08-pipeline*, docs/10-gameplay-systems*
+  - engine/audio/include/phx/audio/{mixer.h,stream.h,command_queue.h}
+  - engine/platform/src/gba/gba_platform.cpp   (DirectSound DMA/FIFO audio path)
+  - tools/phxpack/builders.h and the phxsnd / phxpack tools (asset bake path)
+  - examples/platformer/                        (reference for a full engine-only app)
+
+--------------------------------------------------------------------------------
+SOURCE ASSET (already in the repo root)
+--------------------------------------------------------------------------------
+File:      "A Small Miracle.mp3"
+Container: MP3, 44100 Hz, STEREO, ~129 kbps CBR
+Duration:  262.711 s (4:22), file size 4.24 MB
+Title to display: "A Small Miracle (Instrumental)"
+
+--------------------------------------------------------------------------------
+NON-NEGOTIABLE HARDWARE REALITY — READ BEFORE DESIGNING
+--------------------------------------------------------------------------------
+The GBA is an ARM7TDMI @ 16.78 MHz, NO FPU, NO cache, 256 KB wait-stated EWRAM +
+32 KB IWRAM, NO filesystem. This dictates the whole design:
+
+1. DO NOT decode MP3 on the GBA at runtime. Real-time MP3 decode is infeasible on
+   this CPU and its whole value (quality + compression) is wasted on the GBA audio
+   DAC anyway. MP3 is a HOST-SIDE, BAKE-TIME input format ONLY.
+
+2. The GBA audio output path (see gba_platform.cpp) is 8-bit signed mono PCM,
+   streamed via DMA1 into FIFO A, clocked by Timer0, pumped from the VBLANK
+   interrupt at a VBLANK-LOCKED rate. Use the existing locked rate 18157 Hz
+   (924 cycles/sample -> exactly 304 samples/frame). All baked audio for the GBA
+   target MUST be resampled to this device rate at bake time (the tier-0 phxsnd
+   path already resamples SFX to the GBA device rate — reuse that path).
+
+3. NO filesystem on GBA. The song is BAKED INTO THE ROM: transcode MP3 -> device
+   PCM/ADPCM at bake time, pack into the `.phxp` bundle, and link the bundle into
+   the ROM with bin2s (same mechanism gba-platformer uses). Read zero-copy in
+   place from the resident image.
+
+4. Codec on GBA: transcode to IMA-ADPCM (~4:1, trivial ARM7 decode) so the whole
+   4:22 track fits comfortably. Budget check: 18157 Hz * 1 byte * 262.71 s ≈ 4.77 MB
+   raw 8-bit mono; IMA-ADPCM ≈ ~1.2 MB. Both fit the 32 MB ROM cap; ADPCM is the
+   default. Raw 8-bit PCM is an acceptable fallback if ADPCM decode complicates
+   the streaming producer. Decode runs on the low-priority streaming producer
+   (AudioStream::pump), NOT on the VBLANK audio callback (the callback only sums
+   already-device-rate samples via AudioMixer::mix()).
+
+5. STREAMING: stream.h notes "On GBA (one core, no FS) nothing streams" today. You
+   MUST wire a GBA streaming producer: pump AudioStream from the main loop / a
+   resource tick (between frames, off the audio IRQ) so the ADPCM ring stays ahead
+   of the DMA read cursor. Size the ring as a power-of-two and prove it never
+   underruns at 18157 Hz with the per-frame pump cadence.
+
+--------------------------------------------------------------------------------
+THE KEY IDEA — PRECOMPUTED "VISUALIZATION TRACK" (bake the DSP offline)
+--------------------------------------------------------------------------------
+Do NOT run FFTs on the GBA at runtime. Instead, at BAKE TIME (host tool, STL
+allowed), analyze the song and emit a compact per-frame visualization stream that
+the ROM reads zero-copy, one record per video frame, perfectly aligned to the
+audio timeline. This matches Phoenix's "bake offline, read in place" philosophy
+and keeps the on-device CPU free for particles + rendering.
+
+Bake-time analysis (new host tool, e.g. `tools/phxviz/` OR an extension to phxsnd):
+  - Decode the MP3 (host-only; use a vendored/permitted decoder or pre-decode to
+    WAV as an intermediate — keep engine code MP3-free).
+  - Resample to the GBA device rate and downmix to mono for the audio blob.
+  - From the analysis signal, produce, per VIDEO FRAME (60 Hz, i.e. 262.71*60 ≈
+    15763 frames):
+        * N-band spectrum via a short fixed/float FFT (N = 16 or 32 log-spaced
+          bands), quantized to uint8 per band  -> the spectrogram + bars.
+        * Overall RMS / loudness envelope (uint8).
+        * A beat/onset flag + onset strength (uint8) via spectral-flux peak pick.
+        * Optional low/mid/high band energies (uint8 x3) for particle routing.
+  - Frame count MUST match the audio length so playback position -> viz index is a
+    pure integer map (position_samples * 60 / device_rate). Determinism: the whole
+    on-device viz is a table lookup — identical on both scalar tiers, byte-for-byte.
+
+Emit this as a new bundle asset kind (e.g. `.phxviz`) via a phxpack builder in
+tools/phxpack/builders.h. Keep records fixed-size and 4-byte aligned for zero-copy.
+
+--------------------------------------------------------------------------------
+RUNTIME APP (engine-only; dogfood the App loop like examples/platformer)
+--------------------------------------------------------------------------------
+Location: examples/miracle-player/  (per the examples/ convention — do NOT add a
+new top-level dir). Structure it like the platformer: gameplay/app code uses ONLY
+engine systems, no platform/OS/SDK headers, no `#ifdef PLATFORM`.
+
+Fixed-step App loop each frame:
+  1. Advance playback position from the mixer/stream read cursor (single source of
+     truth — derive the viz index from actual samples consumed, so audio and video
+     never drift).
+  2. Look up the current viz record (spectrum bands, RMS, onset).
+  3. Update visuals from that record (see below).
+  4. Submit render intents through the single 2D render API (sprites / tilemaps /
+     parallax / palette / zoom / shake) so it compiles to GBA PPU. The SOFTWARE
+     backend is the golden reference — verify against it on host first.
+
+Visual elements (all driven by the viz record; keep within GBA PPU budgets — Mode 0
+tiles + OAM, or Mode 4 paletted framebuffer if a per-pixel spectrogram is cleaner):
+  A. SPECTROGRAM: a scrolling 2D time-frequency display. Either
+       (i) a column that scrolls left each frame, newest spectrum on the right
+           (Mode 4 paletted, one column blit/frame — cheap), OR
+       (ii) N vertical bars (Mode 0 tiles/sprites) whose heights = band energies.
+     Provide both as a build/config toggle if time allows; bars are the safer MVP.
+  B. PARTICLES: a fixed-capacity pool (NO hot-path heap alloc — use the engine
+     arena/pool allocators). Spawn bursts on onset flags; spawn rate/velocity from
+     low/mid/high band energies; color from palette. Cap the count to stay within
+     OAM (≤128 sprites) or draw as points in the Mode 4 buffer.
+  C. PALETTE / BACKGROUND REACTIVITY: modulate a background gradient or palette
+     rotation from RMS + bass energy (use the engine's palette + parallax/zoom/shake
+     intents; a subtle beat-synced screen shake or zoom pulse on strong onsets).
+  E. INTRO / OUTRO DEDICATION SCREENS (required):
+     - ON ROM START, before/into playback, show a title/intro card that displays,
+       verbatim, on its own quiet screen (fade or type-in is fine; keep it legible):
+           For Liz...
+           this is my attempt to bring one of your favourite songs
+           to the Game Boy Advance.
+       Hold it a few seconds (or until START), then transition into the visualizer.
+       Music may begin under the card or on dismiss — your call, but keep A/V lock.
+     - WHEN THE SONG ENDS (playback reaches the end of the track), transition to an
+       outro card that displays, verbatim:
+           Made with ❤️ for Liz
+       Render the heart as a red heart GLYPH baked into the UI font/tileset (the GBA
+       has no emoji — add a heart tile/sprite; do NOT rely on a literal emoji byte).
+       Keep the outro on screen (optionally with a gentle idle particle drift) until
+       reset. If looping is enabled, the outro shows on the final pass / on explicit
+       stop rather than every loop.
+     Both cards use the phx UI module + engine text; center them; respect the same
+     palette so they feel part of the piece.
+
+  D. TRANSPORT UI: use the phx UI module — track title, elapsed / total time
+     (mm:ss), a seek/progress bar, play/pause state. Map GBA buttons:
+       START = play/pause, LEFT/RIGHT = seek ±5 s (re-seek the stream + viz index
+       together), SELECT = toggle profiler overlay (like the platformer), A =
+       cycle visualizer style, B = toggle UI chrome. Looping: restart at end (or
+       loop the track); make it configurable.
+
+Seeking note: seeking must reposition BOTH the ADPCM stream read cursor AND the viz
+index from the same sample position so they stay locked; refill the ring after seek.
+
+--------------------------------------------------------------------------------
+ARCHITECTURE / RULES YOU MUST NOT VIOLATE
+--------------------------------------------------------------------------------
+- Acyclic strict layering enforced by tools/common/depcheck.py (a violation is a
+  build break). New runtime code belongs in the app/example (L4-ish) or, if a
+  decoder is engine-side, in the resource/audio service layer — NEVER in L0 core.
+  The ADPCM decoder is a resource/stream concern; MP3 lives ONLY in host tools.
+- Include only another module's include/phx/<mod>/, never its src/. Deps point down.
+- One backend per module per build. No platform header in app/systems code. Guard
+  any real-hardware register code with PHX_GBA_HW (never PHX_TARGET_GBA); the scalar
+  tier is selected by PHX_TARGET_GBA and also the host TIER=gba_sim build.
+- SCALAR TIERS: any gameplay-affecting math must be identical on float (PC) and
+  fixed16 (GBA) tiers. The viz pipeline is integer table lookups by design — keep
+  it that way. Use the Q16 integer idiom for any scaling, not float arithmetic on
+  the shared path.
+- MEMORY: zero hot-path heap allocation. Particle pool, viz cursor, ring buffer —
+  all from the arena/pool allocators at init. No new/malloc per frame.
+- Zero warnings under -Wall -Wextra -Wpedantic AND clang/MinGW AND ASan+UBSan
+  (no left-shift of negatives — use multiplication; see fixed.h).
+
+--------------------------------------------------------------------------------
+DELIVERABLES
+--------------------------------------------------------------------------------
+1. Host bake tool (`tools/phxviz/` or phxsnd extension) + a phxpack builder in
+   tools/phxpack/builders.h that:
+     - transcodes the MP3 -> device-rate mono IMA-ADPCM audio blob, AND
+     - emits the aligned per-frame `.phxviz` visualization stream.
+   Host-only (STL allowed). Add an instructions.md (usage, formats, controls) per
+   the tool-folder convention.
+2. A GBA streaming producer wired into the loop so ADPCM streams from ROM without
+   underrun (extend the AudioStream producer path for the GBA target).
+3. examples/miracle-player/ — the visualizer app (engine-only), building on both
+   the software renderer (host reference) and the GBA PPU backend.
+4. Make targets mirroring the platformer, e.g.:
+     make miracle              (host SDL/soft window)  — for visual dev
+     make gba-miracle-ppu      (devkitARM -> build/gba/phx-miracle.gba, PPU)
+   plus CMake wiring for the gba target.
+5. Tests (tiny in-house harness, tests/README.md conventions):
+     - unit tests (tests/unit/test_*.cpp, no main()) for: viz record decode,
+       position->viz-index mapping, ADPCM decode correctness (round-trip on a known
+       vector), ring-buffer no-underrun invariant, particle pool bound-checking.
+     - a suite binary (tests/suites/*_test.cpp with its own main()) exercising a
+       headless run of N frames asserting deterministic viz/mixer output; add a
+       `make` target, a `check:` entry, and the tests/CMakeLists.txt wiring.
+6. CHANGELOG.md line under [Unreleased]; brief docs note. Do NOT commit STATUS.md
+   changes anywhere public, but you may log engineering notes to STATUS.md locally.
+
+--------------------------------------------------------------------------------
+BUILD / TEST GATES (run before declaring done)
+--------------------------------------------------------------------------------
+  make check            # full gate: all suites + depcheck  -> PASS + "depcheck: OK"
+  make test TIER=gba_sim# fixed16 tier still passes
+  make determinism      # rendered frame + suites byte-identical across BOTH tiers
+  make sanitize         # ASan+UBSan clean
+  make miracle          # host window: verify visuals against the software golden
+  make gba-miracle-ppu  # produces build/gba/phx-miracle.gba
+  make size-gate        # ROM/IWRAM/EWRAM budgets pass
+Then verify the ROM on mGBA (see the verification recipes): audio plays cleanly
+(no per-frame FIFO underrun/click), spectrogram + particles track the music,
+transport controls and seeking work, and audio/video stay locked to the end (4:22).
+
+--------------------------------------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------------------------------------
+- ROM boots on mGBA and plays the full 262.71 s track to completion without audio
+  dropouts, then loops or stops per config.
+- On start, the intro dedication card ("For Liz... / this is my attempt to bring one
+  of your favourite songs / to the Game Boy Advance.") shows, then hands off to the
+  visualizer. On track end, the outro card ("Made with ❤ for Liz", heart as a baked
+  glyph) shows. Both are centered, legible, and palette-consistent.
+- Spectrogram, particles, and palette/background visibly react to the music and are
+  frame-locked to the audio (no drift over the full track).
+- START/LEFT/RIGHT/SELECT/A/B behave as specified; seeking keeps audio+viz in sync.
+- No hot-path allocation; particle/ring pools are bound-checked (abort on overflow).
+- make check / determinism / sanitize / size-gate all pass; zero warnings on host,
+  gba_sim, MinGW, and ASan/UBSan.
+- No layering, tier, or platform-header violations; MP3 code exists ONLY in host
+  tools; nothing in engine/gameplay decodes MP3.
+
+--------------------------------------------------------------------------------
+SUGGESTED MILESTONE ORDER
+--------------------------------------------------------------------------------
+M1  Bake path: MP3 -> device-rate mono WAV -> IMA-ADPCM blob + .phxviz stream;
+    pack into a .phxp; unit-test decode + index mapping on host.
+M2  Host app (make miracle): stream ADPCM through the mixer on the software
+    renderer; draw bars-spectrogram + RMS number; confirm A/V lock on host.
+M3  Particles + palette/background reactivity + transport UI + seeking (host).
+M4  GBA streaming producer + PPU backend (Mode 0 bars or Mode 4 scrolling
+    spectrogram); make gba-miracle-ppu; verify on mGBA; pass size-gate.
+M5  Determinism/sanitize/tests/docs/CHANGELOG; polish visual style.
+
+Ask before: adding any third-party MP3 decoder to the repo (licensing) — prefer a
+host pre-decode-to-WAV step so no MP3 decoder ships in-tree. Keep everything else
+moving without unnecessary confirmation.
+================================================================================

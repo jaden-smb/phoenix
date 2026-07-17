@@ -280,6 +280,10 @@ public:
         maps_[id].scroll_y = s_to_int(px.y);
     }
 
+    // Cells changed in place since upload -> force a re-stream on the next draw (defeats the
+    // window cache, whose key otherwise assumes immutable baked cells).
+    void invalidate_map(TilemapId id) override { if (id < map_n_) map_dirty_[id] = true; }
+
     void begin(const Camera2D& cam) override {
         // Camera pan maps to free BG/OBJ scroll (the GBA's superpower). Camera ZOOM is
         // deliberately NOT applied: a text-BG + plain OBJ can't scale, so zoom would need the
@@ -323,8 +327,8 @@ public:
         // The screen samples at most 31×21 cells from the wrapped window; stream 32×22 so
         // fine scroll never reads a stale edge. (kScreenW/kTile+1 = 31, kScreenH/kTile+1 = 21.)
         const int tx0 = floor_div(eff_x, kTile), ty0 = floor_div(eff_y, kTile);
-        if (win_cells_[slot] == cells && win_tx0_[slot] == tx0 && win_ty0_[slot] == ty0
-            && win_base_[slot] == ts.base) {
+        if (!map_dirty_[id] && win_cells_[slot] == cells && win_tx0_[slot] == tx0
+            && win_ty0_[slot] == ty0 && win_base_[slot] == ts.base) {
             stats_.tiles_drawn += win_tiles_[slot];   // same window content: stream skipped
         } else {
             uint32_t streamed = 0;
@@ -347,6 +351,7 @@ public:
             stats_.tiles_drawn += streamed;
             win_cells_[slot] = cells; win_tx0_[slot] = tx0; win_ty0_[slot] = ty0;
             win_base_[slot] = ts.base; win_tiles_[slot] = streamed;
+            map_dirty_[id] = false;
             ++win_stamp_[slot];
         }
         st_.bg[slot].win      = win;
@@ -437,6 +442,7 @@ private:
     // tile run goes to OBJ char VRAM @0x06010000; the 16 palette banks go to both the BG and
     // OBJ palette RAM (the model shares one bank table for tiles and sprites).
     void submit_hardware() {
+        volatile uint16_t* const VCOUNT   = reinterpret_cast<volatile uint16_t*>(0x04000006);
         volatile uint16_t* const PAL_BG   = reinterpret_cast<volatile uint16_t*>(0x05000000);
         volatile uint16_t* const PAL_OBJ  = reinterpret_cast<volatile uint16_t*>(0x05000200);
         volatile uint32_t* const CHAR_BG  = reinterpret_cast<volatile uint32_t*>(0x06000000);
@@ -446,6 +452,20 @@ private:
         volatile uint16_t* const BGCNT    = reinterpret_cast<volatile uint16_t*>(0x04000008);
         volatile uint16_t* const BGOFS    = reinterpret_cast<volatile uint16_t*>(0x04000010);
         constexpr uint16_t kScreenblock0 = 24;    // 0x0600C000 = VRAM base + 24*0x800
+
+        // VBLANK GATE: everything below writes live PPU state (OAM, OBJ char VRAM, scroll,
+        // screenblocks) that the silicon is scanning out RIGHT NOW if we're in the draw
+        // period — end() runs before present()'s vblank wait, i.e. at a raster position set
+        // by how long the game frame took. Racing the beam is visible: the OAM pass below
+        // hides all 128 OBJs before re-emitting them, so any scanline drawn inside that
+        // window shows NO sprites — a fixed-position horizontal cut on a static scene (the
+        // title text sliced in half) and roaming sprite flicker in-game as frame time
+        // jitters; mid-draw HOFS/VOFS writes tear scrolling BGs the same way. So reach this
+        // frame's vblank (68 scanlines — ample for the typical push) before touching
+        // anything. Already inside vblank (a slow frame) = no wait; present()'s own
+        // vblank_wait then no-ops and still returns at the vblank END, so pacing is
+        // unchanged (one return per hardware frame).
+        while (*VCOUNT < kScreenH) {}
 
         // palette + BG tiles grow only at load time: push just what's new since last frame.
         if (pal_pushed_ < pal_stamp_) {
@@ -554,6 +574,7 @@ private:
     TexRec*    tex_  = nullptr;   uint16_t tex_n_  = 0;
     TextureId* free_ = nullptr;   uint16_t free_n_ = 0;
     MapRec*    maps_ = nullptr;   uint16_t map_n_  = 0;
+    bool       map_dirty_[kMaxTilemaps] = {};   // set by invalidate_map(): force a window re-stream
     PpuScreenEntry* win_[kBgSlots] = {};
     // Per-slot window cache: the layer streamed into the slot and its tile origin (the full
     // key of the window's content), the non-empty cell count (for stats on a cache hit), and

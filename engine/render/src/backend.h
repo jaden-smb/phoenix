@@ -18,6 +18,11 @@ struct IRenderBackend {
     virtual void      free_tex(TextureId)              = 0;   // release + recycle the slot
     virtual TilemapId upload_map(const TilemapDesc&)   = 0;
     virtual void      set_scroll(TilemapId, vec2 px)   = 0;
+    // Mark a retained map's cells as changed since upload. Backends that read the caller's index
+    // buffer live (software) need nothing; backends that cache the streamed window (GBA PPU) must
+    // re-stream on the next draw. Default no-op so a backend opts in only if it caches. This is
+    // what makes a per-frame-rebuilt tilemap (e.g. a spectrogram) show its new contents.
+    virtual void      invalidate_map(TilemapId)        {}
 
     virtual void begin(const Camera2D&)                = 0;   // lock target, clear
     virtual void draw_tilemap(TilemapId, uint8_t layer)= 0;   // background, drawn in call order

@@ -61,6 +61,7 @@ void Renderer::unload_texture(TextureId id) {
     if (live_tex_) --live_tex_;
 }
 TilemapId Renderer::upload_tilemap(const TilemapDesc& d){ return be_->upload_map(d); }
+void Renderer::refresh_tilemap(TilemapId id){ be_->invalidate_map(id); }
 
 void Renderer::set_tilemap_scroll(TilemapId id, vec2 px) {
     if (id < kMaxTilemaps) scroll_[id].base = px;   // remembered so parallax composes with it
