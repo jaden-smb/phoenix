@@ -82,6 +82,17 @@ uint64_t g_step_ns    = 1000000000ull / 60;
 uint64_t g_vtime      = 0;
 uint64_t g_read_ticks = 0;                 // ticks accrued since the last pump (see above)
 constexpr uint64_t kCallTickNs = 1000;     // 1 µs per clock read (see above)
+// Hardware vblank counter, bumped by the VBlank ISR (installed with the audio pump). The
+// pump advances one step per ELAPSED vblank rather than per call: at full speed that is
+// exactly one step per frame (unchanged), but a frame that overran vblank feeds TWO steps
+// next frame, so the sim catches up like it does on the PSP's real-time clock instead of
+// playing that frame in unrecoverable slow motion (one step across 33 ms of real time —
+// every dropped frame was a visible motion pop). With no ISR installed (no audio started)
+// the counter never moves and the pump falls back to one step per call, the old behaviour;
+// catch-up is clamped so a long stall (a load) cannot burst the sim afterwards.
+volatile uint32_t g_vblank_count = 0;
+uint32_t          g_vblank_seen  = 0;      // counter value consumed by the last pump
+constexpr uint32_t kMaxCatchUpFrames = 5;  // matches StepAccumulator's spiral clamp
 
 const void* g_bundle      = nullptr;     // ROM-embedded asset bundle (no FS on GBA)
 size_t      g_bundle_size = 0;
@@ -180,7 +191,7 @@ int gba_init(const phx_platform_desc* desc) {
     g_gfx.fb.pixels = static_cast<uint32_t*>(malloc(size_t(w) * size_t(h) * sizeof(uint32_t)));
     if (!g_gfx.fb.pixels) return 1;
     REG_DISPCNT = kMode3 | kBg2On;
-    g_vtime = 0; g_read_ticks = 0;
+    g_vtime = 0; g_read_ticks = 0; g_vblank_seen = g_vblank_count;
     return 0;
 }
 void gba_shutdown(void) { free(g_gfx.fb.pixels); g_gfx.fb.pixels = nullptr; }
@@ -192,13 +203,20 @@ uint64_t gba_clock_ns(void) {
 }
 void     gba_sleep_ns(uint64_t) {}
 
-// A console runs until power-off; one sim step per frame (frame pacing itself comes from
-// present()'s vblank_wait — this just keeps the accumulator fed at exactly 60 Hz). The
-// step is reduced by the read ticks already issued, so net time per frame is exactly one
-// step (clamped so time always moves forward even under absurdly many reads).
+// A console runs until power-off; frame pacing itself comes from present()'s vblank_wait —
+// this keeps the accumulator fed with one step per ELAPSED hardware vblank (see the
+// g_vblank_count note above): exactly 60 Hz when the game makes rate, catch-up steps after
+// a dropped frame, one step per call when no ISR is counting. The step is reduced by the
+// read ticks already issued, so net time per frame stays exact (clamped so time always
+// moves forward even under absurdly many reads).
 int  gba_pump_events(void) {
     uint64_t adj = g_read_ticks < g_step_ns ? g_read_ticks : g_step_ns - 1;
-    g_vtime += g_step_ns - adj;
+    const uint32_t vb = g_vblank_count;        // one atomic 32-bit read (the ISR writes it)
+    uint32_t n = vb - g_vblank_seen;
+    g_vblank_seen = vb;
+    if (n < 1) n = 1;                          // ISR not installed (no audio): old behaviour
+    if (n > kMaxCatchUpFrames) n = kMaxCatchUpFrames;
+    g_vtime += uint64_t(n) * g_step_ns - adj;
     g_read_ticks = 0;
     return 1;
 }
@@ -323,9 +341,12 @@ void do_audio_pump(void) {
 
 } // namespace
 
-// C-named so the assembly dispatcher can `bl` it (see gba_irq_stub).
+// C-named so the assembly dispatcher can `bl` it (see gba_irq_stub). Besides the audio
+// pump it advances the vblank counter the virtual clock steps by (g_vblank_count above) —
+// the ISR fires at every hardware vblank no matter what the main loop is doing, so the
+// counter is a true elapsed-frame count even across a missed vblank.
 extern "C" __attribute__((section(".iwram"), target("arm"), noinline))
-void gba_audio_pump_irq(void) { do_audio_pump(); }
+void gba_audio_pump_irq(void) { g_vblank_count = g_vblank_count + 1; do_audio_pump(); }
 
 // The raw IRQ entry the BIOS jumps to (ARM state, IRQ mode). The BIOS IRQ stack is only
 // ~160 bytes — nowhere near enough for the mixer — so after acknowledging the interrupt

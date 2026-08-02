@@ -409,6 +409,78 @@ int main() {
         }
     }
 
+    // === SCROLL SOAK: incremental window streaming == full re-stream ===================
+    // Ordinary scrolling slides the window origin a tile at a time, and draw_tilemap now
+    // streams just the entering rows/columns (the fix for the periodic all-layers
+    // re-stream spike that stuttered on hardware). Drive two identical renderers through
+    // a scroll path covering +/- x, +/- y, diagonals, big in-window jumps, and a
+    // beyond-window jump (the full-re-stream fallback), with the control renderer forced
+    // through the full path every frame via refresh_tilemap(). Every composed frame and
+    // every tiles_drawn stat must match exactly.
+    {
+        static uint16_t soak[2][64 * 40];               // 2 layers, pseudo-random tiles 0/1/2
+        uint32_t rng = 0x1234567u;
+        for (int l = 0; l < 2; ++l)
+            for (int i = 0; i < 64 * 40; ++i) {
+                rng = rng * 1664525u + 1013904223u;
+                soak[l][i] = uint16_t((rng >> 24) % 3);
+            }
+        static uint32_t stiles[16 * 8];
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 16; ++x) stiles[y * 16 + x] = (x < 8) ? kBlue : kGreen;
+
+        Renderer* ra = Renderer::create(plat->gfx(), arena, caps()).unwrap();
+        Renderer* rb = Renderer::create(plat->gfx(), arena, caps()).unwrap();
+        TextureDesc sd{}; sd.pixels = stiles; sd.width = 16; sd.height = 8;
+        TilemapDesc smd{}; smd.indices = soak[0]; smd.width = 64; smd.height = 40;
+        smd.layers = 2; smd.tile_w = 8; smd.tile_h = 8;
+        smd.tileset = ra->load_texture(sd);
+        TilemapId mapa = ra->upload_tilemap(smd);
+        smd.tileset = rb->load_texture(sd);
+        TilemapId mapb = rb->upload_tilemap(smd);
+        check(mapa != kNoTilemap && mapb != kNoTilemap, "soak maps upload");
+
+        struct Step { int dx, dy, n; };
+        static const Step path[] = {
+            { 3, 0, 20 },        // fine +x scroll: a column crossing every few frames
+            { 0, 5, 12 },        // fine +y: row crossings
+            { -7, -3, 18 },      // diagonal negative, into negative coordinates
+            { 200, 0, 1 },       // 25-column jump: still incremental
+            { 60, 24, 3 },       // multi-column + multi-row per frame
+            { -400, -300, 1 },   // beyond the window: the full-re-stream fallback
+            { 1, 1, 10 },        // settle: sub-tile moves + occasional crossings
+        };
+        static Rgba frame_a[kScreenW * kScreenH];
+        bool frames_same = true, stats_same = true;
+        int sx = 0, sy = 0;
+        for (const Step& stp : path)
+            for (int it = 0; it < stp.n; ++it) {
+                sx += stp.dx; sy += stp.dy;
+                uint32_t tiles_a = 0;
+                for (int pass = 0; pass < 2; ++pass) {
+                    Renderer*    rp = pass ? rb : ra;
+                    TilemapId    mp = pass ? mapb : mapa;
+                    if (pass) rp->refresh_tilemap(mp);   // control: force the full path
+                    rp->set_tilemap_scroll(mp, vec2{ s_from_int(sx), s_from_int(sy) });
+                    rp->begin_frame(cam);
+                    rp->draw_tilemap(mp, 0);
+                    rp->draw_tilemap(mp, 1);
+                    rp->end_frame();
+                    phx_soft_fb fb = phx_gfx_soft_lock(plat->gfx());
+                    if (pass == 0) {
+                        for (int i = 0; i < kScreenW * kScreenH; ++i) frame_a[i] = fb.pixels[i];
+                        tiles_a = rp->stats().tiles_drawn;
+                    } else {
+                        for (int i = 0; i < kScreenW * kScreenH && frames_same; ++i)
+                            frames_same = fb.pixels[i] == frame_a[i];
+                        stats_same = stats_same && rp->stats().tiles_drawn == tiles_a;
+                    }
+                }
+            }
+        check(frames_same, "soak: incremental stream composes the EXACT full-re-stream frame");
+        check(stats_same,  "soak: incremental tiles_drawn accounting stays exact");
+    }
+
     plat->shutdown();
     std::printf("\nppu_test: %d checks, %d failures\n", g_checks, g_fail);
     std::printf(g_fail == 0 ? "PPU PASS\n\n" : "PPU FAIL\n\n");

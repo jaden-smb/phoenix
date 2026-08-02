@@ -50,6 +50,9 @@ constexpr uint16_t kTileCap    = 512;
 // Per-frame OBJ tile run: 128 OBJs × a few tiles each in practice; 256 tiles (8 KB) is a
 // quarter of OBJ char VRAM. Sprites beyond it are dropped and counted (graceful overflow).
 constexpr uint16_t kObjTileCap = 256;
+// Rows streamed per BG window: the screen samples at most 21 (160/8 + 1); stream 22 so fine
+// scroll never reads a stale edge. Columns always stream the full 32-cell window width.
+constexpr int      kWinRows    = kScreenH / kTile + 2;
 constexpr uint8_t  kBankNone   = 0xFF;   // TexRec.bank: per-tile banks (BG-only texture)
 
 // A quantized texture: a contiguous run of tiles in the char store, addressed in 2D as a
@@ -324,15 +327,85 @@ public:
 
         const int eff_x = m.scroll_x + cam_x_;
         const int eff_y = m.scroll_y + cam_y_;
-        // The screen samples at most 31×21 cells from the wrapped window; stream 32×22 so
-        // fine scroll never reads a stale edge. (kScreenW/kTile+1 = 31, kScreenH/kTile+1 = 21.)
+        // The screen samples at most 31×21 cells from the wrapped window; stream 32×kWinRows
+        // so fine scroll never reads a stale edge. (kScreenW/kTile+1 = 31.)
         const int tx0 = floor_div(eff_x, kTile), ty0 = floor_div(eff_y, kTile);
-        if (!map_dirty_[id] && win_cells_[slot] == cells && win_tx0_[slot] == tx0
-            && win_ty0_[slot] == ty0 && win_base_[slot] == ts.base) {
+        const bool same_map = !map_dirty_[id] && win_cells_[slot] == cells
+                              && win_base_[slot] == ts.base;
+        const int dx = tx0 - win_tx0_[slot], dy = ty0 - win_ty0_[slot];
+        // The entry for map cell (tx,ty) — the incremental twin of the full-stream loop
+        // below; the two must stay identical (out-of-map/empty cells stream entry 0).
+        auto cell_at = [&](int tx, int ty) {
+            PpuScreenEntry e{ 0, 0, 0 };
+            if (ty >= 0 && ty < int(m.h) && tx >= 0 && tx < int(m.w)) {
+                const uint16_t c = cells[size_t(ty) * m.w + tx];
+                if (c != 0 && uint32_t(c - 1) < uint32_t(ts.cols) * ts.rows) {
+                    e.tile = uint16_t(ts.base + c - 1);
+                    e.bank = tile_bank_[e.tile];
+                }
+            }
+            return e;
+        };
+        if (same_map && dx == 0 && dy == 0) {
             stats_.tiles_drawn += win_tiles_[slot];   // same window content: stream skipped
+        } else if (same_map && dx > -kBgWin && dx < kBgWin && dy > -kWinRows && dy < kWinRows) {
+            // INCREMENTAL RE-STREAM: same layer, origin moved by (dx,dy) tiles — ordinary
+            // scrolling. Only the entering rows/columns are streamed (~22–32 cells per tile
+            // boundary crossed), not the whole 32×22 window: a full re-stream is ~700 cells
+            // per layer, and with stacked parallax layers the crossings periodically
+            // COINCIDE (factors 0.25/0.5/1.0 all cross every 32 camera px) — a per-frame
+            // cost spike that blew the ARM7 vblank budget and read as a rhythmic stutter
+            // while scrolling. win_tiles_ stays exact by retiring each departing row/column
+            // before its slot is overwritten (a streamed row's 32 slots are all counted).
+            uint32_t tiles = win_tiles_[slot];
+            const int tx0_old = tx0 - dx;
+            if (dy != 0) {                      // row pass, over the OLD column range
+                const int n   = dy > 0 ? dy : -dy;
+                const int dep = dy > 0 ? ty0 - dy : ty0 + kWinRows;    // leaving rows
+                const int arr = dy > 0 ? ty0 + kWinRows - dy : ty0;    // entering rows
+                for (int k = 0; k < n; ++k) {
+                    const PpuScreenEntry* row = win + size_t((dep + k) & (kBgWin - 1)) * kBgWin;
+                    for (int i = 0; i < kBgWin; ++i) if (row[i].tile) --tiles;
+                }
+                for (int k = 0; k < n; ++k) {
+                    const int ty = arr + k;
+                    PpuScreenEntry* row = win + size_t(ty & (kBgWin - 1)) * kBgWin;
+                    for (int tx = tx0_old; tx < tx0_old + kBgWin; ++tx) {
+                        const PpuScreenEntry e = cell_at(tx, ty);
+                        if (e.tile) ++tiles;
+                        row[tx & (kBgWin - 1)] = e;
+                    }
+                }
+            }
+            if (dx != 0) {                      // column pass, over the NEW row range
+                const int n   = dx > 0 ? dx : -dx;
+                const int arr = dx > 0 ? tx0 + kBgWin - dx : tx0;      // entering columns
+                for (int ty = ty0; ty < ty0 + kWinRows; ++ty) {
+                    PpuScreenEntry* row = win + size_t(ty & (kBgWin - 1)) * kBgWin;
+                    for (int k = 0; k < n; ++k) {
+                        PpuScreenEntry& dst = row[(arr + k) & (kBgWin - 1)];
+                        if (dst.tile) --tiles;  // the departing column shared this slot
+                        const PpuScreenEntry e = cell_at(arr + k, ty);
+                        if (e.tile) ++tiles;
+                        dst = e;
+                    }
+                }
+            }
+            stats_.tiles_drawn += tiles;
+            win_tx0_[slot] = tx0; win_ty0_[slot] = ty0; win_tiles_[slot] = tiles;
+            ++win_stamp_[slot];
+            // Tell the hardware push which way the window slid; if it fully cycled since
+            // the last push, fall back to a whole-screenblock rewrite.
+            const int adx = win_push_dx_[slot] + dx, ady = win_push_dy_[slot] + dy;
+            if (adx <= -kBgWin || adx >= kBgWin || ady <= -kWinRows || ady >= kWinRows) {
+                win_push_full_[slot] = true;
+                win_push_dx_[slot] = win_push_dy_[slot] = 0;
+            } else {
+                win_push_dx_[slot] = int8_t(adx); win_push_dy_[slot] = int8_t(ady);
+            }
         } else {
             uint32_t streamed = 0;
-            for (int ty = ty0; ty < ty0 + kScreenH / kTile + 2; ++ty) {
+            for (int ty = ty0; ty < ty0 + kWinRows; ++ty) {
                 const bool yin = ty >= 0 && ty < int(m.h);
                 PpuScreenEntry* row = win + size_t(ty & (kBgWin - 1)) * kBgWin;
                 for (int tx = tx0; tx < tx0 + kBgWin; ++tx) {
@@ -353,6 +426,8 @@ public:
             win_base_[slot] = ts.base; win_tiles_[slot] = streamed;
             map_dirty_[id] = false;
             ++win_stamp_[slot];
+            win_push_full_[slot] = true;
+            win_push_dx_[slot] = win_push_dy_[slot] = 0;
         }
         st_.bg[slot].win      = win;
         st_.bg[slot].scroll_x = eff_x;
@@ -485,7 +560,15 @@ private:
         // back -> lowest BG priority value wins in front, so slot s gets priority 3-s.
         // Screenblocks are only rewritten when draw_tilemap actually re-streamed the window
         // (win_stamp_ advanced) — VRAM retains the previous content, so an unchanged window
-        // costs zero writes. Scroll registers are per-frame (fine scroll moves every frame).
+        // costs zero writes — and an ordinary scroll (win_push_full_ clear) writes only the
+        // entering columns/rows the incremental stream touched, not the whole 1024-entry
+        // block. Scroll registers are per-frame (fine scroll moves every frame).
+        const auto pack = [](const PpuScreenEntry& e) {
+            return uint16_t((e.tile & 0x3FF)
+                            | ((e.flip & 1) ? (1u << 10) : 0)
+                            | ((e.flip & 2) ? (1u << 11) : 0)
+                            | (uint16_t(e.bank & 0xF) << 12));
+        };
         uint16_t bg_enable = 0;
         for (int s = 0; s < kBgSlots; ++s) {
             if (!st_.bg[s].enabled) continue;
@@ -494,14 +577,34 @@ private:
                 volatile uint16_t* blk =
                     reinterpret_cast<volatile uint16_t*>(0x06000000 + (kScreenblock0 + s) * 0x800);
                 const PpuScreenEntry* w = win_[s];
-                for (int i = 0; i < kBgWin * kBgWin; ++i) {
-                    const PpuScreenEntry& e = w[i];
-                    blk[i] = uint16_t((e.tile & 0x3FF)
-                                      | ((e.flip & 1) ? (1u << 10) : 0)
-                                      | ((e.flip & 2) ? (1u << 11) : 0)
-                                      | (uint16_t(e.bank & 0xF) << 12));
+                if (win_push_full_[s]) {
+                    for (int i = 0; i < kBgWin * kBgWin; ++i) blk[i] = pack(w[i]);
+                } else {
+                    // Entering columns are pushed over all 32 row slots (rows outside the
+                    // streamed range are stale in BOTH copies and never sampled), entering
+                    // rows in full — so every slot the incremental stream changed since the
+                    // last push is covered, even across an unpushed frame or a column/row
+                    // that slid under a later crossing.
+                    const int cdx = win_push_dx_[s];
+                    const int cn  = cdx > 0 ? cdx : -cdx;
+                    const int c0  = cdx > 0 ? win_tx0_[s] + kBgWin - cdx : win_tx0_[s];
+                    for (int k = 0; k < cn; ++k) {
+                        const int cs = (c0 + k) & (kBgWin - 1);
+                        for (int r = 0; r < kBgWin; ++r)
+                            blk[r * kBgWin + cs] = pack(w[r * kBgWin + cs]);
+                    }
+                    const int cdy = win_push_dy_[s];
+                    const int rn  = cdy > 0 ? cdy : -cdy;
+                    const int r0  = cdy > 0 ? win_ty0_[s] + kWinRows - cdy : win_ty0_[s];
+                    for (int k = 0; k < rn; ++k) {
+                        const int rs = (r0 + k) & (kBgWin - 1);
+                        for (int i = 0; i < kBgWin; ++i)
+                            blk[rs * kBgWin + i] = pack(w[rs * kBgWin + i]);
+                    }
                 }
-                win_pushed_[s] = win_stamp_[s];
+                win_pushed_[s]    = win_stamp_[s];
+                win_push_full_[s] = false;
+                win_push_dx_[s]   = win_push_dy_[s] = 0;
             }
             // 4bpp, char base 0, 32×32, screenblock 24+s, priority 3-s
             BGCNT[s]        = uint16_t(uint16_t(3 - s) | (uint16_t(kScreenblock0 + s) << 8));
@@ -584,6 +687,11 @@ private:
     uint16_t   win_base_[kBgSlots] = {};   // tileset char-store base (guards id recycling)
     uint32_t   win_tiles_[kBgSlots] = {};
     uint16_t   win_stamp_[kBgSlots] = { 1, 1, 1, 1 };
+    // How far each slot's window origin slid since the hardware push last wrote its
+    // screenblock (columns/rows crossed), or whether it needs a full rewrite. Maintained by
+    // draw_tilemap in every build; consumed (and reset) only by the PHX_GBA_HW push.
+    bool       win_push_full_[kBgSlots] = { true, true, true, true };
+    int8_t     win_push_dx_[kBgSlots] = {}, win_push_dy_[kBgSlots] = {};
     uint8_t    slot_n_ = 0;
     PpuObj*    oam_ = nullptr;    uint16_t obj_n_ = 0, obj_limit_ = kObjMax;
     uint32_t*  scratch_ = nullptr;

@@ -7,6 +7,19 @@ All notable changes to Phoenix are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- GBA: eliminated the periodic scroll stutter on PPU builds. The four BG screenblock windows
+  were each fully re-streamed (~700 cells + a 1024-entry VRAM rewrite) whenever their layer
+  crossed an 8-px tile boundary — and with stacked parallax factors (0.25/0.5/1.0) the
+  crossings coincide every 32 camera px, spiking one frame past the vblank budget into a
+  visible dropped frame. `draw_tilemap` now streams only the entering rows/columns and the
+  hardware push writes only those slots (~32–64 entries per crossed tile instead of 1024).
+- GBA: a dropped frame no longer plays as unrecoverable slow motion. The virtual clock now
+  advances one sim step per **elapsed hardware vblank** (counted by the VBlank ISR) instead of
+  one per game frame, so an over-budget frame is repaid with a catch-up step — matching the
+  PSP's real-time-clock behaviour. Without the ISR (no audio started) the old one-step-per-frame
+  behaviour is unchanged.
+
 ### Added
 - `make gba-miracle-ppu`: the "A Small Miracle" visualizer as a native-PPU GBA ROM (the shipping
   console build). The spectrogram renders as a **BG tilemap** (the PPU can't scale/tint OBJ, so
