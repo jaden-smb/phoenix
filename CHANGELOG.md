@@ -7,20 +7,31 @@ All notable changes to Phoenix are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-- GBA: eliminated the periodic scroll stutter on PPU builds. The four BG screenblock windows
-  were each fully re-streamed (~700 cells + a 1024-entry VRAM rewrite) whenever their layer
-  crossed an 8-px tile boundary — and with stacked parallax factors (0.25/0.5/1.0) the
-  crossings coincide every 32 camera px, spiking one frame past the vblank budget into a
-  visible dropped frame. `draw_tilemap` now streams only the entering rows/columns and the
-  hardware push writes only those slots (~32–64 entries per crossed tile instead of 1024).
-- GBA: a dropped frame no longer plays as unrecoverable slow motion. The virtual clock now
-  advances one sim step per **elapsed hardware vblank** (counted by the VBlank ISR) instead of
-  one per game frame, so an over-budget frame is repaid with a catch-up step — matching the
-  PSP's real-time-clock behaviour. Without the ISR (no audio started) the old one-step-per-frame
-  behaviour is unchanged.
+## [0.1.0] - 2026-08-02
+
+First tagged release: the complete engine slice proven on all four targets.
 
 ### Added
+- **Engine core** — fixed-step App loop; one-arena memory model (arena/stack/pool/object
+  allocators, zero hot-path heap); sparse-set ECS; scene, physics (tile collision incl.
+  per-tile flags), animation, and UI systems; deterministic `phx::scalar` dual-tier math
+  (`float` on PC/PSP, Q16.16 `fixed16` on GBA) held byte-identical by a determinism gate.
+- **Rendering** — one 2D-intent API (sprites, tilemaps, per-layer parallax, palettes, zoom,
+  shake) with four backends: software golden reference, OpenGL, PSP GU, GBA PPU (Mode-0 tiles +
+  OAM, streamed backgrounds).
+- **Audio** — block mixer + streaming, per-target sample-rate baking, SDL/PSP/GBA output paths.
+- **Asset pipeline** — `.phxp` bundles, zero-copy/LZSS loading, per-target encoding; converters
+  (`phxsprite`, `phxtile`, `phxsnd`, `phxbin`) + the `phxpack` assembler; save/load on every
+  target including GBA SRAM and PSP savedata.
+- **Editors** — `phxtmap` (tilemap, incl. collision-flag painting and prefab palettes) and
+  `phxentity` (record tables), both built on the engine itself.
+- **Games** — `examples/platformer` (the MVP gate) and **Emberwing — Cinder Hollow**, a
+  complete level shipping as GBA ROM, PSP EBOOT, Windows exe, and Linux binary from one tree.
+- **Targets** — Linux, Windows (MinGW-w64, static), GBA (devkitARM, ROM size gates), PSP
+  (pspsdk); CI gates: full suite, cross-tier determinism, ASan+UBSan, release config, Wine-run
+  Windows suite, console cross builds.
+- **Release plumbing** — single-source version header (`phx/core/version.h`), `make dist*`
+  packaging, CMake install/`find_package(phoenix)`/CPack SDK, tag-driven release workflow.
 - `make gba-miracle-ppu`: the "A Small Miracle" visualizer as a native-PPU GBA ROM (the shipping
   console build). The spectrogram renders as a **BG tilemap** (the PPU can't scale/tint OBJ, so
   ui.rect bars can't work there — the tilemap is the native answer), particles are 8×8 OBJ sparks,
@@ -62,6 +73,17 @@ All notable changes to Phoenix are documented here. The format follows
   `phx/core/version.h` (first slice of the roadmap's v1.0 "written manual" item).
 
 ### Fixed
+- GBA: eliminated the periodic scroll stutter on PPU builds. The four BG screenblock windows
+  were each fully re-streamed (~700 cells + a 1024-entry VRAM rewrite) whenever their layer
+  crossed an 8-px tile boundary — and with stacked parallax factors (0.25/0.5/1.0) the
+  crossings coincide every 32 camera px, spiking one frame past the vblank budget into a
+  visible dropped frame. `draw_tilemap` now streams only the entering rows/columns and the
+  hardware push writes only those slots (~32–64 entries per crossed tile instead of 1024).
+- GBA: a dropped frame no longer plays as unrecoverable slow motion. The virtual clock now
+  advances one sim step per **elapsed hardware vblank** (counted by the VBlank ISR) instead of
+  one per game frame, so an over-budget frame is repaid with a catch-up step — matching the
+  PSP's real-time-clock behaviour. Without the ISR (no audio started) the old one-step-per-frame
+  behaviour is unchanged.
 - GBA PPU: sprite flicker and a fixed horizontal cut through static OBJ content (e.g. the
   Emberwing title text sliced in half). The per-frame hardware push (OAM hide-all + rewrite,
   OBJ char VRAM, scroll registers, screenblocks) ran from `end()`, *before* `present()`'s
@@ -84,32 +106,6 @@ All notable changes to Phoenix are documented here. The format follows
   mount), platform backends allocate init-time state outside the root arena
   (`phx_platform_desc.root_arena` is reserved/unused today), and the PC bundle image counts
   against RAM — it is not OS-backed as `docs/06-resources.md` previously claimed.
-
-## [0.1.0] - 2026-07-15
-
-First tagged release: the complete engine slice proven on all four targets.
-
-### Added
-- **Engine core** — fixed-step App loop; one-arena memory model (arena/stack/pool/object
-  allocators, zero hot-path heap); sparse-set ECS; scene, physics (tile collision incl.
-  per-tile flags), animation, and UI systems; deterministic `phx::scalar` dual-tier math
-  (`float` on PC/PSP, Q16.16 `fixed16` on GBA) held byte-identical by a determinism gate.
-- **Rendering** — one 2D-intent API (sprites, tilemaps, per-layer parallax, palettes, zoom,
-  shake) with four backends: software golden reference, OpenGL, PSP GU, GBA PPU (Mode-0 tiles +
-  OAM, streamed backgrounds).
-- **Audio** — block mixer + streaming, per-target sample-rate baking, SDL/PSP/GBA output paths.
-- **Asset pipeline** — `.phxp` bundles, zero-copy/LZSS loading, per-target encoding; converters
-  (`phxsprite`, `phxtile`, `phxsnd`, `phxbin`) + the `phxpack` assembler; save/load on every
-  target including GBA SRAM and PSP savedata.
-- **Editors** — `phxtmap` (tilemap, incl. collision-flag painting and prefab palettes) and
-  `phxentity` (record tables), both built on the engine itself.
-- **Games** — `examples/platformer` (the MVP gate) and **Emberwing — Cinder Hollow**, a
-  complete level shipping as GBA ROM, PSP EBOOT, Windows exe, and Linux binary from one tree.
-- **Targets** — Linux, Windows (MinGW-w64, static), GBA (devkitARM, ROM size gates), PSP
-  (pspsdk); CI gates: full suite, cross-tier determinism, ASan+UBSan, release config, Wine-run
-  Windows suite, console cross builds.
-- **Release plumbing** — single-source version header (`phx/core/version.h`), `make dist*`
-  packaging, CMake install/`find_package(phoenix)`/CPack SDK, tag-driven release workflow.
 
 [Unreleased]: https://github.com/jaden-smb/phoenix/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/jaden-smb/phoenix/releases/tag/v0.1.0
