@@ -13,6 +13,7 @@
 #include "bundle_reader.h"   // the assembler's merge logic
 #include "editor.h"                        // phxtmap's document model (load/edit/save .tmj)
 #include "../../tools/phxentity/editor.h"     // phxentity's document model (phxbin JSON tables)
+#include "../../tools/phxstudio/model.h"      // Phoenix Studio's headless model
 
 #include "fixtures/png_fixtures.h"
 
@@ -495,6 +496,215 @@ int main() {
                  s.find("static_assert(sizeof(ItemRecord)") != std::string::npos;
     }
     check(gen_ok, "phxbin emitted a matching .gen.h");
+
+
+    // --- Phoenix Studio: the headless document model behind tools/phxstudio ----------------
+    // Everything the studio draws comes from these functions, so they are held to the real
+    // tree (depcheck's layer table, caps.h, the Makefile) and to the real bundle format.
+    {
+        using namespace phxstudio;
+
+        // the engine map agrees with depcheck.py about layers AND violations
+        EngineMap em;
+        std::string err;
+        check(scan_engine(".", em, &err), "studio: scan_engine reads depcheck.py + engine/");
+        check(em.layers.size() == 5 && em.layer_notes.size() == 5, "studio: five layers (+ notes) parsed");
+        const int core = em.find("core"), render = em.find("render"), runtime = em.find("runtime");
+        check(core >= 0 && em.modules[size_t(core)].layer == 0, "studio: core is L0");
+        check(runtime >= 0 && em.modules[size_t(runtime)].layer == 4, "studio: runtime is L4");
+        check(em.violations.empty(), "studio: no upward edges (matches the depcheck gate)");
+        check(render >= 0 && em.reaches(render, core) && !em.reaches(core, render),
+              "studio: render depends on core, never the reverse");
+        check(runtime >= 0 && em.modules[size_t(runtime)].users.empty() && em.edges > 10,
+              "studio: runtime is the composition root (nothing includes it)");
+        check(render >= 0 && std::find(em.modules[size_t(render)].backends.begin(),
+                                       em.modules[size_t(render)].backends.end(), "soft") !=
+                                 em.modules[size_t(render)].backends.end(),
+              "studio: render's per-tier backends are listed");
+        check(header_summary("// phx/x/y.h \xE2\x80\x94 does a thing.\n// More.\n#ifndef X\n") == "does a thing. More.",
+              "studio: header_summary strips the self-reference and joins lines");
+        check(header_summary("/* phx/p.h \xE2\x80\x94 C seam\n * second line */\n") == "C seam second line",
+              "studio: header_summary reads C block comments");
+        const auto inc = included_modules("#include \"phx/core/types.h\"\n#  include <phx/render/renderer.h>\n#include \"x.h\"\n");
+        check(inc.size() == 2 && inc[0] == "core" && inc[1] == "render", "studio: included_modules finds phx/<mod>/");
+
+        // capability tiers come from caps.h, not a copy
+        std::string caps_h;
+        std::vector<TierCaps> tiers;
+        check(read_text("engine/core/include/phx/core/caps.h", caps_h) && parse_caps(caps_h, tiers) &&
+              tiers.size() == 3, "studio: caps.h parses into three tiers");
+        if (tiers.size() == 3) {
+            check(tiers[0].name == "GBA" && tiers[0].max_sprites == 128 && tiers[0].render_tier == 0 &&
+                  tiers[0].has_float_hw == 0, "studio: GBA caps (OAM ceiling, tier 0, no FPU)");
+            check(tiers[0].total_ram == 224u * 1024u, "studio: caps expressions evaluate (224u * 1024u)");
+            check(tiers[2].name == "PC" && tiers[2].render_tier == 2 && tiers[2].max_sprites > tiers[1].max_sprites,
+                  "studio: PC caps from the #else block");
+        }
+
+        // names: literals, manifests, and the fallback label
+        NameBook nb;
+        nb.add_literals("w.add_sprite(\"hero\", \"hero_sheet\"); x == \"coin\"_hash; \"not a name!\"; \"a\\\"b\"");
+        check(nb.find(phx::fnv1a("hero")) && nb.find(phx::fnv1a("coin")) && nb.find(phx::fnv1a("hero_sheet")),
+              "studio: NameBook harvests identifier literals");
+        check(!nb.find(phx::fnv1a("not a name!")), "studio: NameBook skips prose literals");
+        nb.add_manifest("# phxpack manifest\n0x0cb633fd texture  li_t   <- build/li_t.ppm\n");
+        check(nb.label(0x0cb633fdu) == "li_t", "studio: NameBook reads phxpack manifests");
+        check(nb.label(0x12345678u) == "#12345678", "studio: unknown hashes print as #hex");
+
+        // a bundle with one of every asset type, through BundleDoc + the typed views
+        uint32_t px[16 * 8];
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 16; ++x)
+                px[y * 16 + x] = (x + y) % 3 == 0 ? 0u : x < 8 ? rgba(250, 40, 20) : rgba(20, uint8_t(60 + x * 10), 200);
+        const uint16_t cells[2 * 3 * 2] = { 1, 2, 0, 2, 1, 0,   0, 0, 1, 2, 2, 2 };
+        const std::vector<std::pair<double, double>> par = { { 0.5, 1.0 }, { 1.0, 1.0 } };
+        const std::vector<uint8_t> flags = { 0, kTileFlagSolid, kTileFlagHazard };
+        const int16_t pcm[6] = { 0, 12000, -32768, 32767, -5, 5 };
+        std::vector<SpawnDef> spawns(2);
+        spawns[0] = SpawnDef{ phx::fnv1a("player"), 8, 16, 8, 8 };
+        spawns[1] = SpawnDef{ phx::fnv1a("coin"), -4, 2, 0, 0 };
+        phxtool::BundleWriter sw(2);
+        sw.add_texture("s_tiles", px, 16, 8);
+        sw.add_tilemap("s_map", cells, 3, 2, 2, 8, 8, "s_tiles", &par, &flags);
+        sw.add_sprite("s_hero", "s_tiles", 8, 8, 2, { phx::SpriteClipDef{ phx::fnv1a("walk"), 0, 2, 8, 1, 0 } });
+        sw.add_sound("s_tone", pcm, 6, 22050);
+        sw.add_spawns("s_map", spawns);
+        const char blob[] = "phoenix";
+        sw.add_blob("s_blob", blob, sizeof(blob));
+        check(sw.write("build/p_studio.phxp"), "studio: write the fixture bundle");
+
+        BundleDoc bd;
+        check(BundleDoc::load("build/p_studio.phxp", bd) && bd.ok && bd.crc == 1 && bd.assets.size() == 6,
+              "studio: BundleDoc loads + CRC-verifies a fresh bundle");
+        const int ti = bd.find(phx::fnv1a("s_tiles"), AssetType::Texture);
+        TexView tv;
+        std::vector<uint32_t> back;
+        check(ti >= 0 && view_texture(bd.assets[size_t(ti)], tv) && tv.w == 16 && tv.h == 8 &&
+              decode_rgba8(tv, back) && std::memcmp(back.data(), px, sizeof(px)) == 0,
+              "studio: texture view decodes RGBA8 exactly");
+        MapView mv;
+        const int mi = bd.find(phx::fnv1a("s_map"), AssetType::Tilemap);
+        check(mi >= 0 && view_tilemap(bd.assets[size_t(mi)], mv) && mv.w == 3 && mv.h == 2 && mv.layers == 2 &&
+              mv.indices[3] == 2 && mv.tileset == phx::fnv1a("s_tiles"), "studio: tilemap view (cells + tileset)");
+        check(mv.parallax_q16.size() == 4 && mv.parallax_q16[0] == 1 << 15 && mv.parallax_q16[2] == 1 << 16,
+              "studio: tilemap view reads per-layer parallax (Q16)");
+        check(mv.tile_flags && mv.tile_flag_count == 3 && mv.tile_flags[2] == kTileFlagHazard,
+              "studio: tilemap view reads the tile-flag table");
+        SpriteInfo si;
+        const int spi = bd.find(phx::fnv1a("s_hero"), AssetType::Sprite);
+        check(spi >= 0 && view_sprite(bd.assets[size_t(spi)], si) && si.clips.size() == 1 &&
+              si.clips[0].count == 2 && si.texture == phx::fnv1a("s_tiles"), "studio: sprite view (clips)");
+        SoundInfo so;
+        const int soi = bd.find(phx::fnv1a("s_tone"), AssetType::Sound);
+        check(soi >= 0 && view_sound(bd.assets[size_t(soi)], so) && so.frames == 6 && so.rate == 22050 &&
+              so.samples[2] == -32768, "studio: sound view (PCM + rate)");
+        std::vector<SpawnDef> sp;
+        const int sgi = bd.find(phx::fnv1a("s_map"), AssetType::Spawns);
+        check(sgi >= 0 && view_spawns(bd.assets[size_t(sgi)], sp) && sp.size() == 2 && sp[1].x == -4,
+              "studio: spawns view (signed coords)");
+        check(describe(bd.assets[size_t(ti)]) == "16x8 RGBA8" && describe(bd.assets[size_t(mi)]) == "3x2 tiles x2 layers",
+              "studio: describe() one-liners");
+        std::vector<int16_t> wmn, wmx;
+        waveform(so.samples, so.frames, 3, wmn, wmx);
+        check(wmx[0] == 12000 && wmn[1] == -32768 && wmx[1] == 32767 && wmn[2] == -5, "studio: waveform min/max columns");
+
+        // per-tier analysis: the studio's GBA/PSP previews decode back to what the bake encodes
+        const TierReport tr = analyse_tiers(back, 16, 8);
+        check(tr.swz_ok && tr.pal4_ok && tr.pal4_palettes >= 1 && tr.tiles_x == 2 && tr.tiles_over == 0,
+              "studio: tier report (swizzle + 4bpp encode succeed)");
+        TexView sv{ 16, 8, PixelFormat::RGBA8_SWZ, tr.swz.data(), uint32_t(tr.swz.size()), 0 };
+        std::vector<uint32_t> from_swz;
+        check(decode_rgba8(sv, from_swz) && from_swz == back, "studio: RGBA8_SWZ decodes pixel-identical");
+        TexView pv{ 16, 8, PixelFormat::PAL4_TILES, tr.pal4.data(), uint32_t(tr.pal4.size()), tr.pal4_palettes };
+        std::vector<uint32_t> from_pal4;
+        bool pal4_same = decode_rgba8(pv, from_pal4);
+        for (size_t i = 0; pal4_same && i < back.size(); ++i) {
+            const uint32_t want = (back[i] >> 24) ? bgr555_to_rgba8(rgba8_to_bgr555(back[i])) : 0u;
+            pal4_same = from_pal4[i] == want;
+        }
+        check(pal4_same, "studio: PAL4_TILES decodes to the BGR555-quantized source");
+        std::vector<uint32_t> busy(8 * 8);
+        for (size_t i = 0; i < busy.size(); ++i) busy[i] = rgba(uint8_t(i * 4), uint8_t(255 - i * 3), 9);
+        const TierReport over = analyse_tiers(busy, 8, 8);
+        check(!over.pal4_ok && over.tiles_over == 1 && over.tile_colors[0] > 15 && over.swz_ok,
+              "studio: a >15-colour tile is flagged and falls back on GBA");
+        check(!analyse_tiers(back, 12, 8).pal4_ok, "studio: non-8px-aligned art can't go 4bpp");
+
+        // validation mirrors ResourceCache::mount: corrupt / truncated / foreign files are refused
+        std::vector<uint8_t> raw;
+        read_bytes("build/p_studio.phxp", raw);
+        std::vector<uint8_t> bad = raw;
+        bad.back() ^= 0x5A;
+        write_file("build/p_studio_crc.phxp", bad.data(), bad.size());
+        BundleDoc bc;
+        BundleDoc::load("build/p_studio_crc.phxp", bc);
+        check(bc.ok && bc.crc == -1 && !bc.error.empty(), "studio: a flipped byte is a CRC mismatch (still viewable)");
+        write_file("build/p_studio_cut.phxp", raw.data(), raw.size() - 7);
+        BundleDoc bt;
+        check(!BundleDoc::load("build/p_studio_cut.phxp", bt) && !bt.ok, "studio: a truncated bundle is refused");
+        bad = raw; bad[0] = 'X';
+        write_file("build/p_studio_magic.phxp", bad.data(), bad.size());
+        BundleDoc bm;
+        check(!BundleDoc::load("build/p_studio_magic.phxp", bm) && bm.error.find("magic") != std::string::npos,
+              "studio: a foreign file is refused by magic");
+
+        // the launch catalog is derived from the Makefile (every check suite is runnable)
+        std::string mk;
+        check(read_text("Makefile", mk), "studio: read the Makefile");
+        const auto prereqs = make_prereqs(mk, "check");
+        check(std::find(prereqs.begin(), prereqs.end(), "pipeline") != prereqs.end() &&
+              std::find(prereqs.begin(), prereqs.end(), "depcheck") != prereqs.end(),
+              "studio: `check:` prerequisites parsed");
+        check(make_has_target(mk, "studio") && make_has_target(mk, "emberwing-sdl") && !make_has_target(mk, "CXXFLAGS"),
+              "studio: make_has_target (rules, not variables)");
+        const auto launches = default_launches(mk, "/nonexistent/devkitARM");
+        size_t suites = 0;
+        bool gba_needs_devkit = false;
+        for (const Launch& l : launches) {
+            suites += l.group == Group::Suite;
+            if (l.make_target == "gba-emberwing-ppu") gba_needs_devkit = !missing_need(l).empty();
+        }
+        check(suites == prereqs.size(), "studio: one suite launch per `check:` prerequisite");
+        check(gba_needs_devkit, "studio: a missing toolchain disables its launch");
+        check(make_prereqs("a: x \\\n y | z\n\tcmd\n", "a") == std::vector<std::string>({ "x", "y" }),
+              "studio: continuation lines joined, order-only prerequisites dropped");
+
+        // console classification + the line ring
+        check(classify_line("PIPELINE PASS") == Tone::Good && classify_line("depcheck: OK (28 edges)") == Tone::Good,
+              "studio: verdict lines are good");
+        check(classify_line("    FAIL something") == Tone::Bad && classify_line("make: *** [Makefile:1: x] Error 2") == Tone::Bad &&
+              classify_line("x.cpp:3:1: error: nope") == Tone::Bad, "studio: failures and errors are bad");
+        check(classify_line("anim_test: rc=0  4 checks, 0 failures") == Tone::Plain, "studio: '0 failures' is not a failure");
+        check(classify_line("x.cpp:9: warning: unused") == Tone::Warn && classify_line("g++ -std=c++17 a.cpp") == Tone::Dim,
+              "studio: warnings and compiler lines");
+        LogRing lr(3);
+        const char chunk[] = "one\r\ntw";
+        lr.feed(chunk, sizeof(chunk) - 1);
+        lr.feed("o\n\x1b[32mPASS\x1b[0m\nprogress 10%\rprogress 99%\n", 43);
+        lr.push("four");
+        check(lr.size() == 3 && lr.total() == 5 && lr.at(0).text == "PASS" && lr.at(0).tone == Tone::Good &&
+              lr.at(1).text == "progress 99%" && lr.at(2).text == "four", "studio: LogRing splits, strips ANSI, honours \\r, caps");
+        check(exit_code_from_status(0) == 0 && exit_code_from_status(3 << 8) == 3 && exit_code_from_status(15) == 143,
+              "studio: wait status -> exit code (signals as 128+N)");
+
+        // layout math
+        const Rect f1 = fit_rect(16, 8, Rect{ 0, 0, 100, 100 });
+        check(f1.w == 96 && f1.h == 48 && f1.x == 2 && f1.y == 26, "studio: fit_rect integer upscale, centered");
+        const Rect f2 = fit_rect(400, 100, Rect{ 0, 0, 200, 200 });
+        check(f2.w == 200 && f2.h == 50, "studio: fit_rect shrinks oversize art by aspect");
+        check(clamp_scroll(50, 60, 20) == 40 && clamp_scroll(-3, 60, 20) == 0 && clamp_scroll(5, 10, 20) == 0,
+              "studio: clamp_scroll keeps the last page full");
+        int pos = 0, len = 0;
+        scroll_thumb(100, 25, 75, 100, pos, len);
+        check(len == 25 && pos == 75, "studio: scrollbar thumb geometry");
+        check(scroll_from_track(100, 25, 100, 0) == 0 && scroll_from_track(100, 25, 100, 100) == 75 &&
+              scroll_from_track(100, 25, 100, 50) == 38, "studio: scrollbar track -> first row");
+        check(wrap("the quick brown fox", 9) == std::vector<std::string>({ "the quick", "brown fox" }) &&
+              wrap("abcdefghij", 4) == std::vector<std::string>({ "abcd", "efgh", "ij" }), "studio: word wrap");
+        check(human_bytes(224 * 1024) == "224 KB" && human_bytes(1536) == "1.5 KB" && human_bytes(12) == "12 B",
+              "studio: human_bytes");
+        check(!find_repo_root(".").empty(), "studio: the repo root is found from the working directory");
+    }
 
     plat->shutdown();
     std::printf("\npipeline_test: %d checks, %d failures\n", g_checks, g_fail);

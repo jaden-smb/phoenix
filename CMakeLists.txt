@@ -72,6 +72,7 @@ add_subdirectory(engine/runtime)
 add_subdirectory(examples/platformer)
 add_subdirectory(examples/miracle-player)
 add_subdirectory(examples/emberwing)
+add_subdirectory(examples/tinyllm)
 
 # ---- host-only tools (always built for the host, even when cross-compiling) -
 # The asset pipeline (docs/08): per-format CONVERTERS bake author sources into intermediate

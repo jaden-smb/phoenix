@@ -391,6 +391,24 @@ extern "C" void phx_gba_set_bundle(const void* data, size_t size) { g_bundle = d
 // so present() skips the Mode-3 software blit. See g_direct_present above.
 extern "C" void phx_gba_set_direct(int on) { g_direct_present = on != 0; }
 
+// Hook (not part of the seam): install ONLY the VBlank IRQ, so g_vblank_count — and therefore
+// the fixed-step accumulator — sees true elapsed hardware frames without starting audio.
+//
+// Why a game would want this: gba_pump_events() falls back to "one step per call" when nothing
+// is counting vblanks (see its note), which is right for a game that makes rate but makes SIM
+// TIME DILATE for a deliberately compute-heavy ROM — a frame that really took 4 vblanks still
+// advances the clock by one step, so anything the game derives from elapsed steps (a throughput
+// readout, a timer) runs fast by that factor. examples/tinyllm hit exactly this. Audio ROMs get
+// the counter for free from phx_gba_audio_start(); this is the same install without the sound
+// hardware, and do_audio_pump() no-ops while no stream is running. Idempotent: calling it and
+// then starting audio installs the same vector twice, which is harmless.
+extern "C" void phx_gba_vblank_clock_start(void) {
+    MMIO_IRQ_VECTOR = reinterpret_cast<uintptr_t>(&gba_irq_stub);
+    REG_DISPSTAT   |= 0x0008;                 // VBlank IRQ request enable
+    REG_IE         |= 0x0001;                 // VBlank
+    REG_IME         = 1;
+}
+
 // Start DirectSound: configure SOUNDCNT, Timer0 at `rate`, and DMA1 -> FIFO A, prime both
 // buffers from the game's fill, then install the VBlank-IRQ pump (see the DirectSound note
 // above). Same contract as the other backends' audio_start. Returns 0 on success. Timer0's

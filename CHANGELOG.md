@@ -7,6 +7,38 @@ All notable changes to Phoenix are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Phoenix Studio (`tools/phxstudio`, `make studio`) — a graphical hub over the whole engine**,
+  built on the engine itself (App loop, SDL window, software golden renderer, `phx::ui`).
+  *Overview*: the module dependency graph as built (layers from `depcheck.py`, edges from real
+  `#include`s) with per-module details, and the GBA/PSP/PC capability tiers parsed from
+  `caps.h`. *Assets*: every `.phxp` validated like `ResourceCache::mount()`, with live previews
+  — textures re-encoded per render tier by the bake's own encoders (GBA palettes, 8×8
+  colour-budget grid), animated sprite clips, tilemaps through the real parallax path with
+  collision/spawn overlays, sounds on the real mixer, spawn tables, blob hex. *Run*: one-click
+  games, editors, gates, every `make check` suite (pass/fail chips) and console builds, with
+  live colour-classified output and a stop that kills the whole process tree. `--shot`,
+  `--script` and `--run` make it scriptable. Its headless model is covered by `make pipeline`.
+- **`tools/common/ascii_font.h`**: a full printable-ASCII 5×7 tool font (the shared
+  `debug_font.h` is uppercase-only).
+- **`phx_sdl_set_window_scale()`** (SDL platform backend): a desktop-only, pre-init hook to pick
+  the window's integer scale (default unchanged at 3×), for tools with larger canvases.
+- **`examples/tinyllm` — a quantized transformer language model running on Game Boy Advance
+  hardware.** A 260K-parameter llama2-architecture model (RMSNorm, RoPE, grouped-query attention,
+  SwiGLU) generates English text on screen at **2.17 tokens/sec**, measured on mGBA. The int8
+  weights live in cartridge ROM and are streamed in place — the console's 256 KB of EWRAM never
+  holds a single weight. The inference core is float-free, heap-free and STL-free, so `make
+  determinism` proves the PC (float) and GBA (fixed16) builds emit byte-identical tokens.
+  New host exporter `examples/tinyllm/tools/export_model.py` (llama2.c `.bin` or PyTorch
+  `state_dict` → a versioned `.phxllm` blob) which also carries a bit-exact Python mirror of the
+  device arithmetic, used to generate the golden tokens the suite asserts against. Targets:
+  `make tinyllm`, `tinyllm-sdl`, `gba-tinyllm-ppu`, `size-gate-tinyllm`, `tinyllm-test` (on
+  `check` and `determinism`).
+- **`phx_gba_vblank_clock_start()`** (GBA platform backend): installs the VBlank IRQ — and with
+  it the true elapsed-frame counter the fixed-step accumulator uses — *without* starting audio.
+  Previously only `phx_gba_audio_start()` did, so a compute-heavy silent ROM had its sim clock
+  dilate (one step per loop iteration regardless of how many vblanks really passed).
+
 ## [0.1.0] - 2026-08-02
 
 First tagged release: the complete engine slice proven on all four targets.

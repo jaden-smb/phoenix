@@ -15,6 +15,7 @@
 | `phxpack`   | the above `+` → `assets.phxp`          | bundle assembler (sorted TOC, optional LZ77; see §2 for what's actually per-target) |
 | `phxtmap`   | GUI tilemap editor → `.tmj`            | authoring (wraps Tiled-compatible fmt)|
 | `phxentity` | GUI entity/prefab editor → `.json`     | component/prefab authoring             |
+| `phxstudio` | GUI hub (reads the tree + bundles)     | visualize + run: module graph, per-tier asset previews, one-click games/gates/suites (§10) |
 
 (No tool accepts XML/`.tmx` input today, despite some of the design language below — Tiled
 maps are `.tmj`/JSON only. ADPCM/8-bit-at-bake for `phxsnd` is target design, not built either
@@ -241,3 +242,17 @@ users aren't locked into our editor.
   the previous bundle; an unchanged input list skips the bake ("up to date"); the
   `<out>.lock`'s recorded output CRC32 lets CI flag a stale/hand-edited bundle; and
   `--upgrade` re-bakes a bundle from its own recorded source list. `--full` opts out.
+
+## 10. `phxstudio` — Phoenix Studio (GUI hub)
+
+A single window over the whole repository, built on the engine like the two editors (the
+feasibility study's Option A, `docs/gui-editor-feasibility.md`). It **reads**: the module graph
+(`depcheck.py` layers + real `#include` edges), the capability tiers (`caps.h`) and every
+`.phxp`, validated as `ResourceCache::mount()` would. It **previews**: textures re-encoded per
+render tier by the bake's own `tex_encode.h` and sampled by the software golden renderer (the
+GBA view is the real 4bpp/BGR555 result), sprite clips, tilemaps through the real parallax path,
+and sounds on the real mixer. It **runs**: games, editors, gates, every `make check` suite and
+the console builds as child processes, with live output. Like every tool here it never writes
+an engine blob. It writes nothing at all; the bake stays the single writer (§1). The headless
+model (`tools/phxstudio/model.h`) is asserted in `make pipeline`. Usage and controls:
+`tools/phxstudio/instructions.md`; `make studio && ./build/phxstudio`.

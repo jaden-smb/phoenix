@@ -47,3 +47,12 @@ cells). Used by the example's asset bake ("font" texture) and by both GUI editor
 (`phxtmap`/`phxentity`), so every tool draws the same text through the engine UI without
 shipping a font asset. Call `phxtool::build_debug_font(buf)` with a
 `kDebugFontW * kDebugFontH` `uint32_t` buffer.
+
+## ascii_font.h — the full-ASCII 5×7 tool font
+
+The same idea for **all printable ASCII** (32..126, lowercase and punctuation included, 127 = a
+hollow "unknown" box): a 128×48 RGBA atlas of 8×8 cells, 16 columns, `first_char=32`. The
+glyphs sit at a 1px pad, so an advance of 6 gives a dense text pitch. Used by `phxstudio`, whose
+file names, logs and summaries need lowercase. Call `phxtool::build_ascii_font(buf)` with a
+`kAsciiFontW * kAsciiFontH` `uint32_t` buffer. `debug_font.h` stays as is, since existing bakes
+depend on its exact atlas.

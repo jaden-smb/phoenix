@@ -28,7 +28,9 @@ enum Btn : uint32_t {
     B_UP = 0, B_DOWN, B_LEFT, B_RIGHT, B_A, B_B, B_X, B_Y, B_L, B_R, B_START, B_SELECT
 };
 
-constexpr int kScale = 3;   // window is kScale× the logical framebuffer for visibility
+// Window is g_scale× the logical framebuffer for visibility. 3× unless a desktop tool picks
+// another integer scale BEFORE init via phx_sdl_set_window_scale() (games never do).
+int g_scale = 3;
 
 struct SdlState {
     SDL_Window*   win = nullptr;
@@ -62,18 +64,18 @@ int sdl_init(const phx_platform_desc* desc) {
     SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     g.win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                             w * kScale, h * kScale, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+                             w * g_scale, h * g_scale, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
     if (!g.win) { std::fprintf(stderr, "[phx.sdl] CreateWindow(GL): %s\n", SDL_GetError()); return 1; }
     g.glctx = SDL_GL_CreateContext(g.win);
     if (!g.glctx) { std::fprintf(stderr, "[phx.sdl] GL_CreateContext: %s\n", SDL_GetError()); return 1; }
     SDL_GL_SetSwapInterval(desc->vsync ? 1 : 0);
     g.fb.w = w; g.fb.h = h; g.fb.pixels = nullptr;   // logical size only; GL owns the pixels
     std::printf("[phx.sdl] init '%s' %dx%d GL (window %dx%d, vsync=%d)\n",
-                title, w, h, w * kScale, h * kScale, desc->vsync);
+                title, w, h, w * g_scale, h * g_scale, desc->vsync);
 #else
     // Software render tier: a streaming texture we upload the CPU framebuffer into each frame.
     g.win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                             w * kScale, h * kScale, SDL_WINDOW_SHOWN);
+                             w * g_scale, h * g_scale, SDL_WINDOW_SHOWN);
     if (!g.win) { std::fprintf(stderr, "[phx.sdl] CreateWindow: %s\n", SDL_GetError()); return 1; }
 
     Uint32 rflags = SDL_RENDERER_ACCELERATED | (desc->vsync ? Uint32(SDL_RENDERER_PRESENTVSYNC) : 0u);
@@ -90,7 +92,7 @@ int sdl_init(const phx_platform_desc* desc) {
     g.fb.pixels = static_cast<uint32_t*>(std::calloc(size_t(w) * size_t(h), sizeof(uint32_t)));
     if (!g.fb.pixels) return 1;
     std::printf("[phx.sdl] init '%s' %dx%d SW (window %dx%d, vsync=%d)\n",
-                title, w, h, w * kScale, h * kScale, desc->vsync);
+                title, w, h, w * g_scale, h * g_scale, desc->vsync);
 #endif
 
     // Controllers are optional: a failure here (no evdev access, headless CI) must not take
@@ -225,7 +227,7 @@ void sdl_poll_input(phx_input_raw* out) {
     Uint32 ms = SDL_GetMouseState(&mx, &my);
     // Mouse arrives in WINDOW pixels; the seam promises framebuffer coordinates, so undo
     // the integer upscale (tools like phxtmap hit-test tiles against these).
-    out->pointer_x = int16_t(mx / kScale); out->pointer_y = int16_t(my / kScale);
+    out->pointer_x = int16_t(mx / g_scale); out->pointer_y = int16_t(my / g_scale);
     out->pointer_down = (ms & SDL_BUTTON(SDL_BUTTON_LEFT)) ? 1 : 0;
 }
 
@@ -293,6 +295,16 @@ const phx_platform g_sdl_platform = {
 
 extern "C" const phx_platform* phx_platform_get(void) { return &g_sdl_platform; }
 
+// --- desktop-only extension: window scale ----------------------------------------------------
+// Like phx_sdl_audio_start / phx_sdl_readback: an extra extern "C" symbol only this TU exports,
+// declared by the desktop tool that uses it, absent on every console backend. Must be called
+// before App::run() boots the platform (it sizes the window at init). Clamped to 1..6; the
+// default stays 3×, so every game and verifier is unaffected. Used by phxstudio, whose 640×360
+// canvas at 2× is a 1280×720 window (3× would not fit a 1080p screen).
+extern "C" void phx_sdl_set_window_scale(int scale) {
+    g_scale = scale < 1 ? 1 : (scale > 6 ? 6 : scale);
+}
+
 // Software-tier graphics contract: hand the render backend our CPU framebuffer.
 extern "C" phx_soft_fb phx_gfx_soft_lock(phx_gfx* gfx) {
     return reinterpret_cast<SdlState*>(gfx)->fb;
@@ -302,7 +314,7 @@ extern "C" phx_soft_fb phx_gfx_soft_lock(phx_gfx* gfx) {
 // Read the *actually presented* frame back as logical-resolution phx Rgba (R|G<<8|B<<16|A<<24),
 // so a headless harness can pixel-diff the real window/GPU output against the software golden
 // reference (the same way the PPU/GU backends are verified). Call right after the renderer's
-// end_frame(), before present(). Returns 0 on success. The window is kScale× the logical size,
+// end_frame(), before present(). Returns 0 on success. The window is g_scale× the logical size,
 // so we read the drawable and sample each logical pixel's block centre.
 extern "C" int phx_sdl_readback(uint32_t* out, int lw, int lh) {
     if (!out || lw <= 0 || lh <= 0) return 1;

@@ -73,8 +73,13 @@ phoenix/
 │   │                             window/renderer/UI (editor.h = headlessly-tested document model)
 │   ├── phxentity/                GUI entity/prefab TABLE editor over the phxbin author JSON — same
 │   │                             engine shell + doc-model split
+│   ├── phxstudio/                Phoenix Studio — the graphical hub over the whole engine: module
+│   │                             graph + caps tiers, bundle browser with per-render-tier previews,
+│   │                             one-click games/editors/gates/suites/console builds. model.h =
+│   │                             headless model (pipeline suite) · jobs.h = process runner · main.cpp
 │   └── common/                   depcheck.py (layering gate) · size_gate.py (GBA budget gate) ·
 │                                 bin2s.py (portable asset embedding) · debug_font.h (shared tool font) ·
+│                                 ascii_font.h (full-ASCII 5x7 tool font) ·
 │                                 doxyfilter.py (promotes '//' header comments for `make docs`)
 │
 ├── examples/
@@ -90,6 +95,18 @@ phoenix/
 │   │                             psp_main entries (`make emberwing[-ppu|-sdl|-gl]`,
 │   │                             `gba-emberwing[-ppu]` — the PPU ROM is the shipping GBA build —
 │   │                             and `psp-emberwing`)
+│   ├── tinyllm/                  A quantized transformer LANGUAGE MODEL on a GBA ✅ (README.md =
+│   │   ├── src/                  the memory budget + measured tok/s). llm_format.h (the .phxllm
+│   │   │                         blob: engine-free POD) · fixedmath.h (divide-free Q16.16:
+│   │   │                         Newton reciprocal, integer isqrt, ROM exp/SiLU LUTs) ·
+│   │   │                         llm.h/llm.cpp (float-free, heap-free inference core; weights
+│   │   │                         streamed IN PLACE from cartridge ROM) · llm_build.h (host
+│   │   │                         .phxllm writer + the generated test fixture) · text_font.h ·
+│   │   │                         tinyllm.h/.cpp (BG-tilemap text console) · bake.h/bake_main.cpp ·
+│   │   │                         main/desktop_main/gba_ppu_main entries (`make tinyllm[-sdl]`,
+│   │   │                         `gba-tinyllm-ppu` = the shipping ROM)
+│   │   └── tools/                export_model.py: checkpoint -> int8 .phxllm, + a BIT-EXACT
+│   │                             Python mirror of the device arithmetic (writes the goldens)
 │   ├── gba_smoke/ gba_ppu/       Console bring-up + verification smokes (one concern each):
 │   ├── gba_audio/ gba_save/      render, PPU hardware, Direct Sound, battery-SRAM save
 │   └── psp_smoke/ psp_gu/        PSP equivalents: render, sceGu display list,
@@ -100,11 +117,12 @@ phoenix/
     ├── phx_test.h                tiny in-house unit harness (PHX_TEST / CHECK*) — no GoogleTest
     ├── unit/                     main.cpp (runner) + test_*.cpp — ALL linked into one binary
     │                             (build/phx_tests): fixed, memory, ecs, time, input, physics,
-    │                             anim, scene, ui, audio, stream, lz, png, json, wav, cmdqueue
+    │                             anim, scene, ui, audio, stream, lz, png, json, wav, cmdqueue,
+    │                             viz, particles, tinyllm_{math,format,tokenizer,font}
     ├── suites/                   *_test.cpp — headless integration binaries, one per `make`
     │                             suite target, each with its own main() (smoke render ppu gu
-    │                             playable physics anim scene ui platformer emberwing audio
-    │                             texcache png sprite tiled resource pipeline)
+    │                             playable physics anim scene ui platformer emberwing miracle
+    │                             tinyllm audio texcache png sprite tiled resource pipeline)
     ├── verify/                   real-device verification (SDL window / GL readback / live audio
     │                             device) — the sdl-verify / gl-verify / audio-verify targets
     └── fixtures/                 shared test data (png_fixtures.h: in-source PNG byte blobs)

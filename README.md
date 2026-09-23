@@ -74,7 +74,10 @@ Expected: `PASS 120336 checks across 101 cases`, a `... PASS` line per suite, an
 
 With SDL2 (and libGL) you also get windowed play and the desktop verifiers — `make sdl`, `make
 gl`, `make sdl-verify`, `make gl-verify`, `make audio-verify` — plus the two GUI editors, `make
-tmap` (tilemap) and `make entity` (record tables). Every suite is its own target (`make physics`,
+tmap` (tilemap) and `make entity` (record tables), and **Phoenix Studio**, `make studio && ./build/phxstudio`:
+one window that shows the module graph and capability tiers, previews every baked asset as each
+console would render it, and runs every game, editor, gate and suite with a click
+([instructions](tools/phxstudio/instructions.md)). Every suite is its own target (`make physics`,
 `make ppu`, `make resource`, …); see the [Makefile](Makefile), and the `instructions.md` in each
 tool folder. With doxygen installed, `make docs` generates the browsable API reference (public
 headers + this manual) into `build/docs/html`.

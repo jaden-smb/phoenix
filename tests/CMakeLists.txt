@@ -13,6 +13,8 @@ set(_render_src  ${CMAKE_SOURCE_DIR}/engine/render/src)
 # builders.h -> analyze.h (tools/phxviz) -> viz.h (examples/miracle-player): the bake path is
 # shared, so anything including builders.h (or the viz format directly) needs these on its path.
 set(_viz_inc ${CMAKE_SOURCE_DIR}/tools/phxviz ${CMAKE_SOURCE_DIR}/examples/miracle-player/src)
+# tinyllm's fixed-point core, blob format and host-side blob builder (unit + integration tests).
+set(_tinyllm_inc ${CMAKE_SOURCE_DIR}/examples/tinyllm/src)
 
 # Several integration tests bake a bundle to "build/<name>.phxp" (a path relative to the cwd)
 # and mount it back. Run every test from the CMake build tree and give it that "build/" subdir,
@@ -29,9 +31,14 @@ add_executable(phx_tests
   unit/test_png.cpp unit/test_json.cpp unit/test_wav.cpp unit/test_cmdqueue.cpp
   unit/test_viz.cpp
   unit/test_particles.cpp
+  unit/test_tinyllm_math.cpp
+  unit/test_tinyllm_format.cpp
+  unit/test_tinyllm_tokenizer.cpp
+  unit/test_tinyllm_font.cpp
   unit/test_version.cpp
+  ${CMAKE_SOURCE_DIR}/examples/tinyllm/src/llm.cpp
 )
-target_include_directories(phx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${_phxpack_inc} ${_viz_inc})
+target_include_directories(phx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${_phxpack_inc} ${_viz_inc} ${_tinyllm_inc})
 target_link_libraries(phx_tests PRIVATE
   phx_core phx_memory phx_ecs phx_physics phx_anim phx_scene phx_audio phx_input
   phx_ui phx_resource)
@@ -57,6 +64,7 @@ set(_itests
   platformer:platformer_test
   emberwing:emberwing_test
   miracle:miracle_test
+  tinyllm:tinyllm_test
   audio:audio_test
   texcache:texcache_test
   png:png_test
@@ -74,6 +82,7 @@ foreach(spec ${_itests})
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${_phxpack_inc}
     ${_viz_inc}                                     # builders.h -> analyze.h -> viz.h
+    ${_tinyllm_inc}                                 # tinyllm_test: llm.h / llm_build.h / bake.h
     ${CMAKE_SOURCE_DIR}/tools/common                # bake.h -> debug_font.h
     ${CMAKE_SOURCE_DIR}/tools/phxtmap               # pipeline_test: the phxtmap editor model
     ${CMAKE_SOURCE_DIR}/examples/platformer/src)   # platformer_test: components.h / bake.h
@@ -100,6 +109,16 @@ target_include_directories(it_emberwing PRIVATE ${CMAKE_SOURCE_DIR}/engine/resou
 target_sources(it_miracle PRIVATE ${CMAKE_SOURCE_DIR}/examples/miracle-player/src/miracle.cpp)
 target_include_directories(it_miracle PRIVATE
   ${CMAKE_SOURCE_DIR}/examples/miracle-player/src ${CMAKE_SOURCE_DIR}/engine/resource/include)
+
+# The tinyllm test drives the real TinyLlmGame and the inference core, so compile in both TUs
+# (the rest of the example is header-only). Its golden token file lives in the SOURCE tree while
+# CTest runs from the build tree, so the path is passed in rather than assumed.
+target_sources(it_tinyllm PRIVATE
+  ${CMAKE_SOURCE_DIR}/examples/tinyllm/src/llm.cpp
+  ${CMAKE_SOURCE_DIR}/examples/tinyllm/src/tinyllm.cpp)
+target_include_directories(it_tinyllm PRIVATE ${CMAKE_SOURCE_DIR}/engine/resource/include)
+target_compile_definitions(it_tinyllm PRIVATE
+  TINYLLM_GOLDEN_PATH="${CMAKE_SOURCE_DIR}/tests/fixtures/tinyllm_golden.txt")
 
 # pipeline_test is in-process; it also drops author-source fixtures into build/. The CLI smoke
 # below then runs the REAL converter + assembler binaries over those fixtures (proving the

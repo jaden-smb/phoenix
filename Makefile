@@ -39,6 +39,7 @@ INCLUDES := -Iengine/core/include \
             -Itools/phxviz \
             -Iexamples/platformer/src \
             -Iexamples/miracle-player/src \
+            -Iexamples/tinyllm/src \
             -Itests
 
 TIER ?= pc
@@ -93,6 +94,10 @@ TEST_SRC   := tests/unit/main.cpp \
               tests/unit/test_cmdqueue.cpp \
               tests/unit/test_viz.cpp \
               tests/unit/test_particles.cpp \
+              tests/unit/test_tinyllm_math.cpp \
+              tests/unit/test_tinyllm_format.cpp \
+              tests/unit/test_tinyllm_tokenizer.cpp \
+              tests/unit/test_tinyllm_font.cpp \
               tests/unit/test_version.cpp
 
 # The unit-test binary does not link the App/loop entry (no main collision).
@@ -105,7 +110,8 @@ UNIT_ENGINE := engine/core/src/assert.cpp \
                engine/anim/src/anim.cpp \
                engine/scene/src/scene.cpp \
                engine/audio/src/mixer.cpp \
-               engine/audio/src/stream.cpp
+               engine/audio/src/stream.cpp \
+               examples/tinyllm/src/llm.cpp
 
 UNIT_OBJ  := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(UNIT_ENGINE) $(TEST_SRC))
 
@@ -228,6 +234,68 @@ MIRACLE_TEST_SRC := $(APP_SRC) \
                     tests/suites/miracle_test.cpp
 MIRACLE_TEST_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(MIRACLE_TEST_SRC))
 MIRACLE_TEST     := $(BUILD)/phx_miracle
+
+# ---- tinyllm: a quantized transformer language model running on a GBA cartridge ---------------
+# The 260K-parameter TinyStories checkpoint is NOT in the repo (this tree tracks no binaries); it
+# is fetched once at build time and baked to a `.phxllm` by the host exporter. If curl, the
+# network, or numpy is unavailable the recipe leaves an empty marker so it is not retried on
+# every build, and every tinyllm target transparently falls back to the tiny GENERATED fixture
+# model — so a fresh offline clone still builds and runs all of them. To retry the fetch:
+#     rm -f build/tinyllm.phxllm build/stories260K.bin && make tinyllm
+TINYLLM_URL  := https://huggingface.co/karpathy/tinyllamas/resolve/main/stories260K
+TINYLLM_CKPT := $(BUILD)/stories260K.bin
+TINYLLM_TOK  := $(BUILD)/tok512.bin
+TINYLLM_BLOB := $(BUILD)/tinyllm.phxllm
+
+$(TINYLLM_CKPT):
+	@mkdir -p $(BUILD)
+	@command -v curl >/dev/null 2>&1 && curl -fsSL -o $@ $(TINYLLM_URL)/stories260K.bin \
+	  || { echo "tinyllm: could not fetch stories260K.bin — the fixture model will be used"; : > $@; }
+
+$(TINYLLM_TOK):
+	@mkdir -p $(BUILD)
+	@command -v curl >/dev/null 2>&1 && curl -fsSL -o $@ $(TINYLLM_URL)/tok512.bin \
+	  || { echo "tinyllm: could not fetch tok512.bin — the fixture model will be used"; : > $@; }
+
+$(TINYLLM_BLOB): $(TINYLLM_CKPT) $(TINYLLM_TOK) examples/tinyllm/tools/export_model.py
+	@mkdir -p $(BUILD)
+	@if [ -s $(TINYLLM_CKPT) ] && [ -s $(TINYLLM_TOK) ] && python3 -c 'import numpy' >/dev/null 2>&1; then \
+	   python3 examples/tinyllm/tools/export_model.py export \
+	     --checkpoint $(TINYLLM_CKPT) --tokenizer $(TINYLLM_TOK) --out $@ | tail -n 24; \
+	 else \
+	   echo "tinyllm: no checkpoint or no numpy — builds will use the generated fixture model"; \
+	   : > $@; \
+	 fi
+
+# Headless build (null platform): bakes the bundle at boot, generates from a fixed prompt and
+# seed, prints the text. The fast dev loop; not part of `check` (it is a demo entry, not a test).
+TINYLLMAPP_SRC := $(APP_SRC) \
+                  engine/resource/src/cache.cpp \
+                  examples/tinyllm/src/llm.cpp \
+                  examples/tinyllm/src/tinyllm.cpp \
+                  examples/tinyllm/src/main.cpp
+TINYLLMAPP_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(TINYLLMAPP_SRC))
+TINYLLMAPP     := $(BUILD)/tinyllm
+
+# The SDL build: the REAL WINDOW (`make tinyllm-sdl`), rendering exactly what the GBA renders.
+TINYLLMSDL_SRC := $(filter-out engine/platform/src/null/null_platform.cpp \
+                               examples/tinyllm/src/main.cpp,$(TINYLLMAPP_SRC)) \
+                  engine/platform/src/sdl/sdl_platform.cpp \
+                  examples/tinyllm/src/desktop_main.cpp
+
+# The tinyllm suite binary (headless, deterministic): the core against the golden token file plus
+# the whole example under the real loop. Part of `check` AND `determinism` — the golden tokens
+# must be identical on both scalar tiers, which is the proof no float leaked into the core.
+TINYLLM_TEST_SRC := $(APP_SRC) \
+                    engine/resource/src/cache.cpp \
+                    examples/tinyllm/src/llm.cpp \
+                    examples/tinyllm/src/tinyllm.cpp \
+                    tests/suites/tinyllm_test.cpp
+TINYLLM_TEST_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(TINYLLM_TEST_SRC))
+TINYLLM_TEST     := $(BUILD)/phx_tinyllm
+
+# Host tool: bakes the tinyllm .phxp for the ROM, and dumps the generated fixture model.
+TINYLLMBAKE := $(BUILD)/tinyllmbake
 
 # The emberwing binary: the SECOND full-game capstone (examples/emberwing — the Cinder
 # Hollow vertical slice), driven headlessly by a scripted controller. Exercises everything
@@ -395,16 +463,16 @@ GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/
             $(patsubst tests/suites/render_test.cpp,tests/suites/gu_test.cpp,$(RENDER_SRC)))
 GU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(GU_SRC))
 
-.PHONY: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl miracle miracle-headless miracle-test gba-miracle-ppu size-gate-miracle sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
+.PHONY: studio test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl miracle miracle-headless miracle-test gba-miracle-ppu size-gate-miracle tinyllm tinyllm-sdl tinyllm-test tinyllm-fixture tinyllm-model gba-tinyllm-ppu size-gate-tinyllm sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
 
 # Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstones + audio + resource + dep gate.
-check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu miracle-test audio texcache png sprite tiled resource phxpack pipeline tools depcheck
+check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test audio texcache png sprite tiled resource phxpack pipeline tools depcheck
 
 # --- M7 release gates --------------------------------------------------------------------------
 # Determinism gate: the SAME suites under scalar=float (pc) and scalar=fixed16 (gba_sim) must
 # print identical outcomes AND render the byte-identical frame. Cheap to run: the per-tier
 # object dirs mean the second tier is mostly relinks. This is a named release gate (docs/09 §5).
-DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu miracle-test
+DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test
 determinism:
 	@echo "determinism gate: pc (scalar=float) vs gba_sim (scalar=fixed16)"
 	@$(MAKE) -s $(DET_SUITES) TIER=pc      | grep -aE "PASS|FAIL" > $(BUILD)/det-pc.log
@@ -472,6 +540,9 @@ platformer: $(PLATFORMER)
 miracle-test: $(MIRACLE_TEST)
 	@./$(MIRACLE_TEST)
 
+tinyllm-test: $(TINYLLM_TEST)
+	@./$(TINYLLM_TEST)
+
 emberwing: $(EMBERWING)
 	@./$(EMBERWING)
 
@@ -515,6 +586,37 @@ miracle: $(MIRACLE_WAV)
 # and, with PHX_MAX_FRAMES=N, gives a bounded smoke run. Not part of `check` (loops on null).
 miracle-headless: $(MIRACLE_WAV) $(MIRACLEAPP)
 	@echo "built $(MIRACLEAPP)  —  PHX_MAX_FRAMES=N ./$(MIRACLEAPP) for a bounded run"
+
+# --- tinyllm ------------------------------------------------------------------------------------
+# Fetch + bake the real 260K checkpoint on its own (the other targets do this implicitly).
+tinyllm-model: $(TINYLLM_BLOB)
+	@if [ -s $(TINYLLM_BLOB) ]; then echo "tinyllm: model ready at $(TINYLLM_BLOB)"; \
+	 else echo "tinyllm: no model — targets will use the generated fixture"; fi
+
+# The headless runner: generate from a baked-in prompt and print the text. The fast dev loop.
+#   TINYLLM_PROMPT=0..3  TINYLLM_TOKENS=N  TINYLLM_GREEDY=1  TINYLLM_SEED=n
+tinyllm: $(TINYLLM_BLOB) $(TINYLLMAPP)
+	@TINYLLM_MODEL=$(TINYLLM_BLOB) ./$(TINYLLMAPP)
+
+# The windowed build: the same 240x160 tilemap console the GBA renders, in an SDL window.
+# A = run/pause, B = reset, START = next prompt, SELECT = frame profiler.
+tinyllm-sdl: $(TINYLLM_BLOB)
+	@command -v sdl2-config >/dev/null 2>&1 || { echo "tinyllm-sdl needs SDL2 (sdl2-config not found). Install libsdl2-dev."; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
+	  $(TINYLLMSDL_SRC) `sdl2-config --libs` -o $(BUILD)/tinyllm_sdl
+	@echo "built $(BUILD)/tinyllm_sdl  —  run TINYLLM_MODEL=$(TINYLLM_BLOB) ./$(BUILD)/tinyllm_sdl"
+
+# MAINTENANCE target: regenerate the committed golden token file. Dumps the C++-generated fixture
+# model, then has the Python reference (an independent implementation of the same integer
+# arithmetic) read those exact bytes and write the tokens the suite asserts against. Needs numpy;
+# `make check` does not — it only reads the committed text file.
+tinyllm-fixture: $(TINYLLMBAKE)
+	@mkdir -p $(BUILD)
+	./$(TINYLLMBAKE) --dump-fixture $(BUILD)/tinyllm_fixture.phxllm
+	python3 examples/tinyllm/tools/export_model.py golden \
+	  --blob $(BUILD)/tinyllm_fixture.phxllm --golden tests/fixtures/tinyllm_golden.txt \
+	  --prompt "the cat sat on the mat" --steps 16
 
 # Build the windowed GPU (OpenGL) example. Needs SDL2 + libGL.
 gl:
@@ -586,6 +688,22 @@ entity:
 	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
 	  $(ENTITY_SRC) `sdl2-config --libs` -o $(BUILD)/phxentity
 	@echo "built $(BUILD)/phxentity  —  GUI prefab-table editor: ./$(BUILD)/phxentity file.json"
+
+# phxstudio: Phoenix Studio — the graphical hub over the whole engine: the module graph as built,
+# every .phxp with live per-render-tier previews (textures, sprites, tilemaps, sounds), and
+# one-click games / editors / gates / suites / console builds with live output. The same engine
+# shell as the editors plus the mixer (sound preview). Its document model
+# (tools/phxstudio/model.h) is unit-tested in the pipeline suite. Needs SDL2 + a display.
+STUDIO_SRC := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) \
+              engine/platform/src/sdl/sdl_platform.cpp engine/audio/src/mixer.cpp \
+              tools/phxstudio/main.cpp
+
+studio:
+	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found). Install libsdl2-dev."; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
+	  $(STUDIO_SRC) `sdl2-config --libs` -pthread -o $(BUILD)/phxstudio
+	@echo "built $(BUILD)/phxstudio  —  Phoenix Studio: ./$(BUILD)/phxstudio  (run from the repo root)"
 
 # --- Windows cross build (MinGW-w64) --------------------------------------------------------
 # Cross-compiles the FULL host build — engine + every test/tool binary — into Windows PE32+
@@ -719,6 +837,21 @@ GBA_MIRACLE_PPU_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engi
 GBA_MIRACLE_PPU_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GBA_MIRACLE_PPU_SRC))
 MIRACLEBAKE := $(BUILD)/miraclebake
 
+# tinyllm as the SHIPPING GBA ROM: a quantized transformer generating text on the native PPU.
+# No audio, no physics/anim/scene — a text console and an inference core. The ~300 KB int8 model
+# rides in cartridge ROM inside the bundle (bin2s) and is read in place; the only EWRAM cost is
+# the engine arena, the KV cache, and one screen of tile indices.
+GBA_TINYLLM_PPU_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
+                engine/memory/src/memory_root.cpp engine/ecs/src/world.cpp \
+                engine/render/src/renderer.cpp engine/render/src/gba/gba_ppu.cpp \
+                engine/physics/src/physics.cpp engine/anim/src/anim.cpp \
+                engine/scene/src/scene.cpp engine/ui/src/ui.cpp engine/runtime/src/app.cpp \
+                engine/resource/src/cache.cpp \
+                engine/platform/src/gba/gba_platform.cpp \
+                examples/tinyllm/src/llm.cpp examples/tinyllm/src/tinyllm.cpp \
+                examples/tinyllm/src/gba_ppu_main.cpp
+GBA_TINYLLM_PPU_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GBA_TINYLLM_PPU_SRC))
+
 gba: $(BUILD)/gba/phx-smoke.gba
 	@echo "built $<  —  load in mGBA (d-pad moves the sprite)"
 
@@ -749,6 +882,21 @@ gba-emberwing-ppu: $(BUILD)/gba/phx-emberwing-ppu.gba
 # The "A Small Miracle" music visualizer as a native-PPU GBA ROM (the shipping miracle build).
 gba-miracle-ppu: $(BUILD)/gba/phx-miracle-ppu.gba
 	@echo "built $<  —  music visualizer on the GBA PPU; load in mGBA (START play/pause, L/R seek, A style, B chrome)"
+
+# A transformer language model generating text on Game Boy Advance hardware (native PPU).
+gba-tinyllm-ppu: $(BUILD)/gba/phx-tinyllm.gba
+	@echo "built $<  —  a language model on a GBA; load in mGBA (A run/pause, B reset, START prompt, SELECT profiler)"
+
+# Size gate for the tinyllm ROM. The model is legitimately ~300 KB of int8 weights in cartridge
+# ROM, which blows the default 1 MB code budget's intent but is nowhere near the 32 MB cart cap —
+# so the ROM budget is raised to 2 MB (room for a ~15 M-parameter checkpoint later) while the
+# scarce IWRAM/EWRAM budgets, which are the ones that actually matter here, stay unchanged.
+size-gate-tinyllm: $(BUILD)/gba/phx-tinyllm.gba
+	@python3 tools/common/size_gate.py \
+	  --rom $(BUILD)/gba/phx-tinyllm.gba \
+	  --elf $(BUILD)/gba/tinyllm.elf \
+	  --rom-budget-mb 2 \
+	  --size-tool $(DEVKITARM)/bin/arm-none-eabi-size
 
 # Size gate for the miracle ROM: the song is legitimately ~10 MB of PCM in cartridge ROM, so the
 # ROM budget is raised to 16 MB (still half the 32 MB cart cap); the scarce RAM budgets are unchanged.
@@ -847,6 +995,31 @@ $(BUILD)/gba/miracle_bundle.o: $(BUILD)/gba/miracle.phxp
 $(BUILD)/gba/phx-miracle-ppu.gba: $(GBA_MIRACLE_PPU_OBJ) $(BUILD)/gba/miracle_bundle.o
 	$(GBA_CXX) $(GBA_FLAGS) -specs=gba.specs $^ -o $(BUILD)/gba/miracle-ppu.elf
 	$(GBA_OBJCOPY) -O binary $(BUILD)/gba/miracle-ppu.elf $@
+	$(GBA_FIX) $@ >/dev/null
+	@echo "ROM: $@ ($$(stat -c%s $@) bytes, header fixed)"
+
+# host tool that bakes the tinyllm .phxp (tier 0) and dumps the generated fixture model.
+# Links the core TU too: the bake validates a candidate .phxllm before packing it, so a bad
+# export is rejected on the host instead of shipping in a ROM.
+$(TINYLLMBAKE): $(HOSTOBJ)/examples/tinyllm/src/bake_main.o $(HOSTOBJ)/examples/tinyllm/src/llm.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# Tier 0 bake: the font atlas becomes 4bpp paletted tiles (what the PPU text console wants); the
+# model goes in verbatim as an opaque Blob, UNCOMPRESSED so the ROM can read weights in place.
+$(BUILD)/gba/tinyllm.phxp: $(TINYLLMBAKE) $(TINYLLM_BLOB)
+	@mkdir -p $(dir $@)
+	./$(TINYLLMBAKE) $@ 0 $(TINYLLM_BLOB)
+
+# bin2s: the bundle bytes -> a .rodata object (symbol tinyllm_phxp[]), lives in cartridge ROM
+$(BUILD)/gba/tinyllm_bundle.o: $(BUILD)/gba/tinyllm.phxp
+	@command -v $(BIN2S) >/dev/null 2>&1 || { echo "needs devkitPro bin2s ($(BIN2S))"; exit 1; }
+	$(BIN2S) $< > $(BUILD)/gba/tinyllm_bundle.s
+	$(GBA_CXX) $(GBA_ARCH) -x assembler-with-cpp -c $(BUILD)/gba/tinyllm_bundle.s -o $@
+
+$(BUILD)/gba/phx-tinyllm.gba: $(GBA_TINYLLM_PPU_OBJ) $(BUILD)/gba/tinyllm_bundle.o
+	$(GBA_CXX) $(GBA_FLAGS) -specs=gba.specs $^ -o $(BUILD)/gba/tinyllm.elf
+	$(GBA_OBJCOPY) -O binary $(BUILD)/gba/tinyllm.elf $@
 	$(GBA_FIX) $@ >/dev/null
 	@echo "ROM: $@ ($$(stat -c%s $@) bytes, header fixed)"
 
@@ -1179,10 +1352,11 @@ dist-win: win
 	@echo "dist: $(DIST)/phoenix-$(PHX_VERSION)-tools-windows-x86_64.zip"
 
 # GBA: the two shipping PPU ROMs (the software-render variants are dev references, not releases).
-dist-gba: gba-platformer-ppu gba-emberwing-ppu
+dist-gba: gba-platformer-ppu gba-emberwing-ppu gba-tinyllm-ppu
 	@rm -rf $(DIST)/phoenix-$(PHX_VERSION)-gba
 	@mkdir -p $(DIST)/phoenix-$(PHX_VERSION)-gba
 	@cp $(BUILD)/gba/phx-platformer-ppu.gba $(BUILD)/gba/phx-emberwing-ppu.gba \
+	  $(BUILD)/gba/phx-tinyllm.gba \
 	  $(DIST)/phoenix-$(PHX_VERSION)-gba/
 	@cp LICENSE $(DIST)/phoenix-$(PHX_VERSION)-gba/
 	@cd $(DIST) && $(PHX_ZIP) phoenix-$(PHX_VERSION)-gba.zip phoenix-$(PHX_VERSION)-gba
@@ -1256,6 +1430,14 @@ $(MIRACLEAPP): $(MIRACLEAPP_OBJ)
 $(MIRACLE_TEST): $(MIRACLE_TEST_OBJ)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(MIRACLE_TEST_OBJ) -o $@
+
+$(TINYLLMAPP): $(TINYLLMAPP_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(TINYLLMAPP_OBJ) -o $@
+
+$(TINYLLM_TEST): $(TINYLLM_TEST_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(TINYLLM_TEST_OBJ) -o $@
 
 $(EMBERWING): $(EMBERWING_OBJ)
 	@mkdir -p $(dir $@)
