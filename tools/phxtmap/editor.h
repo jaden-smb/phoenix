@@ -9,6 +9,7 @@
 #define PHX_TOOLS_PHXTMAP_EDITOR_H
 
 #include "tiled.h"   // tools/phxpack — the one Tiled importer (+ kTileFlag* via bundle.h)
+#include "json.h"    // tools/phxpack — for the tileset "image" the importer does not keep
 
 #include <algorithm>
 #include <cstdint>
@@ -28,6 +29,11 @@ public:
     std::vector<std::pair<double,double>> layer_parallax;       // 1:1 = moves with the world
     std::vector<uint8_t> tile_flags;                            // per-GID kTileFlag* (collision)
     std::vector<TiledSpawn> spawns;
+    // The tileset's source image as written in the file (Tiled's tileset "image"): the editor
+    // draws the REAL tiles from it; the bake keys the texture off the tileset name (its stem).
+    std::string tileset_image;
+    int tileset_cols = 0, tileset_count = 0;     // known once the GUI decoded the image (for Tiled)
+    int tileset_img_w = 0, tileset_img_h = 0;
 
     // A blank single-layer document.
     static TmapDoc blank(int w, int h, int tw, int th, const std::string& ts) {
@@ -52,6 +58,17 @@ public:
         out.layer_parallax = tm.layer_parallax;
         out.tile_flags = tm.tile_flags;
         out.spawns = tm.spawns;
+        out.tileset_image.clear();
+        JsonValue root;
+        if (JsonParser::parse(tmj_text, root, nullptr))
+            if (const JsonValue* ts = root.find("tilesets"); ts && ts->is_arr() && !ts->arr.empty()) {
+                out.tileset_image = ts->arr[0].str_at("image");
+                out.tileset_cols = ts->arr[0].int_at("columns", 0);
+                out.tileset_count = ts->arr[0].int_at("tilecount", 0);
+                out.tileset_img_w = ts->arr[0].int_at("imagewidth", 0);
+                out.tileset_img_h = ts->arr[0].int_at("imageheight", 0);
+            }
+        out.undo_.clear(); out.redo_.clear();
         return true;
     }
 
@@ -173,6 +190,135 @@ public:
         dirty = true;
     }
 
+    bool remove_layer(int l) {
+        if (l < 0 || l >= int(layers.size()) || layers.size() == 1) return false;   // keep >= 1
+        layers.erase(layers.begin() + l);
+        layer_names.erase(layer_names.begin() + l);
+        if (l < int(layer_parallax.size())) layer_parallax.erase(layer_parallax.begin() + l);
+        dirty = true;
+        return true;
+    }
+    // Move layer l one step toward the back (dir -1) or front (+1). The LAST layer is the
+    // gameplay/solid layer, so reordering changes what collides — the GUI says so.
+    bool move_layer(int l, int dir) {
+        const int to = l + dir;
+        if (l < 0 || to < 0 || l >= int(layers.size()) || to >= int(layers.size())) return false;
+        std::swap(layers[size_t(l)], layers[size_t(to)]);
+        std::swap(layer_names[size_t(l)], layer_names[size_t(to)]);
+        while (layer_parallax.size() < layers.size()) layer_parallax.emplace_back(1.0, 1.0);
+        std::swap(layer_parallax[size_t(l)], layer_parallax[size_t(to)]);
+        dirty = true;
+        return true;
+    }
+    void rename_layer(int l, const std::string& n) {
+        if (l < 0 || l >= int(layers.size()) || n.empty() || layer_names[size_t(l)] == n) return;
+        layer_names[size_t(l)] = n;
+        dirty = true;
+    }
+    void set_parallax(int l, double fx, double fy) {
+        if (l < 0 || l >= int(layers.size())) return;
+        while (layer_parallax.size() < layers.size()) layer_parallax.emplace_back(1.0, 1.0);
+        if (layer_parallax[size_t(l)] == std::make_pair(fx, fy)) return;
+        layer_parallax[size_t(l)] = { fx, fy };
+        dirty = true;
+    }
+    // New map size in tiles; `ax`/`ay` in {0,1,2} anchor the old cells left/centre/right,
+    // top/middle/bottom. Spawns move with the anchor; the ones that fall outside are dropped.
+    void resize(int nw, int nh, int ax = 0, int ay = 0) {
+        nw = std::max(1, std::min(nw, 4096)); nh = std::max(1, std::min(nh, 4096));
+        if (nw == width && nh == height) return;
+        const int ox = ax == 0 ? 0 : ax == 1 ? (nw - width) / 2 : nw - width;
+        const int oy = ay == 0 ? 0 : ay == 1 ? (nh - height) / 2 : nh - height;
+        for (auto& L : layers) {
+            std::vector<uint16_t> n(size_t(nw) * size_t(nh), 0);
+            for (int y = 0; y < height; ++y)
+                for (int x = 0; x < width; ++x) {
+                    const int tx = x + ox, ty = y + oy;
+                    if (tx >= 0 && ty >= 0 && tx < nw && ty < nh) n[size_t(ty) * size_t(nw) + size_t(tx)] = L[size_t(y) * size_t(width) + size_t(x)];
+                }
+            L.swap(n);
+        }
+        std::vector<TiledSpawn> keep;
+        for (TiledSpawn s : spawns) {
+            s.x += ox * tile_w; s.y += oy * tile_h;
+            if (s.x >= 0 && s.y >= 0 && s.x < nw * tile_w && s.y < nh * tile_h) keep.push_back(s);
+        }
+        spawns.swap(keep);
+        width = nw; height = nh;
+        dirty = true;
+    }
+
+    // ---- stamps: a rectangular block of GIDs (0 = transparent in the stamp) ----
+    struct Stamp { int w = 1, h = 1; std::vector<uint16_t> gids{ 1 }; };
+    Stamp copy_stamp(int layer, int x0, int y0, int x1, int y1) const {
+        if (x0 > x1) std::swap(x0, x1);
+        if (y0 > y1) std::swap(y0, y1);
+        Stamp st;
+        st.w = x1 - x0 + 1; st.h = y1 - y0 + 1;
+        st.gids.assign(size_t(st.w) * size_t(st.h), 0);
+        for (int y = 0; y < st.h; ++y) for (int x = 0; x < st.w; ++x) st.gids[size_t(y) * size_t(st.w) + size_t(x)] = tile(layer, x0 + x, y0 + y);
+        return st;
+    }
+    // Paint the stamp with its top-left at (x, y); `skip_empty` keeps cells under stamp 0s.
+    int paint_stamp(int layer, int x, int y, const Stamp& st, bool skip_empty = true) {
+        int changed = 0;
+        for (int j = 0; j < st.h; ++j)
+            for (int i = 0; i < st.w; ++i) {
+                const uint16_t g = st.gids[size_t(j) * size_t(st.w) + size_t(i)];
+                if (skip_empty && g == 0) continue;
+                if (!in_bounds(x + i, y + j) || tile(layer, x + i, y + j) == g) continue;
+                set_tile(layer, x + i, y + j, g);
+                ++changed;
+            }
+        return changed;
+    }
+    // Replace every `from` GID on the layer (or on all layers when layer < 0).
+    int replace_gid(int layer, uint16_t from, uint16_t to) {
+        int k = 0;
+        for (int l = 0; l < int(layers.size()); ++l) {
+            if (layer >= 0 && l != layer) continue;
+            for (uint16_t& g : layers[size_t(l)]) if (g == from && from != to) { g = to; ++k; }
+        }
+        if (k) dirty = true;
+        return k;
+    }
+    // Cells of each GID in use on a layer (index = GID) — the palette's usage badges.
+    std::vector<int> gid_usage(int layer) const {
+        std::vector<int> u;
+        if (layer < 0 || layer >= int(layers.size())) return u;
+        for (uint16_t g : layers[size_t(layer)]) { if (g >= u.size()) u.resize(size_t(g) + 1, 0); ++u[g]; }
+        return u;
+    }
+
+    // ---- spawns ----
+    // The topmost spawn whose marker (a tile-sized box at its position, or its own w/h when
+    // set) contains the pixel (px, py); -1 when none.
+    int spawn_at(int px, int py) const {
+        for (size_t i = spawns.size(); i-- > 0; ) {
+            const TiledSpawn& s = spawns[i];
+            const int w = s.w > 0 ? s.w : tile_w, h = s.h > 0 ? s.h : tile_h;
+            if (px >= s.x && py >= s.y && px < s.x + w && py < s.y + h) return int(i);
+        }
+        return -1;
+    }
+    void move_spawn(int i, int x, int y) {
+        if (i < 0 || i >= int(spawns.size())) return;
+        if (spawns[size_t(i)].x == x && spawns[size_t(i)].y == y) return;
+        spawns[size_t(i)].x = x; spawns[size_t(i)].y = y;
+        dirty = true;
+    }
+    void remove_spawn(int i) {
+        if (i < 0 || i >= int(spawns.size())) return;
+        spawns.erase(spawns.begin() + i);
+        dirty = true;
+    }
+    // A spawn name not in use yet ("coin", "coin2", ...).
+    std::string fresh_spawn_name(const std::string& base) const {
+        auto used = [&](const std::string& n) { for (const TiledSpawn& s : spawns) if (s.name == n) return true; return false; };
+        if (!used(base)) return base;
+        for (int k = 2;; ++k) { const std::string n = base + std::to_string(k); if (!used(n)) return n; }
+    }
+
     // ---- undo/redo (bounded snapshots; the GUI pushes one per edit gesture) ----
     // Call push_undo() BEFORE a gesture mutates the document (a paint stroke counts as one
     // gesture, so click-drag paints undo in one step).
@@ -198,6 +344,8 @@ public:
         return true;
     }
     size_t undo_depth() const { return undo_.size(); }
+    bool can_undo() const { return !undo_.empty(); }
+    bool can_redo() const { return !redo_.empty(); }
     size_t redo_depth() const { return redo_.size(); }
     // Discard the most recent push_undo() — for a gesture that turned out to be a no-op
     // (e.g. an erase click that hit nothing), so undo never "does nothing".
@@ -210,6 +358,15 @@ public:
                         ", \"tilewidth\":" + std::to_string(tile_w) +
                         ", \"tileheight\":" + std::to_string(tile_h) + ",";
         j += "\"tilesets\":[{\"firstgid\":1,\"name\":\"" + tileset + "\"";
+        if (!tileset_image.empty()) {
+            // Enough of Tiled's tileset schema for Tiled itself to open the map with its art.
+            j += ",\"image\":\"" + tileset_image + "\",\"tilewidth\":" + std::to_string(tile_w) +
+                 ",\"tileheight\":" + std::to_string(tile_h);
+            if (tileset_cols > 0)  j += ",\"columns\":" + std::to_string(tileset_cols);
+            if (tileset_count > 0) j += ",\"tilecount\":" + std::to_string(tileset_count);
+            if (tileset_img_w > 0) j += ",\"imagewidth\":" + std::to_string(tileset_img_w) +
+                                        ",\"imageheight\":" + std::to_string(tileset_img_h);
+        }
         if (has_tile_flags()) {
             // Per-tile collision as boolean properties (the most general Tiled form — a tile
             // may carry several flags); id is 0-based, GID = firstgid + id.
@@ -280,16 +437,18 @@ public:
 private:
     static constexpr size_t kMaxUndo = 64;
 
-    // Everything an edit gesture can touch (geometry/tileset changes have no gesture).
+    // Everything an edit gesture can touch (incl. the map size: resize is undoable).
     struct Snapshot {
+        int width, height;
         std::vector<std::vector<uint16_t>> layers;
         std::vector<std::string> layer_names;
         std::vector<std::pair<double,double>> layer_parallax;
         std::vector<uint8_t> tile_flags;
         std::vector<TiledSpawn> spawns;
     };
-    Snapshot snap() const { return Snapshot{ layers, layer_names, layer_parallax, tile_flags, spawns }; }
+    Snapshot snap() const { return Snapshot{ width, height, layers, layer_names, layer_parallax, tile_flags, spawns }; }
     void restore(const Snapshot& s) {
+        width = s.width; height = s.height;
         layers = s.layers; layer_names = s.layer_names; layer_parallax = s.layer_parallax;
         tile_flags = s.tile_flags; spawns = s.spawns;
     }

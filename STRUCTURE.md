@@ -69,17 +69,25 @@ phoenix/
 │   ├── phxsnd/                   CONVERTER: WAV -> .phxsnd (mono16; tier 0 resamples to the GBA device
 │   │                             rate at bake time — ADPCM is future)
 │   ├── phxbin/                   CONVERTER: JSON -> .phxbin flat table (+ generated .gen.h accessor)
-│   ├── phxtmap/                  GUI tilemap editor over the open Tiled .tmj — built on the ENGINE's own
-│   │                             window/renderer/UI (editor.h = headlessly-tested document model)
-│   ├── phxentity/                GUI entity/prefab TABLE editor over the phxbin author JSON — same
-│   │                             engine shell + doc-model split
-│   ├── phxstudio/                Phoenix Studio — the graphical hub over the whole engine: module
-│   │                             graph + caps tiers, bundle browser with per-render-tier previews,
-│   │                             one-click games/editors/gates/suites/console builds. model.h =
-│   │                             headless model (pipeline suite) · jobs.h = process runner · main.cpp
+│   ├── phxtmap/                  GUI tilemap editor: the Studio's map panel (ed_map.cpp) in a one-document
+│   │                             window (solo.h). editor.h = the headlessly-tested .tmj document model
+│   ├── phxentity/                GUI data-table editor: the Studio's table panel (ed_table.cpp) standalone.
+│   │                             editor.h = the headlessly-tested phxbin JSON document model
+│   ├── phxstudio/                Phoenix Studio — THE editor: Explorer + tabs of documents in the CODE,
+│   │                             SPRITE/PIXEL, TILEMAP and DATA-TABLE editors (ed_*.cpp; workspace.cpp),
+│   │                             plus the module graph + caps tiers, the bundle browser with per-render-
+│   │                             tier previews, and one-click games/editors/gates/suites/console builds.
+│   │                             Headless models (editors + pipeline suites): textdoc.h · syntax.h ·
+│   │                             pixeldoc.h · project.h · model.h · projectdoc.h (game projects:
+│   │                             phxproject.json, the new-project template, and the ACCESS POLICY —
+│   │                             a project writes only its own folder, reads the engine's public API).
+│   │                             host.h = the panel<->host seam ·
+│   │                             solo.h = one-document host · jobs.h = process runner · main.cpp = shell
 │   └── common/                   depcheck.py (layering gate) · size_gate.py (GBA budget gate) ·
 │                                 bin2s.py (portable asset embedding) · debug_font.h (shared tool font) ·
-│                                 ascii_font.h (full-ASCII 5x7 tool font) ·
+│                                 ascii_font.h (full-ASCII 5x7 tool font) · twk.h (+ twk_geom.h,
+│                                 twk_icons.h: the tool widget kit) · png_write.h (PNG encoder) ·
+│                                 bake_project.py (a game project's assets -> one .phxp, `make game-assets`) ·
 │                                 doxyfilter.py (promotes '//' header comments for `make docs`)
 │
 ├── examples/

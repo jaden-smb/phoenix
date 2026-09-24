@@ -438,6 +438,14 @@ PIPELINE_SRC := engine/core/src/assert.cpp \
 PIPELINE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PIPELINE_SRC))
 PIPELINE     := $(BUILD)/phx_pipeline
 
+# The editors suite: Phoenix Studio's headless half — the desktop seam over the null backend's
+# scripted queue, the tool widget kit's logic, the code/pixel/sprite/map/table document models
+# (each saved form re-read by the bake's own loaders) and the workspace helpers. Links the App
+# stack so the widget kit's draw path links (it runs with no renderer here).
+EDITORS_SRC := $(APP_SRC) tests/suites/editors_test.cpp
+EDITORS_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(EDITORS_SRC))
+EDITORS     := $(BUILD)/phx_editors
+
 # The render smoke links the front end + software backend + null platform framebuffer.
 RENDER_SRC := engine/core/src/assert.cpp \
               engine/core/src/fixed.cpp \
@@ -463,10 +471,10 @@ GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/
             $(patsubst tests/suites/render_test.cpp,tests/suites/gu_test.cpp,$(RENDER_SRC)))
 GU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(GU_SRC))
 
-.PHONY: studio test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl miracle miracle-headless miracle-test gba-miracle-ppu size-gate-miracle tinyllm tinyllm-sdl tinyllm-test tinyllm-fixture tinyllm-model gba-tinyllm-ppu size-gate-tinyllm sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline tools size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
+.PHONY: studio test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl miracle miracle-headless miracle-test gba-miracle-ppu size-gate-miracle tinyllm tinyllm-sdl tinyllm-test tinyllm-fixture tinyllm-model gba-tinyllm-ppu size-gate-tinyllm sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline editors tools game game-check game-assets play size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
 
 # Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstones + audio + resource + dep gate.
-check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test audio texcache png sprite tiled resource phxpack pipeline tools depcheck
+check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test audio texcache png sprite tiled resource phxpack pipeline editors tools depcheck
 
 # --- M7 release gates --------------------------------------------------------------------------
 # Determinism gate: the SAME suites under scalar=float (pc) and scalar=fixed16 (gba_sim) must
@@ -663,46 +671,82 @@ audio-verify:
 	  $(AUDIOVER_SRC) `sdl2-config --libs` -o $(BUILD)/audio_device_verify
 	@./$(BUILD)/audio_device_verify
 
+# --- Game projects (a folder with a phxproject.json — what Phoenix Studio opens) --------------
+# A project is built against the engine's PUBLIC headers only (engine/*/include): its src/*.cpp +
+# the engine objects + the SDL platform -> <project>/build/<name>; its assets/ are baked by the
+# same converters `check` covers (tools/common/bake_project.py) -> <project>/build/<name>.phxp.
+#   make game        PROJECT=path   compile + link the game
+#   make game-assets PROJECT=path [TIER=0|1|2]   bake its assets (TIER 0 = GBA, 1 = PSP, 2 = PC)
+#   make play        PROJECT=path   both, then run it from the project folder
+# No engine file names the project: a new game needs no Makefile edit. Needs SDL2 for game/play.
+SDL_PLATFORM_OBJ := $(HOSTOBJ)/sdl/sdl_platform.o
+PROJECT     ?=
+TIER_BAKE   := $(if $(filter 0 1,$(TIER)),$(TIER),2)
+GAME_DIR     = $(abspath $(PROJECT))
+GAME_NAME    = $(shell python3 -c "import json,re,sys,os;d=json.load(open(sys.argv[1]+'/phxproject.json'));print(re.sub(r'[^a-z0-9_-]','',(d.get('name') or os.path.basename(sys.argv[1])).lower().replace(' ','_')) or 'game')" "$(GAME_DIR)" 2>/dev/null)
+GAME_SRC     = $(wildcard $(GAME_DIR)/src/*.cpp)
+PUBLIC_INCLUDES := $(addprefix -I,$(wildcard engine/*/include))
+GAME_ENGINE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) \
+                   engine/resource/src/cache.cpp engine/audio/src/mixer.cpp engine/audio/src/stream.cpp)
+
+game-check:
+	@test -n "$(PROJECT)" || { echo "usage: make game|game-assets|play PROJECT=path/to/project"; exit 1; }
+	@test -f "$(GAME_DIR)/phxproject.json" || { echo "$(GAME_DIR): not a Phoenix project (no phxproject.json)"; exit 1; }
+
+game: game-check $(GAME_ENGINE_OBJ) $(SDL_PLATFORM_OBJ)
+	@test -n "$(GAME_SRC)" || { echo "$(GAME_DIR)/src has no .cpp files"; exit 1; }
+	@mkdir -p "$(GAME_DIR)/build"
+	$(CXX) $(CXXFLAGS) $(PUBLIC_INCLUDES) -I"$(GAME_DIR)/src" -I"$(GAME_DIR)/build/gen" $(GAME_SRC) \
+	  $(GAME_ENGINE_OBJ) $(SDL_PLATFORM_OBJ) `sdl2-config --libs` -o "$(GAME_DIR)/build/$(GAME_NAME)"
+	@echo "built $(GAME_DIR)/build/$(GAME_NAME)"
+
+game-assets: game-check $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXPACK)
+	@python3 tools/common/bake_project.py "$(GAME_DIR)" --tools $(BUILD) --tier $(TIER_BAKE)
+
+play: game game-assets
+	@echo "running $(GAME_NAME) (from $(GAME_DIR))"
+	@cd "$(GAME_DIR)" && "./build/$(GAME_NAME)"
+
 # --- GUI editors (SDL) ----------------------------------------------------------------------
-# phxtmap: the mouse-driven tilemap editor over the ENGINE's own window/renderer/UI (docs/08).
-# Its document model (tools/phxtmap/editor.h) is unit-tested in the pipeline suite; this builds
-# the interactive shell. Needs SDL2 + a display; deliberately not part of `check`.
-TMAP_SRC := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) \
-            engine/platform/src/sdl/sdl_platform.cpp tools/phxtmap/main.cpp
+# phxtmap / phxentity: Phoenix Studio's own map and table panels (tools/phxstudio/ed_map.cpp,
+# ed_table.cpp) in single-document windows (tools/phxstudio/solo.h), so there is one map editor and
+# one table editor in the tree. Both edit AUTHOR formats (.tmj, phxbin JSON) over the ENGINE's own
+# window/renderer; their document models (tools/phxtmap/editor.h, tools/phxentity/editor.h) are
+# unit-tested in the pipeline + editors suites. Built from host objects like `studio` (incremental;
+# only sdl_platform.o needs the SDL flags). Need SDL2 + a display; deliberately not part of `check`.
+EDITOR_ENGINE := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC))
+TMAP_OBJ   := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(EDITOR_ENGINE) tools/phxtmap/main.cpp tools/phxstudio/ed_map.cpp)
+ENTITY_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(EDITOR_ENGINE) tools/phxentity/main.cpp tools/phxstudio/ed_table.cpp)
 
-tmap:
-	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found)."; exit 1; }
+tmap: $(TMAP_OBJ) $(SDL_PLATFORM_OBJ)
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
-	  $(TMAP_SRC) `sdl2-config --libs` -o $(BUILD)/phxtmap
-	@echo "built $(BUILD)/phxtmap  —  GUI tilemap editor: ./$(BUILD)/phxtmap [--out f.tmj] [f.tmj]"
+	$(CXX) $(CXXFLAGS) $(TMAP_OBJ) $(SDL_PLATFORM_OBJ) `sdl2-config --libs` -o $(BUILD)/phxtmap
+	@echo "built $(BUILD)/phxtmap  —  tilemap editor: ./$(BUILD)/phxtmap [--out f.tmj] [f.tmj]"
 
-# phxentity: the keyboard-driven entity/prefab TABLE editor over the same engine shell
-# (edits the phxbin author JSON; docs/08). Needs SDL2 + a display.
-ENTITY_SRC := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) \
-              engine/platform/src/sdl/sdl_platform.cpp tools/phxentity/main.cpp
-
-entity:
-	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found)."; exit 1; }
+entity: $(ENTITY_OBJ) $(SDL_PLATFORM_OBJ)
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
-	  $(ENTITY_SRC) `sdl2-config --libs` -o $(BUILD)/phxentity
-	@echo "built $(BUILD)/phxentity  —  GUI prefab-table editor: ./$(BUILD)/phxentity file.json"
+	$(CXX) $(CXXFLAGS) $(ENTITY_OBJ) $(SDL_PLATFORM_OBJ) `sdl2-config --libs` -o $(BUILD)/phxentity
+	@echo "built $(BUILD)/phxentity  —  data-table editor: ./$(BUILD)/phxentity file.json"
 
-# phxstudio: Phoenix Studio — the graphical hub over the whole engine: the module graph as built,
-# every .phxp with live per-render-tier previews (textures, sprites, tilemaps, sounds), and
-# one-click games / editors / gates / suites / console builds with live output. The same engine
-# shell as the editors plus the mixer (sound preview). Its document model
-# (tools/phxstudio/model.h) is unit-tested in the pipeline suite. Needs SDL2 + a display.
-STUDIO_SRC := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) \
-              engine/platform/src/sdl/sdl_platform.cpp engine/audio/src/mixer.cpp \
-              tools/phxstudio/main.cpp
+# phxstudio: Phoenix Studio — the one editor for the engine: the module graph as built, every .phxp
+# with live per-render-tier previews, an Editor workspace (code, sprite/pixel, tilemap and data-
+# table editors over the author formats), and one-click games / editors / gates / suites / console
+# builds with live output. Built from host objects (incremental): only sdl_platform.cpp needs the
+# SDL flags; every studio TU talks to the window through phx/platform/desktop.h. The document
+# models are unit-tested in the editors + pipeline suites. Needs SDL2 + a display.
+STUDIO_TOOL_SRC := tools/phxstudio/main.cpp tools/phxstudio/workspace.cpp tools/phxstudio/ed_code.cpp \
+                   tools/phxstudio/ed_sprite.cpp tools/phxstudio/ed_map.cpp tools/phxstudio/ed_table.cpp
+STUDIO_ENGINE   := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) engine/audio/src/mixer.cpp
+STUDIO_OBJ      := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(STUDIO_ENGINE) $(STUDIO_TOOL_SRC))
 
-studio:
+$(SDL_PLATFORM_OBJ): engine/platform/src/sdl/sdl_platform.cpp
 	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found). Install libsdl2-dev."; exit 1; }
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` -MMD -MP -MF $(@:.o=.d) -c $< -o $@
+
+studio: $(STUDIO_OBJ) $(SDL_PLATFORM_OBJ)
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
-	  $(STUDIO_SRC) `sdl2-config --libs` -pthread -o $(BUILD)/phxstudio
+	$(CXX) $(CXXFLAGS) $(STUDIO_OBJ) $(SDL_PLATFORM_OBJ) `sdl2-config --libs` -pthread -o $(BUILD)/phxstudio
 	@echo "built $(BUILD)/phxstudio  —  Phoenix Studio: ./$(BUILD)/phxstudio  (run from the repo root)"
 
 # --- Windows cross build (MinGW-w64) --------------------------------------------------------
@@ -1286,6 +1330,10 @@ phxpack: $(PHXPACK)
 pipeline: $(PIPELINE)
 	@./$(PIPELINE)
 
+# Studio / editor document models + widget kit, headless (no SDL, no display).
+editors: $(EDITORS)
+	@./$(EDITORS)
+
 # CLI smoke: run the REAL converter + assembler binaries over the fixtures `pipeline` dropped,
 # proving the executables parse args, link, and produce a valid merged bundle.
 # fixture INPUTS (build/p_*) live at literal build/ — pipeline_test hardcodes that path,
@@ -1373,7 +1421,7 @@ dist-psp: psp-platformer psp-emberwing
 	@cd $(DIST) && $(PHX_ZIP) phoenix-$(PHX_VERSION)-psp.zip phoenix-$(PHX_VERSION)-psp
 	@echo "dist: $(DIST)/phoenix-$(PHX_VERSION)-psp.zip"
 
-build: $(BIN) $(SMOKE) $(RENDER) $(PPU) $(GU) $(PLAYABLE) $(PHYSICS) $(ANIM) $(SCENE) $(UI) $(PLATFORMER) $(PLATAPP) $(EMBERWING) $(EMBERWING_PPU) $(EWAPP) $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) $(RESOURCE) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PIPELINE)
+build: $(BIN) $(SMOKE) $(RENDER) $(PPU) $(GU) $(PLAYABLE) $(PHYSICS) $(ANIM) $(SCENE) $(UI) $(PLATFORMER) $(PLATAPP) $(EMBERWING) $(EMBERWING_PPU) $(EWAPP) $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) $(RESOURCE) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PIPELINE) $(EDITORS)
 
 $(BIN): $(UNIT_OBJ)
 	@mkdir -p $(dir $@)
@@ -1507,6 +1555,10 @@ $(PHXVIZ): tools/phxviz/main.cpp $(PHXPACK_HDRS)
 $(PIPELINE): $(PIPELINE_OBJ)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(PIPELINE_OBJ) -o $@
+
+$(EDITORS): $(EDITORS_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(EDITORS_OBJ) -o $@
 
 $(HOSTOBJ)/%.o: %.cpp
 	@mkdir -p $(dir $@)

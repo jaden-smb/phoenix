@@ -13,16 +13,16 @@
 | `phxsnd`    | WAV → `.phxsnd`                        | audio: mono 16-bit PCM (GBA resampled at bake, see §5) |
 | `phxbin`    | JSON → `.phxbin`                       | data tables → optimized binary         |
 | `phxpack`   | the above `+` → `assets.phxp`          | bundle assembler (sorted TOC, optional LZ77; see §2 for what's actually per-target) |
-| `phxtmap`   | GUI tilemap editor → `.tmj`            | authoring (wraps Tiled-compatible fmt)|
-| `phxentity` | GUI entity/prefab editor → `.json`     | component/prefab authoring             |
-| `phxstudio` | GUI hub (reads the tree + bundles)     | visualize + run: module graph, per-tier asset previews, one-click games/gates/suites (§10) |
+| `phxtmap`   | GUI tilemap editor → `.tmj`            | authoring (wraps Tiled-compatible fmt); the Studio's map panel standalone |
+| `phxentity` | GUI data-table editor → `.json`        | record/prefab authoring; the Studio's table panel standalone |
+| `phxstudio` | Phoenix Studio (the editor)            | code, sprite/pixel, tilemap and table editors + module graph, per-tier asset previews, one-click games/gates/suites (§10) |
 
 (No tool accepts XML/`.tmx` input today, despite some of the design language below — Tiled
 maps are `.tmj`/JSON only. ADPCM/8-bit-at-bake for `phxsnd` is target design, not built either
 — see §5's "As built" note.)
 
 `phxsprite/phxtile/phxsnd/phxbin` are the **converters**; `phxpack` is the
-**assembler**; `phxtmap/phxentity` are the **editors**. Editors output author formats
+**assembler**; `phxstudio` (and its standalone panels `phxtmap/phxentity`) are the **editors**. Editors output author formats
 that the converters then bake — editors never write engine blobs directly (keeps the
 bake path single and testable).
 
@@ -159,70 +159,69 @@ and the bake.
 
 ## 7. `phxtmap` — Tilemap Editor (GUI)
 
-Lightweight desktop tool built **on the engine itself** — the same App loop, SDL
-window, software renderer, and immediate-mode UI the games use (dogfooding; no
-external UI toolkit, not even ImGui, ended up necessary). The document model
-(`tools/phxtmap/editor.h`) is separated from the GUI shell and unit-tested
-headlessly; see `tools/phxtmap/instructions.md` for usage and controls.
+A desktop tool built **on the engine itself**: the same App loop, SDL window and software renderer
+the games use, with the tool widget kit (`tools/common/twk.h`) on top. That is dogfooding, with no
+external UI toolkit. It is **Phoenix Studio's map editor** (§10) in a window of its own: one panel
+(`tools/phxstudio/ed_map.cpp`), two hosts. The document model (`tools/phxtmap/editor.h`) is
+unit-tested headlessly. Usage and controls: `tools/phxtmap/instructions.md`.
 
 ```
- ┌──────────────────────────────────────────────────────────┐
- │ [Layers]   ┌───────────────────────────────┐  [Tileset]  │
- │ ▣ bg       │                               │  ┌─┬─┬─┬─┐  │
- │ ▣ main  ◄  │      tile canvas (paint)      │  ├─┼─┼─┼─┤  │
- │ ▢ coll     │                               │  └─┴─┴─┴─┘  │
- │ ▢ objects  └───────────────────────────────┘  brush: [▣] │
- │ [Tools] paint · fill · rect · pick · collision-paint     │
- └──────────────────────────────────────────────────────────┘
+ ┌───┬───────────────────────────────────────────┬──────────────────────┐
+ │ ✎ │ [layer: main (gameplay) ▾] # ▦ ⚑ ◌ ≋  fit │ Tiles Layers Spawns Map│
+ │ ⌫ │  ┌─────────────────────────────────────┐  │ ┌─┬─┬─┬─┬─┬─┬─┬─┐    │
+ │ ▣ │  │  layers composited on the CPU, drawn │  │ ├─┼─┼─┼─┼─┼─┼─┼─┤    │
+ │ ⊞ │  │  as one zoomed image each; collision │  │ └─┴─┴─┴─┴─┴─┴─┴─┘    │
+ │ ⌖ │  │  overlay, spawns, stamp ghost        │  │ collision: none solid│
+ │ ⚑ │  └─────────────────────────────────────┘  │  1-way hazard        │
+ └───┴───────────────────────────────────────────┴──────────────────────┘
 ```
 
-Built today: multi-layer tile paint/erase (drag paints; parallax layer factors AND layer
-names round-trip), the **fill / rect / pick tools** (4-connected flood fill; a drag-marquee
-rectangle fill; an eyedropper that hops back to the brush — all honouring the erase
-modifier), a clickable tile palette, **bounded undo/redo** (one step per gesture —
-a whole paint stroke undoes at once), **collision-flag authoring** (cycle a GID through
-solid/oneway/hazard; flags show as coloured palette underlines and save as Tiled tileset
-per-tile properties), **add-layer**, an **entity placement** mode dropping typed spawn
-objects (the placeable types come from `--types` plus whatever the loaded map uses — not
-hardcoded), camera scroll, save-with-dirty-flag, and positioned load-error messages
-(`line L, col C`). **`--prefabs table.json`** reads the placeable types from a `phxentity`
-record table's string `type`/`name` column instead — the shared prefab schema (§6/§8).
-Saves Tiled-compatible `.tmj` → `phxtile` bakes it. Compatibility with Tiled means
-users aren't locked into our editor.
+Built today:
+
+- Multi-layer painting with the **real tileset art**. The tileset image round-trips as Tiled's
+  `image`, so Tiled opens the map with its art too.
+- **Brush / eraser / fill / rectangle / picker / select** tools and **multi-tile stamps** (drag
+  across the palette or copy a selection).
+- **Collision flags** per tile: solid / one-way / hazard, shown as an overlay on the gameplay
+  layer and saved as Tiled per-tile properties.
+- **Spawns**: place, select, drag and inspect name/type/position/size. Placeable types come from
+  the prefab tables (§8), not hardcoded.
+- **Layers**: add, delete, reorder, rename, parallax factors, and a parallax preview.
+- **Map resize** with an anchor (spawns move with it).
+- Bounded **undo/redo** per gesture, zoom and pan, and positioned load errors (`line L, col C`).
+
+It saves Tiled-compatible `.tmj` and `phxtile` bakes it. Compatibility with Tiled means users
+aren't locked into our editor.
 
 ## 8. `phxentity` — Entity / Prefab Editor (GUI)
 
-```
- ┌─────────────────────┬────────────────────────────────────┐
- │ Prefabs             │ Components of "Goomba"              │
- │  • Player           │  ▸ Position   { x:0 y:0 }           │
- │  • Goomba       ◄    │  ▸ Velocity   { x:-1 y:0 }          │
- │  • Coin             │  ▸ SpriteRef  { atlas: enemies …}    │
- │  • Spring           │  ▸ AABBColl   { half: {8,8} mask:E } │
- │  [+ new prefab]     │  ▸ AI         { kind: patrol }       │
- │                     │  [+ add component ▾]                 │
- └─────────────────────┴────────────────────────────────────┘
-```
+**Phoenix Studio's data-table editor** (§10, `tools/phxstudio/ed_table.cpp`) in a window of its
+own. It is a spreadsheet over the phxbin author JSON (typed record tables).
 
-- **Built today:** a keyboard-driven grid editor over the phxbin author JSON (typed
-  record tables): cell cursor, ±1/±10 stepping **clamped to each field's declared
-  type**, record clone/delete, save — plus **schema authoring**: `--new NAME --fields
-  a:type,b:type` starts a fresh table with no hand-written JSON, and the document model
-  supports add/remove-field (every record keeps its shape). Malformed input is refused
-  with a positioned `line L, col C` parse error. Same engine shell as `phxtmap`, with the
-  document model (`tools/phxentity/editor.h`) unit-tested headlessly and its output
-  proven to re-bake through the real `phxbin` builder. See
-  `tools/phxentity/instructions.md`.
+- **Built today:**
+  - **In-cell editing**: Enter/F2, typing, or double-click. Tab/Enter navigate.
+  - Every value is **clamped or clipped to what the baked struct holds**: integers to their type,
+    `f32` rounded to float, `strN` to N−1 characters. String cells are now fully editable.
+  - **Schema editing**: add, rename, retype (values convert), reorder and delete fields. Insert,
+    duplicate, reorder and delete records. Snapshot undo covers all of it.
+  - A **record inspector**, and table checks for duplicate names, over-long text and the baked
+    size.
+  - `--new NAME --fields a:type,b:type` starts a fresh table.
+  - Malformed input is refused with a positioned `line L, col C` parse error.
+  - The document model (`tools/phxentity/editor.h`) is unit-tested headlessly, and its output is
+    proven to re-bake through the real `phxbin` builder. See `tools/phxentity/instructions.md`.
 - **Built today — the shared prefab schema:** string fields (`str8/str16/str32`, §6) let a
   record table carry a `type` name column. That one table is the seam between the tools:
-  `phxentity` edits the stats, `phxtmap --prefabs` places the named types as spawns, the
-  bake hashes the spawn type, and the game matches it against `fnv1a(record.type)` from the
-  baked table — a third party defines a new entity kind by adding one JSON record, no
-  source edits. String cells display in the GUI but are authored in the JSON (a cell
-  cursor has no text entry).
+  - the table editor edits the stats;
+  - the map editor places the named types as spawns (every prefab table in the repo inside the
+    Studio; `phxtmap --prefabs table.json` standalone);
+  - the bake hashes the spawn type, and the game matches it against `fnv1a(record.type)` from the
+    baked table.
+
+  A third party defines a new entity kind by adding one JSON record, with no source edits.
 - **Planned on top:** component schemas **introspected** from a reflection table
   (`PHX_REFLECT(Component, fields...)`) so prefabs become named component lists with
-  defaults, and placing one in `phxtmap` writes `{prefab_hash, x, y, overrides}`.
+  defaults, and placing one in the map editor writes `{prefab_hash, x, y, overrides}`.
 - Outputs `.json` → `phxbin` bakes it into tables → the game reads them zero-copy.
 
 ## 9. Pipeline guarantees
@@ -243,16 +242,50 @@ users aren't locked into our editor.
   `<out>.lock`'s recorded output CRC32 lets CI flag a stale/hand-edited bundle; and
   `--upgrade` re-bakes a bundle from its own recorded source list. `--full` opts out.
 
-## 10. `phxstudio` — Phoenix Studio (GUI hub)
+## 10. `phxstudio` — Phoenix Studio
 
-A single window over the whole repository, built on the engine like the two editors (the
-feasibility study's Option A, `docs/gui-editor-feasibility.md`). It **reads**: the module graph
-(`depcheck.py` layers + real `#include` edges), the capability tiers (`caps.h`) and every
-`.phxp`, validated as `ResourceCache::mount()` would. It **previews**: textures re-encoded per
-render tier by the bake's own `tex_encode.h` and sampled by the software golden renderer (the
-GBA view is the real 4bpp/BGR555 result), sprite clips, tilemaps through the real parallax path,
-and sounds on the real mixer. It **runs**: games, editors, gates, every `make check` suite and
-the console builds as child processes, with live output. Like every tool here it never writes
-an engine blob. It writes nothing at all; the bake stays the single writer (§1). The headless
-model (`tools/phxstudio/model.h`) is asserted in `make pipeline`. Usage and controls:
+The one editor for the engine, built on the engine like everything else here (the feasibility
+study's Option A, `docs/gui-editor-feasibility.md`). One window, four views:
+
+- **Editor**: an Explorer over the repo, tabs of documents, quick open, and New-asset templates.
+  Each document opens in its own editor:
+  - **code**: a syntax-highlighted text editor with find/replace, and compiler errors from the
+    Run view in its gutter;
+  - **sprite / pixel**: paint PNG sheets with GBA colour and 8×8-tile checks; frame grid, onion
+    skin, named clips with a live preview;
+  - **tilemap**: §7;
+  - **data table**: §8.
+- **Overview**: the module graph (`depcheck.py` layers + real `#include` edges) and the
+  capability tiers (`caps.h`).
+- **Assets**: every `.phxp`, validated as `ResourceCache::mount()` would, with previews. Textures
+  are re-encoded per render tier by the bake's own `tex_encode.h` and sampled by the software
+  golden renderer, so the GBA view is the real 4bpp/BGR555 result. Sprite clips play, tilemaps
+  use the real parallax path, and sounds play on the real mixer.
+- **Run**: games, editors, gates, every `make check` suite and the console builds as child
+  processes, with live output.
+
+The Studio works on **one game project at a time**: a folder with a `phxproject.json` (name,
+code/asset folders, bundles, Run-view launches). While a project is open it writes only inside that
+folder. It can read the engine's public API headers (`engine/*/include`) and docs, and opens nothing
+else. This is `projectdoc.h: AccessPolicy`, applied to every open and save and asserted in
+`make editors`. `--engine-dev` is the engine-maintenance mode: the whole checkout, plus the module
+graph and the gates. Projects build with the engine's generic rules
+(`make game | game-assets | play PROJECT=path`) against the public headers only. The asset step
+(`tools/common/bake_project.py`) runs the converters above and then `phxpack`.
+
+The editors write **author formats only** (`.png`, `.sprdef`/sprite `.json`, `.tmj`, phxbin
+`.json`, source). The bake stays the single writer of engine blobs (§1). Every saved form is
+re-read by the bake's own loaders in `make editors`.
+
+The pieces are:
+
+- the desktop-only platform seam extension `phx/platform/desktop.h` (keys, text, mouse
+  buttons/wheel, clipboard, resizable window; `sdl` + a scripted `null`, no console backend);
+- the widget kit `tools/common/twk.h`;
+- headless document models: `textdoc.h`, `syntax.h`, `pixeldoc.h`, `project.h`,
+  `tools/common/png_write.h`, and the map/table models;
+- editor panels behind a `Host` interface (`host.h`), hosted by the Studio or by the standalone
+  one-document shell (`solo.h`).
+
+The models are asserted in `make editors` and `make pipeline`. Usage and controls:
 `tools/phxstudio/instructions.md`; `make studio && ./build/phxstudio`.

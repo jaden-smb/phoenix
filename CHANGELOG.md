@@ -8,6 +8,76 @@ All notable changes to Phoenix are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Editing assets after they're made, in Phoenix Studio.**
+  - The Assets view has **edit source**: it opens the file an asset was baked from (a texture's
+    PNG, a sprite's def, a map's `.tmj`, a table's `.json`). Double-clicking an asset does the
+    same. In a project, **bake** rebakes the assets and reloads the bundle.
+  - Plain PNGs such as tilesets open in **tile mode**. The tile grid is labelled with GIDs, and
+    its size is detected from the map or sprite that uses the image. The strip steps and zooms
+    through tiles, and the Image tab can add a row of tiles.
+  - In the map editor, double-click a palette tile (or right-click > Edit tile) to paint it,
+    zoomed on that tile. Open maps redraw when the tileset PNG is saved. A map drawn with swatch
+    colours gets **create tileset…**, which writes a real tileset PNG to paint.
+- **Game projects and a project boundary in Phoenix Studio.**
+  - A project is a folder with a `phxproject.json` (name, code and asset folders, bundles, and the
+    Run view's launches). The Studio opens one project at a time (`--project DIR`, a project
+    picker, or File > New / Open / Close project).
+  - The Studio can **write only inside the project folder**. It can **read the engine's public API
+    headers** (`engine/*/include`, under ENGINE API in the Explorer and quick open, in a locked
+    editor) and its docs. Everything else is never opened: the engine's sources, tools, tests,
+    Makefile and other projects. This covers the Explorer, quick open, `--open`, drops,
+    compiler-error links and sprite/tileset references.
+  - Paths are canonicalised, so `../` and symlinks can't escape.
+  - The module graph and the engine's gates and suites are hidden in a project. `--engine-dev`
+    restores the whole-checkout Studio for engine work.
+- **File > New project** creates a small, complete game from a template (`src/main.cpp`, a hero
+  sprite, a tileset, a level). New generic Make rules build any project with no Makefile edit:
+  `make game`, `make game-assets` (via `tools/common/bake_project.py`, `TIER=0|1|2`) and
+  `make play PROJECT=path`. Games compile against the engine's **public headers only**.
+- `phxproject.json` for the examples (`emberwing`, `platformer`, `miracle-player`, `tinyllm`), so
+  they open as projects.
+- **Phoenix Studio is now the editor for the engine.** A new **Editor** view (the default)
+  has an Explorer over the repository, tabs of documents, quick open (Ctrl+P), New-asset
+  templates, save / save-all with confirm-on-close, reload-on-external-change and session
+  restore. Each document opens in its own editor:
+  - **Code**: syntax highlighting for C/C++, JSON, Makefile, shell, Python, CMake, Markdown and
+    `.sprdef`; auto-indent; word-granular undo; find/replace; go-to-line; comment, duplicate
+    and move lines; UTF-8-safe editing. Compiler errors from the Run view become clickable links
+    and gutter markers.
+  - **Sprite / pixel**: the pencil, eraser, fill, line, rectangle, ellipse, picker and marquee
+    tools; floating selections, mirror painting and palettes. GBA BGR555 snapping and the
+    8×8-tile 15-colour check. For sprite defs: frame grid, onion skin, named clips and a live
+    preview. It saves real PNGs and `.sprdef` / sprite `.json`.
+  - **Tilemap**: see the rebuilt `phxtmap` below.
+  - **Data table**: see the rebuilt `phxentity` below.
+
+  The Studio window is now resizable, with an integer UI scale (Ctrl+= / Ctrl+-). It adds menus
+  (File/Edit/View/Build/Help), toasts, modal dialogs, tooltips and a shortcut sheet (F1).
+  `--open`, `--fresh`, and a much richer `--script` (key, type, drag, wheel, dclick, open)
+  cover the new features.
+- **`phxtmap` and `phxentity` rebuilt** as the Studio's map and table panels in one-document
+  windows, so there is one implementation of each.
+  - The **map editor** draws the real tileset art. It adds brush, eraser, fill, rectangle,
+    picker and select tools with multi-tile stamps; collision flags with an overlay; spawns you
+    can place, drag and inspect; layer add/delete/reorder/rename/parallax with a parallax
+    preview; map resize with an anchor; and undo for all of it. The tileset `image` round-trips,
+    so Tiled opens the map with its art. New flags: `--tile`, `--tileset`, `--scale`, `--shot`.
+  - The **table editor** is a spreadsheet with in-cell typed editing (strings are finally
+    editable) and schema editing (rename, retype, reorder fields). It adds a record inspector,
+    duplicate-name and over-long-text checks, and undo.
+- **`phx/platform/desktop.h`**: a desktop-only extension of the platform seam for tools. It
+  covers key events with modifiers, typed text, right/middle buttons and the wheel, the
+  clipboard, a resizable window with an integer UI scale, cursors, titles, dropped files, and a
+  vetoable window close. It is implemented by the SDL backend and as a scripted queue in the
+  null backend (`phx_null_desktop_push`). No console backend or game uses it, so ROMs and game
+  behaviour are unchanged.
+- **The tool widget kit `tools/common/twk.h`** (+ `twk_geom.h`, `twk_icons.h`): an immediate-mode
+  GUI over `phx::UI` with clipping, planes, text fields, number fields, dropdowns, menus, modals
+  and pixel-art icons. **`tools/common/png_write.h`**: a dependency-free PNG encoder (indexed or
+  RGBA, deflate).
+- **`make editors`** (on `check`): a new headless suite that covers the desktop seam queue, the
+  widget kit, and every editor document model. Each saved form is re-read by the bake's own
+  loaders (`load_sprdef`, `load_sprjson`, `tiled_load`, `build_bin`).
 - **Phoenix Studio (`tools/phxstudio`, `make studio`) — a graphical hub over the whole engine**,
   built on the engine itself (App loop, SDL window, software golden renderer, `phx::ui`).
   *Overview*: the module dependency graph as built (layers from `depcheck.py`, edges from real
@@ -22,7 +92,13 @@ All notable changes to Phoenix are documented here. The format follows
 - **`tools/common/ascii_font.h`**: a full printable-ASCII 5×7 tool font (the shared
   `debug_font.h` is uppercase-only).
 - **`phx_sdl_set_window_scale()`** (SDL platform backend): a desktop-only, pre-init hook to pick
-  the window's integer scale (default unchanged at 3×), for tools with larger canvases.
+  the window's integer scale (default unchanged at 3×), for tools with larger canvases (now
+  also reachable as `phx_desktop_set_scale()`).
+
+### Fixed
+- **`BinDoc` (phxbin tables in the editors) truncated `f32` fields to integers on load.** A float
+  column opened in `phxentity` (or the Studio) and saved lost its fractions. Floats are now kept,
+  edited and saved exactly.
 - **`examples/tinyllm` — a quantized transformer language model running on Game Boy Advance
   hardware.** A 260K-parameter llama2-architecture model (RMSNorm, RoPE, grouped-query attention,
   SwiGLU) generates English text on screen at **2.17 tokens/sec**, measured on mGBA. The int8

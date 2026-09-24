@@ -1,0 +1,18 @@
+{
+  "name": "tinyLLM",
+  "description": "A quantized language model on the engine's BG-tilemap text console (runs on a GBA)",
+  "source": ["src", "tools"],
+  "assets": [],
+  "bundles": ["../../tinyllm.phxp"],
+  "launches": [
+    { "label": "Play", "group": "play",
+      "command": "cd \"$PHX_ROOT\" && make tinyllm-sdl && TINYLLM_MODEL=build/tinyllm.phxllm ./build/tinyllm_sdl",
+      "blurb": "Generate text in a window", "needs": ["sdl2-config"], "windowed": true },
+    { "label": "Test", "group": "test",
+      "command": "make -C \"$PHX_ROOT\" tinyllm-test",
+      "blurb": "Bit-exact tokens against the Python golden (part of make check)" },
+    { "label": "GBA ROM", "group": "console",
+      "command": "make -C \"$PHX_ROOT\" gba-tinyllm-ppu",
+      "blurb": "devkitARM -> the language model as a GBA ROM", "needs": ["/opt/devkitpro/devkitARM/bin/arm-none-eabi-g++"] }
+  ]
+}

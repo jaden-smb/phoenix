@@ -1,94 +1,118 @@
-# phxtmap — the GUI tilemap editor
+# phxtmap — the tilemap editor
 
 ## What it is for
 
-A mouse-driven editor for **level layout**: tile layers, entity spawn points, and per-tile
-**collision flags**, saved as the open **Tiled `.tmj`** author format (never engine blobs —
-`phxtile`/`phxpack` bake what it saves, docs/08 §1). Use it to author or touch up maps without
-leaving the repo; anything it writes also opens in the full Tiled editor and vice versa
-(collision flags are ordinary Tiled tileset per-tile `properties`).
+Level layout for Phoenix games: tile layers drawn with the **real tileset art**, per-tile
+**collision flags**, **entity spawns**, **parallax** factors and map size. Maps are saved as the
+open **Tiled `.tmj`** author format, never as engine blobs; `phxtile`/`phxpack` bake what it saves
+(docs/08 §1). Anything it writes opens in the full Tiled editor, art included, and the reverse is
+true too.
+
+`phxtmap` is **Phoenix Studio's map editor in a window of its own**. It hosts the Studio's map
+panel (`tools/phxstudio/ed_map.cpp`) in a one-document shell (`tools/phxstudio/solo.h`), so the
+tools, keys and file handling are identical in both. Inside the Studio, open any `.tmj` from the
+Explorer instead ([Studio guide](../phxstudio/instructions.md#tilemap-editor)).
 
 ## How it works
 
-It **dogfoods the engine**: the same App loop, SDL window, software renderer, and
-immediate-mode UI the games use — no separate UI toolkit. The document model
-(`editor.h: TmapDoc`) is separated from this GUI shell and unit-tested headlessly in the
-pipeline suite (load → edit → save → re-import round-trip, including per-layer parallax
-factors and spawn objects). Edits stream zero-copy into the software renderer, so painting is
-live. Tiles render as **procedural colour swatches** (GIDs 1–16) — layout editing needs
-positions, not final art; the baked game shows the real tileset.
+It **dogfoods the engine**: the same App loop, SDL window, software renderer and tool widget kit
+(`tools/common/twk.h`) as the Studio and the games. Each tile layer is composited on the CPU into
+one RGBA image that updates cell by cell as you paint, then drawn as one clipped, zoomed sprite,
+so large maps stay cheap. The document model (`editor.h: TmapDoc`) is separate from the GUI and
+unit-tested headlessly in the pipeline and editors suites. Those tests cover load → edit → save →
+re-import through the bake's own `tiled_load`, including parallax, spawns, collision flags, the
+tileset image, layer edits, resize, stamps and undo.
+
+The tileset image is found from the map's tileset `image` (relative to the `.tmj`, as in Tiled).
+Failing that, it looks for `<tileset>.png` next to the map, then any PNG in the repo with that
+name. Without one, tiles show as coloured swatches; the baked game still uses the real art.
 
 ## Build & run
 
 Needs SDL2 and a display (not part of `make check`).
 
 ```bash
-make tmap                                  # -> build/phxtmap
+make tmap                                   # -> build/phxtmap
 
-./build/phxtmap level.tmj                  # edit an existing map (saves in place)
-./build/phxtmap --out new.tmj --size 30x20 # start a blank 30x20 map
-./build/phxtmap --out copy.tmj level.tmj   # edit one file, save to another
-./build/phxtmap --types hero,door,gem …    # the spawn types placeable in entity mode
-./build/phxtmap --prefabs prefabs.json …   # …or read them from the shared prefab table
+./build/phxtmap level.tmj                   # edit a map (Ctrl+S saves in place)
+./build/phxtmap --out copy.tmj level.tmj    # edit one file, save to another
+./build/phxtmap --out new.tmj --size 32x20  # a NEW 32x20 map (saved on the first Ctrl+S)
+./build/phxtmap --out new.tmj --size 64x18 --tile 8x8 --tileset art/tiles.png
+./build/phxtmap --prefabs prefabs.json …    # place the prefab table's types as spawns
+./build/phxtmap --types door,key …          # extra spawn types
+./build/phxtmap --scale 3 …                 # UI scale (the window is resizable)
 ```
 
-Spawn types are **never hardcoded into your workflow**: the placeable list is `--types` (or
-the player/coin/enemy/spike defaults) **plus every type the loaded map already uses** — or,
-with `--prefabs`, the string `type`/`name` column of a `phxentity` record table (the shared
-prefab schema: one JSON file defines the game's entity kinds and their stats, both editors
-read it, and the game matches spawns against `fnv1a(record.type)` from the baked table).
+**Spawn types are never hardcoded into your workflow.** The placeable list is:
 
-`PHX_MAX_FRAMES=120 ./build/phxtmap …` runs a bounded smoke (boots, runs, exits) for scripts.
+- the `--prefabs` table's string `type`/`name` column (the shared prefab schema: one phxbin table
+  defines the game's entity kinds and stats, both editors read it, and the game matches spawns
+  against `fnv1a(record.type)`),
+- `--types`,
+- player/coin/enemy/spike,
+- every type the map already uses.
+
+In the Studio, the list is every prefab table in the repo.
+
+`PHX_MAX_FRAMES=120 ./build/phxtmap …` runs a bounded smoke (boots, runs, exits).
+`--shot out.ppm` writes the window after 45 frames and quits.
 
 ## Controls
 
 | Input | Action |
-|-------|--------|
-| **LMB** (click/drag) | apply the active **tool** — or pick a tile from the palette strip |
-| **hold X + LMB** | erase tiles (works with every tool; entity mode: remove the spawn under the cursor) |
-| **C** | cycle the selected tile GID (1–16) |
-| **X + C** | cycle the **tool**: PAINT → FILL → RECT → PICK (shown in the status line) |
-| **Tab** | cycle the edited layer (parallax layers keep their factors) |
-| **X + Tab** | **add a layer** (becomes the edited layer) |
-| **Z** | **undo** (one step per gesture — a whole paint stroke undoes at once) |
-| **X + Z** | **redo** |
-| **V** | cycle the selected GID's **collision**: none → solid → oneway → hazard |
-| **E** | toggle TILE / ENTITY mode |
-| **Q** | cycle the spawn type (`--types` + the map's own) — shown in the status line |
-| **LMB** (entity mode) | place a spawn of the selected type at the cursor |
-| **arrows / WASD** | scroll the camera |
-| **Enter** | **save** to `--out` (a `*` in the status line = unsaved edits) |
-| window close | quit |
+|---|---|
+| **B** brush | paint the selected tile, or a multi-tile **stamp** (drag across the palette, or Ctrl+C a selection). Drags paint cell by cell |
+| **E** eraser | clear cells. **Right-drag** erases with any tool |
+| **G** fill | flood-fill the connected area of the clicked tile |
+| **R** rectangle | drag a box; releasing fills it |
+| **I** picker | click a cell for its tile; **drag a box** to pick a stamp |
+| **S** select | drag a box. **Ctrl+C** makes it the brush stamp; **Delete** clears it |
+| **T** spawns | click empty space to place the selected type (snapped to the grid; **Shift** = free), click a spawn to select it, drag to move, **Delete** removes |
+| **H** or middle-drag | pan. **Ctrl+wheel** zooms about the pointer, the wheel scrolls, **F** fits |
+| **Tab** / Shift+Tab | next / previous layer |
+| **V** | cycle the brush tile's collision: none → solid → one-way → hazard |
+| **Ctrl+Z** / Ctrl+Y | undo / redo (one step per stroke or edit; resize included) |
+| **Ctrl+S** | save. Closing the window with unsaved edits asks first |
 
-The four tools: **PAINT** is the per-cell brush (drag paints; one undo step per stroke).
-**FILL** flood-fills the 4-connected region of same-GID cells under the click. **RECT**
-drags a yellow marquee; releasing fills it (either drag direction, clamped to the map).
-**PICK** eyedrops the clicked cell's GID from the edited layer and hops back to PAINT.
-Fill and rect with the erase modifier held paint GID 0.
+The side panel has four tabs:
 
-The status line (bottom right) shows the mode, active tool, current layer/GID (plus its
-collision flag: `SOL`/`ONE`/`HAZ`) or spawn type, and the dirty flag. Spawn markers draw as
-small boxes with the type's initial. In the palette strip, a coloured underline marks each
-GID's collision: **white = solid, yellow = one-way platform, red = hazard**.
+- **Tiles**: the tileset palette. Click for a tile and drag for a stamp. Right-click a tile to set
+  its collision (or use the none / solid / one-way / hazard buttons for the brush tile, or **V**).
+  A map without a tileset image gets **create tileset…**, which writes a PNG of tiles next to the
+  map and links it. Painting the tiles themselves happens in Phoenix Studio: double-click a tile
+  there to open the tileset zoomed on it, and the map redraws when the PNG is saved
+  ([Studio guide](../phxstudio/instructions.md#tilemap-editor)).
+- **Layers**: visibility (editor-only), add, delete, reorder, rename, and horizontal/vertical
+  parallax (1 = moves with the world, 0 = fixed to the screen).
+- **Spawns**: the type to place, the spawn list, and an inspector (name, type, x/y, w/h, delete).
+- **Map**: size (the **resize** dialog anchors the old map, and spawns move with it), the tileset
+  name, and the tileset image.
+
+The toolbar toggles the grid, the collision overlay, spawns, dimming the other layers, and the
+**parallax preview** (each layer scrolls by its factor as you pan; painting is paused while it
+is on). The status line shows the map size, layer, spawn count, zoom and the cell under the
+pointer.
 
 ## Conventions it preserves
 
-- The **last tile layer is the gameplay layer** (the games' physics reads it); earlier layers
-  are backdrops and may carry `parallaxx`/`parallaxy` factors — both survive load → save, as
-  do layer names.
-- Spawn objects keep their `type` (baked to the type hash the game switches on).
-- **Collision flags** live on the tileset as per-tile boolean `properties` (`solid`,
-  `oneway`, `hazard` — Tiled's per-tile `class` strings of the same names import too). The
-  bake turns them into the engine's per-tile collision table (`TileGrid.flags`); a map
-  *without* any flags falls back to "every non-empty tile on the gameplay layer is solid".
-  Flags authored in Tiled survive an edit session here and vice versa.
+- The **last tile layer is the gameplay layer** that the games' physics reads. Earlier layers are
+  backdrops and may carry `parallaxx`/`parallaxy`. Names and factors survive load → save.
+- Spawn objects keep their `name`, `type` (baked to the type hash the game switches on), `x`, `y`,
+  `width` and `height`.
+- **Collision flags** live on the tileset as per-tile boolean `properties` (`solid`, `oneway`,
+  `hazard`). Tiled's per-tile `class` strings of the same names import too. The bake turns them
+  into the per-tile collision table (`TileGrid.flags`). A map *without* flags falls back to
+  "every non-empty tile on the gameplay layer is solid", which the overlay shows.
+- The tileset's `image`, `columns`, `tilecount` and image size are written when known, so Tiled can
+  open the map with its art. The **tileset name** (= the PNG's file stem) is what the bake uses to
+  find the texture.
 
 ## Typical workflow
 
 ```bash
 make tmap
-./build/phxtmap --out mylevel.tmj --size 32x20     # paint ground on the last layer,
-                                                   # E → place player/coins/enemies, Enter
-./build/phxtile --out mylevel.phxtmap mylevel.tmj  # bake
+./build/phxtmap --out mylevel.tmj --size 32x20 --tileset tiles.png
+#   paint ground on the last layer, T -> place player/coins/enemies, Ctrl+S
+./build/phxtile --out mylevel.phxtmap mylevel.tmj   # bake
 ./build/phxpack --out assets.phxp tiles.png mylevel.phxtmap
 ```

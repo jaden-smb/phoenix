@@ -1,0 +1,15 @@
+{
+  "name": "Miracle",
+  "description": "A Small Miracle: a music visualizer (resident PCM + a baked visual stream)",
+  "source": ["src"],
+  "assets": [],
+  "bundles": ["../../miracle.phxp", "../../build/miracle_test.phxp"],
+  "launches": [
+    { "label": "Play", "group": "play",
+      "command": "cd \"$PHX_ROOT\" && make miracle && ./build/miracle",
+      "blurb": "The visualizer in a window (a synthetic tone without the song file)", "needs": ["sdl2-config"], "windowed": true },
+    { "label": "Test", "group": "test",
+      "command": "make -C \"$PHX_ROOT\" miracle-test",
+      "blurb": "The headless visualizer test (part of make check)" }
+  ]
+}

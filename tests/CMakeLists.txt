@@ -71,7 +71,8 @@ set(_itests
   sprite:sprite_test
   tiled:tiled_test
   resource:resource_test
-  pipeline:pipeline_test)
+  pipeline:pipeline_test
+  editors:editors_test)
 
 foreach(spec ${_itests})
   string(REPLACE ":" ";" parts ${spec})

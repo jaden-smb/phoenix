@@ -5,7 +5,9 @@ harness in [`phx_test.h`](phx_test.h), in the same spirit as the engine: no allo
 no magic, readable in one sitting.
 
 Everything here runs **headlessly** on the `null` platform (virtual clock, software framebuffer,
-scripted input), so the whole suite is deterministic and needs no display.
+scripted input — including the desktop extension's scripted key/mouse/text queue that the
+`editors` suite drives Phoenix Studio's widget kit with), so the whole suite is deterministic and
+needs no display.
 
 ## Layout
 
@@ -18,7 +20,8 @@ scripted input), so the whole suite is deterministic and needs no display.
 
 The two naming conventions are load-bearing, not historical accident:
 **`test_foo.cpp` = a unit file with no `main()`** (it joins the shared runner);
-**`foo_test.cpp` = a standalone suite with its own `main()`**. Put a file in the wrong folder and
+**`foo_test.cpp` = a standalone suite with its own `main()`** (a suite may still use `PHX_TEST`
+cases with its own runner, as `suites/editors_test.cpp` does). Put a file in the wrong folder and
 you either get a duplicate-`main` link error or a test that never runs.
 
 ## Running

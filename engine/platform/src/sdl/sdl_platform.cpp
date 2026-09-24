@@ -12,6 +12,7 @@
 
 #include "phx/platform/platform.h"
 #include "phx/platform/gfx_soft.h"
+#include "phx/platform/desktop.h"
 
 #include <SDL.h>
 #if defined(PHX_HAVE_GL)
@@ -46,6 +47,73 @@ struct SdlState {
     SDL_GameController* pad = nullptr;        // first connected controller (hotplugged)
 };
 SdlState g;
+
+// --- desktop extension state (phx/platform/desktop.h; tools only — games never touch it) ---
+constexpr int kEvCap = 256;                   // bounded ring: overflow drops the OLDEST event
+struct DesktopState {
+    phx_desktop_event ring[kEvCap];
+    int  head = 0, count = 0;
+    int  quit_on_escape = 1;
+    int  confirm_quit = 0;
+    int  resizable = 0;
+    int  off_x = 0, off_y = 0;                // letterbox offset of the fb inside the window
+    char drop_path[1024] = { 0 };
+    char* clip = nullptr;                     // last clipboard_get() result (SDL-owned copy)
+    SDL_Cursor* cursors[PHX_CURSOR_COUNT] = { nullptr };
+    int  cursor = -1;
+};
+DesktopState g_dt;
+
+void dt_push(const phx_desktop_event& e) {
+    if (g_dt.count == kEvCap) { g_dt.head = (g_dt.head + 1) % kEvCap; --g_dt.count; }
+    g_dt.ring[(g_dt.head + g_dt.count) % kEvCap] = e;
+    ++g_dt.count;
+}
+
+uint16_t dt_mods(Uint16 m) {
+    uint16_t o = 0;
+    if (m & KMOD_SHIFT) o |= PHX_MOD_SHIFT;
+    if (m & KMOD_CTRL)  o |= PHX_MOD_CTRL;
+    if (m & KMOD_ALT)   o |= PHX_MOD_ALT;
+    if (m & KMOD_GUI)   o |= PHX_MOD_GUI;
+    return o;
+}
+
+// SDL keycode -> phx_key. Printable keys keep their (layout-aware) ASCII code, lower-cased.
+int32_t dt_key(SDL_Keycode k) {
+    if (k >= 32 && k < 127) return (k >= 'A' && k <= 'Z') ? int32_t(k - 'A' + 'a') : int32_t(k);
+    switch (k) {
+    case SDLK_ESCAPE:    return PHX_KEY_ESCAPE;
+    case SDLK_RETURN: case SDLK_KP_ENTER: return PHX_KEY_ENTER;
+    case SDLK_TAB:       return PHX_KEY_TAB;
+    case SDLK_BACKSPACE: return PHX_KEY_BACKSPACE;
+    case SDLK_DELETE:    return PHX_KEY_DELETE;
+    case SDLK_INSERT:    return PHX_KEY_INSERT;
+    case SDLK_LEFT:      return PHX_KEY_LEFT;
+    case SDLK_RIGHT:     return PHX_KEY_RIGHT;
+    case SDLK_UP:        return PHX_KEY_UP;
+    case SDLK_DOWN:      return PHX_KEY_DOWN;
+    case SDLK_HOME:      return PHX_KEY_HOME;
+    case SDLK_END:       return PHX_KEY_END;
+    case SDLK_PAGEUP:    return PHX_KEY_PAGE_UP;
+    case SDLK_PAGEDOWN:  return PHX_KEY_PAGE_DOWN;
+    case SDLK_LSHIFT: case SDLK_RSHIFT: return PHX_KEY_SHIFT;
+    case SDLK_LCTRL:  case SDLK_RCTRL:  return PHX_KEY_CTRL;
+    case SDLK_LALT:   case SDLK_RALT:   return PHX_KEY_ALT;
+    case SDLK_LGUI:   case SDLK_RGUI:   return PHX_KEY_GUI;
+    default: break;
+    }
+    if (k >= SDLK_F1 && k <= SDLK_F12) return PHX_KEY_F1 + int32_t(k - SDLK_F1);
+    return PHX_KEY_NONE;
+}
+
+// Window pixels -> framebuffer pixels (undo the integer upscale and the letterbox offset).
+void win_to_fb(int wx, int wy, int& fx, int& fy) {
+    fx = (wx - g_dt.off_x) / g_scale;
+    fy = (wy - g_dt.off_y) / g_scale;
+    if (wx < g_dt.off_x) fx = -1;
+    if (wy < g_dt.off_y) fy = -1;
+}
 
 int sdl_init(const phx_platform_desc* desc) {
     const int w = desc->width  > 0 ? desc->width  : 240;
@@ -107,8 +175,40 @@ int sdl_init(const phx_platform_desc* desc) {
     return 0;
 }
 
+#if !defined(PHX_HAVE_GL)
+// Resizable (tool) mode: the framebuffer follows the window at the integer UI scale. The soft
+// renderer re-locks g.fb every frame, so swapping the buffer here between frames is safe.
+void refit_framebuffer(bool announce) {
+    int ww = 0, wh = 0;
+    SDL_GetWindowSize(g.win, &ww, &wh);
+    int w = ww / g_scale, h = wh / g_scale;
+    if (w < 64) w = 64;
+    if (h < 48) h = 48;
+    g_dt.off_x = (ww - w * g_scale) / 2; if (g_dt.off_x < 0) g_dt.off_x = 0;
+    g_dt.off_y = (wh - h * g_scale) / 2; if (g_dt.off_y < 0) g_dt.off_y = 0;
+    if (w == g.fb.w && h == g.fb.h) return;
+    uint32_t* px = static_cast<uint32_t*>(std::calloc(size_t(w) * size_t(h), sizeof(uint32_t)));
+    SDL_Texture* tex = SDL_CreateTexture(g.ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, w, h);
+    if (!px || !tex) { std::free(px); if (tex) SDL_DestroyTexture(tex); return; }   // keep the old one
+    std::free(g.fb.pixels);
+    SDL_DestroyTexture(g.tex);
+    g.fb.pixels = px; g.fb.w = w; g.fb.h = h;
+    g.tex = tex;
+    SDL_RenderSetLogicalSize(g.ren, w, h);
+    SDL_RenderSetIntegerScale(g.ren, SDL_TRUE);
+    if (announce) {
+        phx_desktop_event e{};
+        e.kind = PHX_DEV_RESIZE; e.x = int16_t(w); e.y = int16_t(h);
+        dt_push(e);
+    }
+}
+#endif
+
 void sdl_shutdown(void) {
     if (g.pad) { SDL_GameControllerClose(g.pad); g.pad = nullptr; }
+    for (SDL_Cursor*& c : g_dt.cursors) if (c) { SDL_FreeCursor(c); c = nullptr; }
+    if (g_dt.clip) { SDL_free(g_dt.clip); g_dt.clip = nullptr; }
+    g_dt.count = 0; g_dt.head = 0; g_dt.cursor = -1;
 #if defined(PHX_HAVE_GL)
     if (g.glctx) SDL_GL_DeleteContext(g.glctx);
     g.glctx = nullptr;
@@ -134,9 +234,57 @@ void sdl_sleep_ns(uint64_t ns) { SDL_Delay(Uint32(ns / 1000000ull)); }
 int sdl_pump_events(void) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
-        if (e.type == SDL_QUIT) g.quit = 1;
-        else if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) g.quit = 1;
-        else if (e.type == SDL_CONTROLLERDEVICEADDED && !g.pad) {
+        phx_desktop_event d{};
+        if (e.type == SDL_QUIT) {
+            if (g_dt.confirm_quit) { d.kind = PHX_DEV_QUIT; dt_push(d); }
+            else g.quit = 1;
+        } else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
+            if (e.type == SDL_KEYDOWN && g_dt.quit_on_escape &&
+                e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) g.quit = 1;
+            d.kind = e.type == SDL_KEYDOWN ? PHX_DEV_KEY_DOWN : PHX_DEV_KEY_UP;
+            d.key = dt_key(e.key.keysym.sym);
+            d.mods = dt_mods(e.key.keysym.mod);
+            d.repeat = e.key.repeat ? 1 : 0;
+            if (d.key != PHX_KEY_NONE) dt_push(d);
+        } else if (e.type == SDL_TEXTINPUT) {
+            d.kind = PHX_DEV_TEXT;
+            std::memcpy(d.text, e.text.text, sizeof(d.text) - 1);   // both 32 bytes; d.text[31] stays 0
+            d.mods = dt_mods(SDL_GetModState());
+            dt_push(d);
+        } else if (e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) {
+            const Uint8 b = e.button.button;
+            if (b != SDL_BUTTON_LEFT && b != SDL_BUTTON_MIDDLE && b != SDL_BUTTON_RIGHT) continue;
+            d.kind = e.type == SDL_MOUSEBUTTONDOWN ? PHX_DEV_MOUSE_DOWN : PHX_DEV_MOUSE_UP;
+            d.button = b == SDL_BUTTON_LEFT ? PHX_MOUSE_LEFT : b == SDL_BUTTON_MIDDLE ? PHX_MOUSE_MIDDLE : PHX_MOUSE_RIGHT;
+            d.clicks = e.button.clicks;
+            int wx = 0, wy = 0, fx = 0, fy = 0;
+            SDL_GetMouseState(&wx, &wy);
+            win_to_fb(wx, wy, fx, fy);
+            d.x = int16_t(fx); d.y = int16_t(fy);
+            d.mods = dt_mods(SDL_GetModState());
+            dt_push(d);
+        } else if (e.type == SDL_MOUSEWHEEL) {
+            d.kind = PHX_DEV_WHEEL;
+            const int flip = e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
+            d.wheel_x = int16_t(e.wheel.x * flip); d.wheel_y = int16_t(e.wheel.y * flip);
+            int wx = 0, wy = 0, fx = 0, fy = 0;
+            SDL_GetMouseState(&wx, &wy);
+            win_to_fb(wx, wy, fx, fy);
+            d.x = int16_t(fx); d.y = int16_t(fy);
+            d.mods = dt_mods(SDL_GetModState());
+            if (d.wheel_x || d.wheel_y) dt_push(d);
+        } else if (e.type == SDL_DROPFILE) {
+            if (e.drop.file) {
+                std::snprintf(g_dt.drop_path, sizeof(g_dt.drop_path), "%s", e.drop.file);
+                SDL_free(e.drop.file);
+                d.kind = PHX_DEV_DROP_FILE;
+                dt_push(d);
+            }
+        } else if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+#if !defined(PHX_HAVE_GL)
+            if (g_dt.resizable) refit_framebuffer(true);
+#endif
+        } else if (e.type == SDL_CONTROLLERDEVICEADDED && !g.pad) {
             g.pad = SDL_GameControllerOpen(e.cdevice.which);
             if (g.pad) std::printf("[phx.sdl] controller: %s\n", SDL_GameControllerName(g.pad));
         } else if (e.type == SDL_CONTROLLERDEVICEREMOVED && g.pad &&
@@ -223,11 +371,12 @@ void sdl_poll_input(phx_input_raw* out) {
     }
     out->buttons = b;
 
-    int mx = 0, my = 0;
+    int mx = 0, my = 0, fx = 0, fy = 0;
     Uint32 ms = SDL_GetMouseState(&mx, &my);
     // Mouse arrives in WINDOW pixels; the seam promises framebuffer coordinates, so undo
     // the integer upscale (tools like phxtmap hit-test tiles against these).
-    out->pointer_x = int16_t(mx / g_scale); out->pointer_y = int16_t(my / g_scale);
+    win_to_fb(mx, my, fx, fy);
+    out->pointer_x = int16_t(fx); out->pointer_y = int16_t(fy);
     out->pointer_down = (ms & SDL_BUTTON(SDL_BUTTON_LEFT)) ? 1 : 0;
 }
 
@@ -304,6 +453,111 @@ extern "C" const phx_platform* phx_platform_get(void) { return &g_sdl_platform; 
 extern "C" void phx_sdl_set_window_scale(int scale) {
     g_scale = scale < 1 ? 1 : (scale > 6 ? 6 : scale);
 }
+
+// --- desktop extension (phx/platform/desktop.h) ----------------------------------------------
+// Tool-only: events beyond the 12 canonical buttons, a resizable framebuffer, clipboard, cursor.
+// Games never call any of it, so their window/input behaviour is byte-for-byte unchanged.
+extern "C" int phx_desktop_available(void) { return g.win ? 1 : 0; }
+
+extern "C" int phx_desktop_poll(phx_desktop_event* out) {
+    if (!out || g_dt.count == 0) return 0;
+    *out = g_dt.ring[g_dt.head];
+    g_dt.head = (g_dt.head + 1) % kEvCap;
+    --g_dt.count;
+    return 1;
+}
+
+extern "C" void phx_desktop_mouse(int* x, int* y, uint32_t* buttons) {
+    int wx = 0, wy = 0, fx = -1, fy = -1;
+    const Uint32 ms = SDL_GetMouseState(&wx, &wy);
+    win_to_fb(wx, wy, fx, fy);
+    if (fx >= g.fb.w || fy >= g.fb.h) { fx = -1; fy = -1; }
+    if (x) *x = fx;
+    if (y) *y = fy;
+    if (buttons) {
+        uint32_t b = 0;
+        if (ms & SDL_BUTTON(SDL_BUTTON_LEFT))   b |= 1u << PHX_MOUSE_LEFT;
+        if (ms & SDL_BUTTON(SDL_BUTTON_MIDDLE)) b |= 1u << PHX_MOUSE_MIDDLE;
+        if (ms & SDL_BUTTON(SDL_BUTTON_RIGHT))  b |= 1u << PHX_MOUSE_RIGHT;
+        *buttons = b;
+    }
+}
+extern "C" uint16_t phx_desktop_mods(void) { return dt_mods(SDL_GetModState()); }
+
+extern "C" void phx_desktop_set_quit_on_escape(int enable) { g_dt.quit_on_escape = enable ? 1 : 0; }
+extern "C" void phx_desktop_set_confirm_quit(int enable)   { g_dt.confirm_quit = enable ? 1 : 0; }
+
+extern "C" void phx_desktop_text_input(int enable) {
+    if (enable) SDL_StartTextInput(); else SDL_StopTextInput();
+}
+
+extern "C" void phx_desktop_set_resizable(int enable) {
+    g_dt.resizable = enable ? 1 : 0;
+#if !defined(PHX_HAVE_GL)
+    if (g.win) {
+        SDL_SetWindowResizable(g.win, enable ? SDL_TRUE : SDL_FALSE);
+        SDL_SetWindowMinimumSize(g.win, 320 * g_scale / 2, 180 * g_scale / 2);
+        if (enable) refit_framebuffer(false);
+    }
+#endif
+}
+
+extern "C" void phx_desktop_set_scale(int scale) {
+    phx_sdl_set_window_scale(scale);
+#if !defined(PHX_HAVE_GL)
+    if (g.win && g_dt.resizable) refit_framebuffer(true);
+#endif
+}
+extern "C" int phx_desktop_scale(void) { return g_scale; }
+
+extern "C" int phx_desktop_fb_size(int* w, int* h) {
+    if (w) *w = g.fb.w;
+    if (h) *h = g.fb.h;
+    return g.fb.w > 0 ? 0 : 1;
+}
+
+extern "C" int phx_desktop_display_size(int* w, int* h) {
+    SDL_Rect r{ 0, 0, 0, 0 };
+    const int di = g.win ? SDL_GetWindowDisplayIndex(g.win) : 0;
+    if (SDL_GetDisplayUsableBounds(di < 0 ? 0 : di, &r) != 0) return 0;
+    if (w) *w = r.w;
+    if (h) *h = r.h;
+    return r.w > 0 ? 1 : 0;
+}
+extern "C" void phx_desktop_set_window_size(int w, int h) {
+    if (!g.win || w <= 0 || h <= 0) return;
+    SDL_SetWindowSize(g.win, w, h);
+    SDL_SetWindowPosition(g.win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+#if !defined(PHX_HAVE_GL)
+    if (g_dt.resizable) refit_framebuffer(true);
+#endif
+}
+
+extern "C" void phx_desktop_set_title(const char* utf8) {
+    if (g.win && utf8) SDL_SetWindowTitle(g.win, utf8);
+}
+
+extern "C" void phx_desktop_set_cursor(int cursor) {
+    if (!g.win || cursor < 0 || cursor >= PHX_CURSOR_COUNT || cursor == g_dt.cursor) return;
+    static const SDL_SystemCursor kMap[PHX_CURSOR_COUNT] = {
+        SDL_SYSTEM_CURSOR_ARROW, SDL_SYSTEM_CURSOR_IBEAM, SDL_SYSTEM_CURSOR_HAND,
+        SDL_SYSTEM_CURSOR_CROSSHAIR, SDL_SYSTEM_CURSOR_SIZEWE, SDL_SYSTEM_CURSOR_SIZENS,
+        SDL_SYSTEM_CURSOR_SIZEALL,
+    };
+    if (!g_dt.cursors[cursor]) g_dt.cursors[cursor] = SDL_CreateSystemCursor(kMap[cursor]);
+    if (g_dt.cursors[cursor]) SDL_SetCursor(g_dt.cursors[cursor]);
+    g_dt.cursor = cursor;
+}
+
+extern "C" const char* phx_desktop_clipboard_get(void) {
+    if (g_dt.clip) { SDL_free(g_dt.clip); g_dt.clip = nullptr; }
+    if (!SDL_HasClipboardText()) return "";
+    g_dt.clip = SDL_GetClipboardText();
+    return g_dt.clip ? g_dt.clip : "";
+}
+extern "C" void phx_desktop_clipboard_set(const char* utf8) { SDL_SetClipboardText(utf8 ? utf8 : ""); }
+
+extern "C" const char* phx_desktop_drop_path(void) { return g_dt.drop_path; }
 
 // Software-tier graphics contract: hand the render backend our CPU framebuffer.
 extern "C" phx_soft_fb phx_gfx_soft_lock(phx_gfx* gfx) {

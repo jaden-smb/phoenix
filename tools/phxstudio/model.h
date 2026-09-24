@@ -26,6 +26,7 @@
 #include "phx/resource/lz.h"
 
 #include "tex_encode.h"   // tools/phxpack: the bake's per-target texture encoders
+#include "twk_geom.h"     // tools/common: the widget kit's Rect + scroll math
 
 #include <algorithm>
 #include <cstdint>
@@ -531,6 +532,34 @@ private:
 
 // Harvest names from every source under examples/, tools/ and tests/, the stems of asset-ish
 // files, and every phxpack manifest in the root and build/.
+// Recover names from a GAME PROJECT only (project mode never reads the engine's sources): every
+// string literal in its code + data, every asset file stem, and any phxpack manifest in the project
+// folder, its build/ folder, or next to the extra bundles it lists.
+inline void scan_names_in(const std::string& dir, const std::vector<std::string>& bundle_paths, NameBook& book) {
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const fs::path& p = it->path();
+        const std::string ext = p.extension().string();
+        if (is_source_file(p) || ext == ".json" || ext == ".tmj" || ext == ".sprdef") {
+            std::string text;
+            if (read_text(p.string(), text)) book.add_literals(text);
+        }
+        if (ext == ".png" || ext == ".wav" || ext == ".tmj" || ext == ".json" || ext == ".sprdef")
+            book.add(p.stem().string());
+        const std::string n = p.filename().string();
+        if (n.size() > 13 && n.compare(n.size() - 13, 13, ".manifest.txt") == 0) {
+            std::string text;
+            if (read_text(p.string(), text)) book.add_manifest(text);
+        }
+    }
+    for (const std::string& b : bundle_paths) {
+        std::string text;
+        if (read_text(b + ".manifest.txt", text)) book.add_manifest(text);
+    }
+}
+
 inline void scan_names(const std::string& root, NameBook& book) {
     std::error_code ec;
     for (const char* sub : { "examples", "tools", "tests" }) {
@@ -995,11 +1024,13 @@ inline std::vector<std::string> make_prereqs(const std::string& mk, const std::s
     return out;
 }
 
-enum class Group : uint8_t { Play, Edit, Gate, Suite, Cross, Count };
+enum class Group : uint8_t { Play, Build, Test, Edit, Gate, Suite, Cross, Count };   // Build/Test: project launches
 
 inline const char* group_name(Group g) {
     switch (g) {
     case Group::Play:  return "PLAY";
+    case Group::Build: return "BUILD";
+    case Group::Test:  return "TEST";
     case Group::Edit:  return "EDIT";
     case Group::Gate:  return "GATES";
     case Group::Suite: return "TEST SUITES";
@@ -1212,54 +1243,13 @@ private:
 // layout math (pure; the GUI shell only draws what these compute)
 // ============================================================================================
 
-struct Rect {
-    int x = 0, y = 0, w = 0, h = 0;
-    bool contains(int px, int py) const { return px >= x && py >= y && px < x + w && py < y + h; }
-    Rect inset(int d) const { return Rect{ x + d, y + d, std::max(0, w - 2 * d), std::max(0, h - 2 * d) }; }
-};
-
-// Largest integer upscale of (w,h) that fits the box (≥1), or a proportional DOWNscale when
-// even 1:1 overflows; the result is centered in the box.
-inline Rect fit_rect(int w, int h, const Rect& box, int max_scale = 8) {
-    if (w <= 0 || h <= 0 || box.w <= 0 || box.h <= 0) return Rect{ box.x, box.y, 0, 0 };
-    int dw, dh;
-    if (w <= box.w && h <= box.h) {
-        int k = std::min(box.w / w, box.h / h);
-        k = std::max(1, std::min(k, max_scale));
-        dw = w * k; dh = h * k;
-    } else {
-        // shrink: keep the aspect, limited by the tighter axis (integer math, never overflows)
-        if (int64_t(w) * box.h > int64_t(h) * box.w) { dw = box.w; dh = int(int64_t(h) * box.w / w); }
-        else                                         { dh = box.h; dw = int(int64_t(w) * box.h / h); }
-        dw = std::max(1, dw); dh = std::max(1, dh);
-    }
-    return Rect{ box.x + (box.w - dw) / 2, box.y + (box.h - dh) / 2, dw, dh };
-}
-
-// Clamp a list's first-visible row so the last page is full (and ≥ 0).
-inline int clamp_scroll(int scroll, int count, int visible) {
-    const int max_first = std::max(0, count - std::max(1, visible));
-    return std::max(0, std::min(scroll, max_first));
-}
-
-// Scrollbar thumb geometry along a track of `track` pixels.
-inline void scroll_thumb(int count, int visible, int scroll, int track, int& pos, int& len) {
-    if (count <= visible || count <= 0) { pos = 0; len = track; return; }
-    len = std::max(6, int(int64_t(track) * visible / count));
-    const int span = track - len;
-    const int max_first = count - visible;
-    pos = max_first > 0 ? int(int64_t(span) * clamp_scroll(scroll, count, visible) / max_first) : 0;
-}
-
-// The first-visible row for a click/drag at `offset` pixels along the track (thumb centered).
-inline int scroll_from_track(int count, int visible, int track, int offset) {
-    if (count <= visible || track <= 0) return 0;
-    int pos = 0, len = 0;
-    scroll_thumb(count, visible, 0, track, pos, len);
-    const int span = std::max(1, track - len);
-    const int p = std::max(0, std::min(span, offset - len / 2));
-    return clamp_scroll(int((int64_t(p) * (count - visible) + span / 2) / span), count, visible);
-}
+// The Rect / fit / scroll math is the widget kit's (tools/common/twk_geom.h), so the model and the
+// GUI agree on one geometry type.
+using twk::Rect;
+using twk::fit_rect;
+using twk::clamp_scroll;
+using twk::scroll_thumb;
+using twk::scroll_from_track;
 
 // Waveform columns: per-column min/max sample (for a peak display `cols` pixels wide).
 inline void waveform(const int16_t* s, uint32_t frames, int cols,

@@ -1,0 +1,21 @@
+{
+  "name": "Platformer",
+  "description": "The reference platformer: the MVP gate, every engine system in one game",
+  "source": ["src"],
+  "assets": [],
+  "bundles": ["../../platformer.phxp", "../../build/p_assets.phxp"],
+  "launches": [
+    { "label": "Play", "group": "play",
+      "command": "cd \"$PHX_ROOT\" && make sdl && ./build/platformer_sdl",
+      "blurb": "Software renderer in a window", "needs": ["sdl2-config"], "windowed": true },
+    { "label": "Play (OpenGL)", "group": "play",
+      "command": "cd \"$PHX_ROOT\" && make gl && ./build/platformer_gl",
+      "blurb": "The OpenGL backend", "needs": ["sdl2-config"], "windowed": true },
+    { "label": "Playthrough test", "group": "test",
+      "command": "make -C \"$PHX_ROOT\" platformer",
+      "blurb": "The headless scripted playthrough (part of make check)" },
+    { "label": "GBA ROM", "group": "console",
+      "command": "cd \"$PHX_ROOT\" && make gba-platformer-ppu && (command -v mgba-qt >/dev/null && mgba-qt build/gba/phx-platformer-ppu.gba || echo 'ROM built: build/gba/phx-platformer-ppu.gba')",
+      "blurb": "devkitARM -> the platformer on GBA PPU hardware, opened in mGBA", "needs": ["/opt/devkitpro/devkitARM/bin/arm-none-eabi-g++"], "windowed": true }
+  ]
+}

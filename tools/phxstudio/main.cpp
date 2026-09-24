@@ -1,32 +1,31 @@
-// tools/phxstudio/main.cpp — Phoenix Studio: the engine made visible. A graphical hub over the
-// whole repository, built (like phxtmap / phxentity) ON the engine itself — the same App loop,
-// SDL window, software golden renderer and phx::ui the games use (docs/gui-editor-feasibility.md,
-// Option A). Three views:
+// tools/phxstudio/main.cpp — Phoenix Studio: the one editor for the whole engine. A graphical hub
+// over the repository, built (like the games) ON the engine itself — the same App loop, SDL
+// window, software golden renderer and phx::ui primitives (docs/gui-editor-feasibility.md,
+// Option A), with the tool widget kit (tools/common/twk.h) on top. Four views:
 //
 //   OVERVIEW  the module dependency graph exactly as built (layers from depcheck.py, edges from
-//             real #includes): click a module for its summary, headers, backends, size, and its
-//             uses / used-by edges; plus the GBA/PSP/PC capability tiers parsed from caps.h.
-//   ASSETS    every .phxp in the tree, validated like ResourceCache::mount (bad ones say why),
-//             with live previews through the real renderer: textures re-encoded per render tier
-//             by the bake's own encoders (see the GBA palette quantization + 15-colour budget),
-//             animated sprite clips, tilemaps with real parallax / collision / spawn overlays,
-//             sounds on the real mixer, spawn tables and blob hex.
+//             real #includes) and the GBA/PSP/PC capability tiers parsed from caps.h.
+//   ASSETS    every .phxp in the tree, validated like ResourceCache::mount, with live previews
+//             through the real renderer (textures per render tier, sprites, tilemaps with
+//             parallax/collision/spawns, sounds on the real mixer, spawn tables, blob hex).
+//   EDITOR    an Explorer over the repo + tabs of documents, each in its own editor: CODE (a
+//             syntax-highlighted text editor), SPRITE / PIXEL (paint PNG sheets, edit frames and
+//             named clips with a live preview), TILEMAP (Tiled .tmj with the real tileset,
+//             layers, collision, spawns, parallax) and DATA TABLE (phxbin records / prefabs).
+//             New sprites, maps, tables, images and files from templates; quick open (Ctrl+P).
 //   RUN       one-click games, editors, gates, every `make check` suite and the console builds,
-//             run as child processes with live, colour-classified output and pass/fail chips.
+//             run as child processes with live, colour-classified output; compiler errors are
+//             clickable and show up in the code editor's gutter.
 //
-//   phxstudio [--root DIR] [--scale N] [--tab overview|assets|run] [--bundle FILE.phxp]
-//             [--asset NAME] [--run TARGET]... [--shot OUT.ppm [--shot-frame N]]
-//             [--script "click X Y; wait N; shot OUT.ppm; quit" | FILE]
+//   phxstudio [--root DIR] [--scale N] [--tab overview|assets|editor|run] [--bundle FILE.phxp]
+//             [--asset NAME] [--run TARGET]... [--open FILE]... [--fresh]
+//             [--shot OUT.ppm [--shot-frame N]] [--script "CMD; CMD..." | FILE]
 //
-//   mouse          everything is clickable; drag scrollbars
-//   Tab            next view                   Esc / window close   quit
-//   Up/Down        previous / next item (assets), scroll (console)
-//   Q / E          previous / next asset       arrows (tilemap)     pan the map
-//
-// The document logic (model.h) is headless and unit-tested in the pipeline suite; this file only
-// lays it out. Process control lives in jobs.h. No SDL header is included here: the two
-// desktop-only hooks below are the SDL backend's extern "C" extension symbols (the same
-// precedent emberwing's desktop_main uses for the audio device).
+// The document logic (model.h, textdoc.h, syntax.h, pixeldoc.h, project.h, the map/table models)
+// is headless and unit-tested in the editors + pipeline suites; the editor panels are ed_*.cpp,
+// the workspace is workspace.cpp, process control is jobs.h. No SDL header is included here: the
+// window/keyboard/clipboard extras come through phx/platform/desktop.h, and the audio/readback
+// hooks are the SDL backend's extern "C" extension symbols (the emberwing precedent).
 #include "phx/runtime/app.h"
 #include "phx/ui/ui.h"
 #include "phx/render/renderer.h"
@@ -35,10 +34,14 @@
 #include "phx/audio/command_queue.h"
 #include "phx/core/version.h"
 #include "phx/platform/platform.h"
+#include "phx/platform/desktop.h"
 
-#include "ascii_font.h"   // tools/common
+#include "twk.h"          // tools/common: the tool widget kit
 #include "model.h"
 #include "jobs.h"
+#include "host.h"
+#include "workspace.h"
+#include "../phxentity/editor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -46,6 +49,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -53,7 +57,6 @@
 
 extern "C" int  phx_sdl_audio_start(int rate, void (*fill)(void*, int16_t*, int), void* user);
 extern "C" void phx_sdl_audio_stop(void);
-extern "C" void phx_sdl_set_window_scale(int scale);
 extern "C" int  phx_sdl_readback(uint32_t* out, int lw, int lh);
 
 using namespace phx;
@@ -62,9 +65,12 @@ using namespace phxstudio;
 namespace {
 
 // ---- canvas + type metrics -------------------------------------------------------------------
-constexpr int kW = 640, kH = 360;               // logical canvas (window = kW*scale x kH*scale)
+// The logical canvas FOLLOWS the window (resizable; the SDL backend re-derives the framebuffer from
+// the window size at the integer UI scale). 640x360 is the starting size (a 1280x720 window at 2x).
+int kW = 640, kH = 360;
 constexpr int kTopH = 18, kBotH = 12;
-constexpr int kBodyY = kTopH, kBodyH = kH - kTopH - kBotH;
+constexpr int kBodyY = kTopH;
+int kBodyH = kH - kTopH - kBotH;
 constexpr int kAdv = 6, kLineH = 10;            // 5x7 glyphs on a 6px pitch
 constexpr int kMixRate = 44100;
 
@@ -140,137 +146,67 @@ std::string fmt(const char* f, ...) {
 }
 
 // ============================================================================================
-// Gui — a tiny pointer-aware immediate-mode layer over phx::UI's image/rect primitives
+// Gui — the Overview / Assets / Run views' drawing vocabulary, as a thin adapter over the tool
+// widget kit (twk::Gui). Those views were written against absolute sprite layers (kLy*); the
+// adapter maps them onto twk's sub-layers so they share hit-testing, popups and modals with the
+// Editor workspace and the menu bar (a menu open over a view blocks the view beneath it).
 // ============================================================================================
 //
-// Sprites are CAMERA-RELATIVE in the renderer (the soft backend subtracts the camera from every
-// sprite), and the tilemap preview moves the camera to use the real parallax path. So every
-// chrome draw adds the camera back (ox, oy): chrome stays put while the map scrolls under it.
+// Sprites are CAMERA-RELATIVE in the renderer, and the tilemap preview moves the camera to use the
+// real parallax path, so twk adds the camera back to every draw (its ox/oy): chrome stays put
+// while the map scrolls under it.
 struct Gui {
-    UI        ui;
-    TextureId font = kNoTexture;
-    int  ox = 0, oy = 0;
+    twk::Gui* g = nullptr;
     int  mx = -1, my = -1;
-    bool down = false, pressed = false, released = false;
-    bool prev_down = false;
-    int  drag = 0;               // id of the widget that owns the pointer while held (0 = none)
+    bool down = false;
     std::string hint;            // status-bar help for whatever is hovered this frame
 
-    // --script drives the pointer instead of the mouse (a GUI-level stand-in for the null
-    // platform's scripted pointer, so click flows can be exercised in a real window).
-    bool scripted = false;
-    int  script_x = -1, script_y = -1;
-    bool script_down = false;
-
-    void begin(Renderer& r, const InputState& in, int cam_x, int cam_y) {
-        ui.begin(r, in);
-        ox = cam_x; oy = cam_y;
-        mx = s_to_int(in.pointer.x); my = s_to_int(in.pointer.y);
-        down = in.pointer_down;
-        if (scripted) { mx = script_x; my = script_y; down = script_down; }
-        pressed = down && !prev_down;
-        released = !down && prev_down;
-        prev_down = down;
-        if (!down) drag = 0;
+    void sync() {
+        mx = g->mx(); my = g->my();
+        down = (g->in->held & twk::kMouseL) != 0;
         hint.clear();
     }
-    void end() { ui.end(); }
+    void flush_hint() { if (!hint.empty()) g->hint = hint; }
 
+    static twk::Rect tr(const Rect& r) { return twk::Rect{ r.x, r.y, r.w, r.h }; }
+    // kLy* (absolute, 120..240) -> twk sub-layer (monotonic, so relative order is preserved).
+    static uint8_t sub(uint8_t ly) {
+        if (ly < kLyEdge)   return twk::kSubBg;
+        if (ly < kLyPanel)  return uint8_t(twk::kSubBg + 1);
+        if (ly < kLyWidget) return twk::kSubFill;
+        if (ly < kLyImage)  return uint8_t(twk::kSubWidget + (ly > kLyWidget ? 1 : 0));
+        if (ly < kLyOver)   return uint8_t(twk::kSubImage + (ly > kLyImage ? 1 : 0));
+        if (ly < kLyText)   return uint8_t(twk::kSubOver + (ly > kLyOver ? 1 : 0));
+        if (ly < kLyBar)    return uint8_t(twk::kSubText + (ly > kLyText ? 1 : 0));
+        return twk::kSubTop;
+    }
     static vec2 v2(int x, int y) { return vec2{ s_from_int(x), s_from_int(y) }; }
 
-    void rect(const Rect& r, Rgba c, uint8_t layer = kLyPanel) {
-        if (r.w <= 0 || r.h <= 0) return;
-        ui.rect(UIRect{ v2(r.x + ox, r.y + oy), v2(r.w, r.h) }, c, layer);
-    }
-    void frame(const Rect& r, Rgba c, uint8_t layer = kLyWidget) {
-        rect(Rect{ r.x, r.y, r.w, 1 }, c, layer);
-        rect(Rect{ r.x, r.y + r.h - 1, r.w, 1 }, c, layer);
-        rect(Rect{ r.x, r.y, 1, r.h }, c, layer);
-        rect(Rect{ r.x + r.w - 1, r.y, 1, r.h }, c, layer);
-    }
+    void rect(const Rect& r, Rgba c, uint8_t layer = kLyPanel) { g->rect(tr(r), c, sub(layer)); }
+    void frame(const Rect& r, Rgba c, uint8_t layer = kLyWidget) { g->frame_rect(tr(r), c, sub(layer)); }
     void image(const Rect& dst, TextureId t, int sx, int sy, int sw, int sh,
                Rgba tint = rgba(255, 255, 255), uint8_t layer = kLyImage) {
-        if (t == kNoTexture || dst.w <= 0 || dst.h <= 0) return;
-        ui.image(UIRect{ v2(dst.x + ox, dst.y + oy), v2(dst.w, dst.h) }, t, sx, sy, sw, sh, tint, layer);
+        g->image(tr(dst), t, sx, sy, sw, sh, tint, sub(layer));
     }
-
-    // Text on the 6px pitch; `max_w` truncates with "..". `scale` 2 = the title size.
-    int text(int x, int y, const std::string& s, Rgba c, uint8_t layer = kLyText, int max_w = 1 << 20,
-             int scale = 1) {
-        const int adv = kAdv * scale;
-        const int fit = std::max(0, max_w / adv);
-        const bool cut = int(s.size()) > fit;
-        const int n = cut ? std::max(0, fit - 2) : int(s.size());
-        int cx = x;
-        for (int i = 0; i < n; ++i, cx += adv) {
-            int g = int(static_cast<unsigned char>(s[size_t(i)])) - 32;
-            if (g == 0) continue;
-            if (g < 0 || g >= phxtool::kAsciiGlyphs) g = phxtool::kAsciiGlyphs - 1;
-            ui.image(UIRect{ v2(cx + ox, y + oy), v2(8 * scale, 8 * scale) }, font,
-                     (g % 16) * 8, (g / 16) * 8, 8, 8, c, layer);
-        }
-        if (cut && fit >= 2) {
-            for (int k = 0; k < 2; ++k, cx += adv)
-                ui.image(UIRect{ v2(cx + ox, y + oy), v2(8 * scale, 8 * scale) }, font,
-                         ('.' - 32) % 16 * 8, ('.' - 32) / 16 * 8, 8, 8, pal::dim, layer);
-        }
-        return cx - x;
+    int text(int x, int y, const std::string& s, Rgba c, uint8_t layer = kLyText, int max_w = 1 << 20, int scale = 1) {
+        return g->text(x, y, s, c, sub(layer), max_w >= (1 << 20) ? INT_MAX : max_w, scale);
     }
-    static int text_w(const std::string& s, int scale = 1) { return int(s.size()) * kAdv * scale; }
-    void text_center(const Rect& r, const std::string& s, Rgba c, uint8_t layer = kLyText) {
-        const int w = std::min(text_w(s), r.w - 4);
-        text(r.x + (r.w - w) / 2, r.y + (r.h - 8) / 2 + 1, s, c, layer, r.w - 4);
-    }
-
-    bool hover(const Rect& r) const { return r.contains(mx, my); }
-    bool clicked(const Rect& r) const { return pressed && drag == 0 && r.contains(mx, my); }
-
-    // A flat button: `on` = toggled/active look, `tint` = accent for the label/border.
+    static int text_w(const std::string& s, int scale = 1) { return twk::Gui::text_w(s, scale); }
+    void text_center(const Rect& r, const std::string& s, Rgba c, uint8_t layer = kLyText) { g->text_center(tr(r), s, c, sub(layer)); }
+    bool hover(const Rect& r) const { return g->hover(tr(r)); }
+    bool clicked(const Rect& r) { return g->clicked(tr(r)); }
     bool button(const Rect& r, const std::string& label, bool on = false, bool enabled = true,
                 const std::string& help = "", Rgba tint = pal::accent) {
-        const bool h = enabled && hover(r);
-        const Rgba fill = !enabled ? pal::panel : on ? scale_rgb(tint, 1, 3) : h ? pal::hover : pal::panel2;
-        rect(r, fill, kLyWidget);
-        frame(r, on ? tint : h ? pal::line : pal::panel2, kLyWidget);
-        text_center(r, label, !enabled ? pal::faint : on ? pal::text : pal::text);
-        if (h && !help.empty()) hint = help;
-        if (!enabled && hover(r) && !help.empty()) hint = help;
-        return enabled && clicked(r);
+        twk::Btn b;
+        b.on = on; b.enabled = enabled; b.tint = tint;
+        b.help = help.empty() ? nullptr : help.c_str();
+        return g->button(tr(r), label, b);
     }
-
-    // A vertical scrollbar for a list of `count` rows showing `visible`. Returns true if the
-    // user moved it (click on the track jumps, drag follows). `id` must be unique and nonzero.
     bool scrollbar(int id, const Rect& track, int count, int visible, int& scroll) {
-        rect(track, pal::bar, kLyWidget);
-        if (count <= visible) return false;
-        int pos = 0, len = 0;
-        scroll_thumb(count, visible, scroll, track.h, pos, len);
-        const bool h = hover(track);
-        rect(Rect{ track.x + 1, track.y + pos, track.w - 2, len }, drag == id ? pal::accent : h ? pal::dim : pal::faint,
-             kLyOver);
-        if (pressed && drag == 0 && h) drag = id;
-        if (drag == id && down) {
-            const int ns = scroll_from_track(count, visible, track.h, my - track.y);
-            const bool moved = ns != scroll;
-            scroll = ns;
-            return moved;
-        }
-        return false;
+        g->wheel_scroll(twk::Rect{ track.x - 400, track.y, 400 + track.w, track.h }, scroll, count, visible);
+        return g->scrollbar_v(0x5C0B0000u + uint32_t(id), tr(track), count, visible, scroll);
     }
-
-    // 1px line (Bresenham), one rect per row-run so a steep line is ~dy sprites.
-    void line_px(int x0, int y0, int x1, int y1, Rgba c, uint8_t layer) {
-        if (y0 > y1) { std::swap(x0, x1); std::swap(y0, y1); }
-        const int dy = y1 - y0;
-        if (dy == 0) { rect(Rect{ std::min(x0, x1), y0, std::abs(x1 - x0) + 1, 1 }, c, layer); return; }
-        int prev_x = x0;
-        for (int y = y0; y <= y1; ++y) {
-            const int x = x0 + (x1 - x0) * (y - y0) / dy;
-            const int a = std::min(prev_x, x), b = std::max(prev_x, x);
-            rect(Rect{ a, y, std::max(1, b - a + (a == b ? 1 : 0)), 1 }, c, layer);
-            prev_x = x;
-        }
-    }
+    void line_px(int x0, int y0, int x1, int y1, Rgba c, uint8_t layer) { g->line(x0, y0, x1, y1, c, sub(layer)); }
 };
 
 // ---- the app icon: a tiny flame, drawn from an ASCII grid (tools draw their own art) ---------
@@ -297,26 +233,68 @@ void audio_fill(void* user, int16_t* out, int frames) {
     g->mixer->mix(out, uint32_t(frames));
 }
 
-enum class Tab : uint8_t { Overview, Assets, Run, Count };
-const char* const kTabNames[] = { "Overview", "Assets", "Run" };
+enum class Tab : uint8_t { Overview, Assets, Editor, Run, Count };
+const char* const kTabNames[] = { "Overview", "Assets", "Editor", "Run" };
 
-// A console display line (a LogLine wrapped to the panel width).
-struct ConLine { std::string text; Tone tone; };
+// A console display line (a LogLine wrapped to the panel width). `diag` >= 0 indexes the parsed
+// compiler diagnostic it came from (clicking the line opens the file there).
+struct ConLine { std::string text; Tone tone; int diag = -1; };
+
+struct StudioGame;
+
+// The Host the editor panels talk to (host.h), forwarding into the StudioGame (a separate object
+// so the game's own members — `root`, `ticks` — don't collide with the interface's methods).
+struct StudioHost final : Host {
+    StudioGame* s = nullptr;
+    twk::Gui& gui() override;
+    phx::Renderer& renderer() override;
+    const std::string& root() const override;
+    Access access(const std::string& path_abs) override;
+    std::vector<std::pair<std::string, std::string>> api_dirs() override;
+    std::string project_name() const override;
+    uint64_t ticks() const override;
+    void toast(const std::string& msg, Toast t) override;
+    void modal(const std::string& title, int w, int h, std::function<bool(twk::Gui&, twk::Rect)> body) override;
+    bool modal_open() const override;
+    void open_file(const std::string& path_abs, int line, int col) override;
+    void open_tile(const std::string& path_abs, int index, int tw, int th) override;
+    bool can_open_files() const override { return true; }
+    std::vector<std::string> prefab_types() override;
+    std::vector<std::string> files_with(const std::vector<std::string>& exts) override;
+    bool run_make(const std::string& target) override;
+    void file_saved(const std::string& path_abs) override;
+    std::vector<Diag> diagnostics_for(const std::string& path_abs) override;
+};
 
 // ============================================================================================
 // StudioGame
 // ============================================================================================
 struct StudioGame final : Game {
     std::string root;
-    Tab tab = Tab::Overview;
+    Tab tab = Tab::Editor;
     std::string initial_bundle;
     std::string initial_asset;
     std::vector<std::string> initial_runs;            // --run: queue these launches at startup
-    struct ScriptCmd { std::string op, arg; int a = 0, b = 0; };
+    std::vector<std::string> initial_opens;           // --open: documents to open at startup
+    // Project mode (the default): the Studio edits ONE game project's folder; the engine's public
+    // API is readable, nothing else of the engine is. --engine-dev opens the engine checkout itself.
+    bool engine_dev = false;
+    std::string project_arg;                          // --project DIR
+    ProjectDoc project;
+    bool has_project = false;
+    AccessPolicy policy;
+    std::string ws_root;                              // the workspace root: the project (or the engine)
+    std::vector<std::string> recent_projects;
+    bool fresh = false;                               // --fresh: don't restore the last session
+    bool auto_size = true;                            // pick the window size from the display
+    struct ScriptCmd { std::string op, arg, rest; int a = 0, b = 0, c = 0, d = 0, e = 0; };
     std::vector<ScriptCmd> script;                    // --script: "click X Y; wait N; shot F; quit"
     size_t script_pc = 0;
     int  script_wait = 0;
-    bool script_release = false;
+    // scripted pointer (overrides the real mouse while a script runs)
+    int  sc_x = -1, sc_y = -1;
+    uint32_t sc_held = 0;
+    std::vector<std::function<void(twk::Input&)>> sc_frames;   // per-frame queued input
     std::string pending_shot;
     std::string shot_path;                            // --shot: write the frame, then quit
     int shot_frame = 45;
@@ -332,8 +310,22 @@ struct StudioGame final : Game {
     std::unique_ptr<JobRunner> jobs;
 
     // gui
-    Gui gui;
+    twk::Gui tg;                                      // the widget kit (every view + the chrome)
+    twk::Input tin;                                   // this frame's pointer + keyboard
+    Gui gui;                                          // legacy-view adapter over tg
+    StudioHost host;
+    Workspace ws;
+    App* app_ = nullptr;
     Renderer* renderer = nullptr;                     // the App's (lives as long as the app)
+    struct Modal { std::string title; int w, h; std::function<bool(twk::Gui&, twk::Rect)> body; };
+    std::vector<Modal> modals;                        // a stack; only the top one is live
+    struct ToastMsg { std::string text; Toast tone; uint64_t until; };
+    std::vector<ToastMsg> toasts;
+    std::vector<Diag> diags;                          // compiler diagnostics of the current build
+    std::vector<std::string> prefab_cache;
+    bool prefab_dirty = true;
+    std::string title_shown;
+    bool quitting = false;
     TextureId flame_tex = kNoTexture;
     uint64_t ticks = 0;                               // fixed steps (animation clock, 60 Hz)
     RenderStats last_stats{};
@@ -341,7 +333,6 @@ struct StudioGame final : Game {
     uint64_t frames_rendered = 0, fps_tick = 0;
     unsigned fps = 0;
     int key_hold = 0;
-    static uint32_t g_font_px[phxtool::kAsciiFontW * phxtool::kAsciiFontH];
     static uint32_t g_flame_px[12 * 12];
 
     // overview
@@ -412,10 +403,25 @@ struct StudioGame final : Game {
     void on_start(App& app) override {
         Renderer& r = app.render();
         renderer = &r;
-        phxtool::build_ascii_font(g_font_px);
-        TextureDesc fd{};
-        fd.pixels = g_font_px; fd.width = phxtool::kAsciiFontW; fd.height = phxtool::kAsciiFontH;
-        gui.font = r.load_texture(fd);
+        app_ = &app;
+        host.s = this;
+        tg.init(r);
+        gui.g = &tg;
+        // The desktop extension: Esc belongs to dialogs/editors, closing the window asks about
+        // unsaved work, and the canvas follows the window size.
+        phx_desktop_set_quit_on_escape(0);
+        phx_desktop_set_confirm_quit(1);
+        phx_desktop_set_resizable(1);
+        // Open bigger than the 640x360 minimum when the screen has room (an 800x450 canvas at the
+        // chosen scale), unless --scale / a script / a shot asked for a fixed, reproducible size.
+        int dw = 0, dh = 0;
+        if (auto_size && phx_desktop_display_size(&dw, &dh)) {
+            if (dh >= 2000) phx_desktop_set_scale(3);
+            const int sc = phx_desktop_scale();
+            if (dw >= 820 * sc && dh >= 480 * sc) phx_desktop_set_window_size(800 * sc, 450 * sc);
+        }
+        int fw = kW, fh = kH;
+        if (phx_desktop_fb_size(&fw, &fh) == 0 && fw > 0) { kW = fw; kH = fh; kBodyH = kH - kTopH - kBotH; }
 
         for (int y = 0; y < 12; ++y)
             for (int x = 0; x < 12; ++x) {
@@ -427,20 +433,239 @@ struct StudioGame final : Game {
         id.pixels = g_flame_px; id.width = 12; id.height = 12;
         flame_tex = r.load_texture(id);
 
-        if (!scan_engine(root, engine, &engine_err))
-            std::fprintf(stderr, "phxstudio: %s\n", engine_err.c_str());
-        for (size_t i = 0; i < engine.modules.size(); ++i)
-            if (engine.modules[i].name == "render") mod_sel = int(i);
-        std::string caps_h;
-        if (read_text(root + "/engine/core/include/phx/core/caps.h", caps_h)) parse_caps(caps_h, tiers);
-        scan_names(root, names);
-        read_text(root + "/Makefile", makefile);
-        const char* dka = std::getenv("DEVKITARM");
-        const char* dkp = std::getenv("DEVKITPRO");
-        const std::string devkitarm = dka ? dka : (dkp ? std::string(dkp) + "/devkitARM" : "/opt/devkitpro/devkitARM");
-        launches = default_launches(makefile, devkitarm);
-        for (const Launch& l : launches) launch_missing.push_back(missing_need(l));
+        policy.engine_root = canon_path(root);
+        policy.engine_dev = engine_dev;
+        mixer = AudioMixer::create(app.mem().persistent(), caps(), kMixRate).unwrap();
+        queue.init(queue_storage, 32);
+        glue = AudioGlue{ mixer, &queue };
         jobs.reset(new JobRunner(root));
+        load_recent_projects();
+
+        if (engine_dev) {
+            // Engine maintenance: the whole checkout is the workspace (the Studio as it always was).
+            ws_root = root;
+            if (!scan_engine(root, engine, &engine_err))
+                std::fprintf(stderr, "phxstudio: %s\n", engine_err.c_str());
+            for (size_t i = 0; i < engine.modules.size(); ++i)
+                if (engine.modules[i].name == "render") mod_sel = int(i);
+            std::string caps_h;
+            if (read_text(root + "/engine/core/include/phx/core/caps.h", caps_h)) parse_caps(caps_h, tiers);
+            scan_names(root, names);
+            read_text(root + "/Makefile", makefile);
+            const char* dka = std::getenv("DEVKITARM");
+            const char* dkp = std::getenv("DEVKITPRO");
+            const std::string devkitarm = dka ? dka : (dkp ? std::string(dkp) + "/devkitARM" : "/opt/devkitpro/devkitARM");
+            launches = default_launches(makefile, devkitarm);
+            for (const Launch& l : launches) launch_missing.push_back(missing_need(l));
+            refresh_bundles();
+            select_initial_asset();
+            ws.init(host);
+            ws.load_session(host, !fresh && initial_opens.empty());
+            open_initial_files();
+            run_initial_launches();
+            std::printf("phxstudio: engine development — %s: %zu modules, %d edges, %zu bundles, %zu names, %zu launches\n",
+                        root.c_str(), engine.modules.size(), engine.edges, bundle_paths.size(), names.size(),
+                        launches.size());
+            return;
+        }
+        // Project mode: nothing of the engine is read until a project is open, and then only its
+        // public API headers (read-only) and the project's own folder.
+        if (tab == Tab::Overview) tab = Tab::Editor;
+        if (!project_arg.empty()) {
+            if (!open_project(project_arg)) std::fprintf(stderr, "phxstudio: cannot open project '%s'\n", project_arg.c_str());
+        }
+        if (!has_project) std::printf("phxstudio: no project open — pick one (or --project DIR; --engine-dev for the engine)\n");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // projects
+    // ---------------------------------------------------------------------------------------
+    std::vector<Tab> visible_tabs() const {
+        if (engine_dev) return { Tab::Overview, Tab::Assets, Tab::Editor, Tab::Run };
+        if (!has_project) return {};
+        return { Tab::Editor, Tab::Assets, Tab::Run };      // the engine's module graph is not a project's business
+    }
+    bool tab_visible(Tab t) const {
+        for (Tab v : visible_tabs()) if (v == t) return true;
+        return false;
+    }
+
+    // The engine's public API folders (engine/<module>/include), read-only in project mode.
+    std::vector<std::pair<std::string, std::string>> api_dirs() const {
+        std::vector<std::pair<std::string, std::string>> out;
+        if (engine_dev) return out;                          // the whole checkout is already visible
+        std::error_code ec;
+        for (pfs::directory_iterator it(pfs::path(root) / "engine", ec), end; !ec && it != end; it.increment(ec)) {
+            const pfs::path inc = it->path() / "include";
+            if (it->is_directory(ec) && pfs::is_directory(inc, ec))
+                out.push_back({ it->path().filename().string(), canon_path(inc.string()) });
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+    static std::string projects_file() {
+        const char* xdg = std::getenv("XDG_CONFIG_HOME");
+        const char* home = std::getenv("HOME");
+        if (xdg && *xdg) return std::string(xdg) + "/phxstudio/projects.txt";
+        if (home && *home) return std::string(home) + "/.config/phxstudio/projects.txt";
+        return "";
+    }
+    void load_recent_projects() {
+        recent_projects.clear();
+        std::string text;
+        if (projects_file().empty() || !read_text(projects_file(), text)) return;
+        size_t p = 0;
+        while (p < text.size()) {
+            size_t e = text.find('\n', p);
+            if (e == std::string::npos) e = text.size();
+            const std::string line = text.substr(p, e - p);
+            p = e + 1;
+            if (!line.empty() && ProjectDoc::is_project_dir(line)) recent_projects.push_back(line);
+        }
+    }
+    void note_recent_project(const std::string& dir) {
+        recent_projects.erase(std::remove(recent_projects.begin(), recent_projects.end(), dir), recent_projects.end());
+        recent_projects.insert(recent_projects.begin(), dir);
+        if (recent_projects.size() > 10) recent_projects.resize(10);
+        if (!script.empty() || !shot_path.empty()) return;  // scripted runs leave no trace
+        const std::string f = projects_file();
+        if (f.empty()) return;
+        std::error_code ec;
+        pfs::create_directories(pfs::path(f).parent_path(), ec);
+        if (FILE* fp = std::fopen(f.c_str(), "wb")) {
+            for (const std::string& r : recent_projects) std::fprintf(fp, "%s\n", r.c_str());
+            std::fclose(fp);
+        }
+    }
+
+    // Open (or switch to) a project. The caller has already dealt with unsaved documents.
+    bool open_project(const std::string& path) {
+        std::string err;
+        ProjectDoc p;
+        if (!ProjectDoc::load(path, p, &err)) { toast(err, Toast::Bad); return false; }
+        const std::string problem = policy.project_dir_problem(p.dir);
+        if (!problem.empty()) { toast(p.dir + ": " + problem, Toast::Bad); return false; }
+        if (has_project && script.empty() && shot_path.empty()) ws.save_session();
+        ws.close_all(host);
+        clear_asset_caches();
+        project = p;
+        has_project = true;
+        policy.project_dir = p.dir;
+        ws_root = p.dir;
+        // launches: the project's own, run from its folder with $PHX_ROOT/$PHX_PROJECT
+        launches.clear();
+        launch_missing.clear();
+        for (const ProjectLaunch& pl : p.launches) {
+            Launch l;
+            l.label = pl.label;
+            l.group = pl.group == "build" ? Group::Build : pl.group == "test" ? Group::Test
+                    : pl.group == "console" ? Group::Cross : pl.group == "tool" ? Group::Edit : Group::Play;
+            l.command = launch_shell_command(pl, canon_path(root), p.dir);
+            l.blurb = pl.blurb.empty() ? pl.command : pl.blurb;
+            l.needs = pl.needs;
+            l.windowed = pl.windowed;
+            launches.push_back(l);
+            launch_missing.push_back(missing_need(l));
+        }
+        last_launch = -1;
+        diags.clear();
+        names = NameBook{};
+        scan_names_in(p.dir, p.bundle_paths(), names);
+        refresh_bundles();
+        select_initial_asset();
+        ws.init(host);
+        ws.load_session(host, !fresh && initial_opens.empty());
+        open_initial_files();
+        initial_opens.clear();
+        run_initial_launches();
+        initial_runs.clear();
+        prefab_dirty = true;
+        if (!tab_visible(tab)) tab = Tab::Editor;
+        note_recent_project(p.dir);
+        std::printf("phxstudio: project '%s' (%s) — %zu launches, %zu bundles\n", p.name.c_str(), p.dir.c_str(),
+                    launches.size(), bundle_paths.size());
+        return true;
+    }
+    void close_project() {
+        if (!has_project) return;
+        if (script.empty() && shot_path.empty()) ws.save_session();
+        ws.close_all(host);
+        clear_asset_caches();
+        has_project = false;
+        policy.project_dir.clear();
+        project = ProjectDoc{};
+        ws_root.clear();
+        launches.clear();
+        launch_missing.clear();
+        bundle_paths.clear();
+        diags.clear();
+    }
+    // Run `then` once the open documents are saved or discarded (or right away when none is dirty).
+    void with_saved_docs(const std::string& what, std::function<void()> then) {
+        if (!ws.any_dirty()) { then(); return; }
+        const int n = ws.dirty_count();
+        push_modal(what, 330, 80, [this, n, then](twk::Gui& g, twk::Rect body) {
+            g.text(body.x, body.y + 2, twk::fmt("%d file%s ha%s unsaved changes.", n, n == 1 ? "" : "s", n == 1 ? "s" : "ve"), pal::text);
+            g.text(body.x, body.y + 14, "Save them first?", pal::dim);
+            const int y = body.bottom() - 14;
+            twk::Btn sb; sb.on = true;
+            if (g.button(twk::Rect{ body.x, y, 80, 14 }, "Save all", sb) || g.key(PHX_KEY_ENTER)) {
+                if (ws.save_all(host)) then();
+                return false;
+            }
+            if (g.button(twk::Rect{ body.x + 84, y, 90, 14 }, "Don't save")) { then(); return false; }
+            if (g.button(twk::Rect{ body.x + 178, y, 70, 14 }, "Cancel") || g.key(PHX_KEY_ESCAPE)) return false;
+            return true;
+        });
+    }
+    // Drop everything the Assets view holds for the previous workspace (zero-copy uploads first).
+    void clear_asset_caches() {
+        if (!renderer) return;
+        for (auto& kv : map_slots) renderer->unload_texture(kv.second.tileset);
+        renderer->unload_texture(spr_tex);
+        spr_tex = kNoTexture;
+        renderer->unload_texture(tex_id);
+        tex_id = kNoTexture;
+        if (snd_playing) { queue.stop_all(); snd_playing = false; }
+        docs.clear();
+        map_slots.clear();
+        map = nullptr;
+        map_asset = tex_asset = spr_asset = snd_asset = wave_asset = -1;
+        doc = nullptr;
+        order.clear();
+        bundle_sel = asset_sel = -1;
+        bundle_paths.clear();
+    }
+
+    // A compiler message's file -> an absolute, canonical path. Relative paths are relative to
+    // the directory make ran in: the project folder, or (make -C "$PHX_ROOT") the engine checkout.
+    std::string resolve_diag_file(const std::string& f) const {
+        if (f.empty() || f[0] == '/') return canon_path(f);
+        std::error_code ec;
+        for (const std::string& base : { ws_root, root })
+            if (!base.empty() && pfs::exists(join_path(base, f), ec)) return canon_path(join_path(base, f));
+        return canon_path(join_path(root, f));
+    }
+    // Re-read phxproject.json (the Assets "scan" button, after editing the project file).
+    void project_reload_file() {
+        ProjectDoc p;
+        std::string err;
+        if (!ProjectDoc::load(project.dir, p, &err)) { toast(err, Toast::Bad); return; }
+        project.bundles = p.bundles;
+        project.name = p.name;
+    }
+
+    std::string resolve_user_path(const std::string& p) const {
+        if (p.empty() || p[0] == '/') return p;
+        std::error_code ec;
+        if (pfs::exists(p, ec)) return canon_path(p);         // relative to the working directory
+        return join_path(ws_root.empty() ? root : ws_root, p);
+    }
+    void open_initial_files() {
+        for (const std::string& p : initial_opens) ws.open(host, resolve_user_path(p));
+    }
+    void run_initial_launches() {
         for (const std::string& want : initial_runs) {
             bool found = false;
             for (size_t i = 0; i < launches.size() && !found; ++i)
@@ -452,15 +677,12 @@ struct StudioGame final : Game {
                 }
             if (!found) std::fprintf(stderr, "phxstudio: --run: no launch named '%s'\n", want.c_str());
         }
-
-        mixer = AudioMixer::create(app.mem().persistent(), caps(), kMixRate).unwrap();
-        queue.init(queue_storage, 32);
-        glue = AudioGlue{ mixer, &queue };
-
-        refresh_bundles();
+    }
+    void select_initial_asset() {
         if (!initial_bundle.empty()) {
+            const std::string want = canon_path(resolve_user_path(initial_bundle));
             for (size_t i = 0; i < bundle_paths.size(); ++i)
-                if (bundle_paths[i] == initial_bundle) select_bundle(int(i));
+                if (bundle_paths[i] == initial_bundle || bundle_abs(bundle_paths[i]) == want) select_bundle(int(i));
         }
         if (!initial_asset.empty() && doc) {                 // "name" or "type:name" (e.g. sprite:hero)
             const size_t colon = initial_asset.find(':');
@@ -475,15 +697,134 @@ struct StudioGame final : Game {
             for (const char* pref : { "build/emberwing.phxp", "build/platformer.phxp" })
                 for (size_t i = 0; i < bundle_paths.size() && bundle_sel < 0; ++i)
                     if (bundle_paths[i] == pref) select_bundle(int(i));
+            for (size_t i = 0; i < bundle_paths.size() && bundle_sel < 0; ++i)
+                if (docs[bundle_paths[i]] && docs[bundle_paths[i]]->ok) select_bundle(int(i));
         }
-        std::printf("phxstudio: %s — %zu modules, %d edges, %zu bundles, %zu names, %zu launches\n",
-                    root.c_str(), engine.modules.size(), engine.edges, bundle_paths.size(), names.size(),
-                    launches.size());
+    }
+    // Bundle list entries are engine-root-relative (engine dev) or absolute (a project's).
+    std::string bundle_abs(const std::string& p) const { return p.empty() || p[0] == '/' ? p : root + "/" + p; }
+    std::string bundle_label(const std::string& p) const {
+        if (has_project && path_within(p, project.dir)) return p.substr(project.dir.size() + 1);
+        return p;
+    }
+
+    // ---- the project picker (no project open) ----
+    void draw_picker() {
+        const twk::Rect r{ 0, kBodyY, kW, kBodyH };
+        tg.rect(r, pal::bg, twk::kSubBg);
+        const int cx = r.x + std::max(12, (r.w - 460) / 2);
+        int y = r.y + std::max(12, (r.h - 300) / 4);
+        tg.image(twk::Rect{ cx, y, 24, 24 }, flame_tex, 0, 0, 12, 12);
+        tg.text(cx + 32, y + 4, "Phoenix Studio", pal::accent, twk::kSubText, r.w, 2);
+        y += 32;
+        tg.text(cx, y, "Open a game project to start. A project is a folder with a phxproject.json:", pal::dim, twk::kSubText, r.w - 20);
+        tg.text(cx, y + 10, "the Studio edits that folder only (the engine's public API is readable).", pal::dim, twk::kSubText, r.w - 20);
+        y += 28;
+        twk::Btn nb; nb.icon = twk::kIconPlus; nb.on = true; nb.help = "Create a project from the template: a small game with a sprite, a tileset and a level";
+        if (tg.button(twk::Rect{ cx, y, 140, 16 }, "New project...", nb)) new_project_dialog();
+        twk::Btn ob; ob.icon = twk::kIconFolderOpen; ob.help = "Open a folder that has a phxproject.json";
+        if (tg.button(twk::Rect{ cx + 148, y, 150, 16 }, "Open project...", ob)) open_project_dialog();
+        y += 28;
+        auto list = [&](const char* title, const std::vector<std::string>& dirs) {
+            tg.section(cx, y, 460, title, pal::faint);
+            y += 13;
+            if (dirs.empty()) { tg.text(cx + 4, y, "none yet", pal::faint); y += 12; }
+            for (const std::string& d : dirs) {
+                const twk::Rect rr{ cx, y, 460, 13 };
+                ProjectDoc pd;
+                const bool ok = ProjectDoc::load(d, pd);
+                if (tg.hover(rr)) { tg.rect(rr, pal::hover, twk::kSubWidget); tg.hint = d; }
+                tg.icon(rr.x + 3, rr.y + 1, twk::kIconFileMap, ok ? pal::accent : pal::bad);
+                tg.text(rr.x + 17, rr.y + 3, ok ? pd.name : base_name(d), ok ? pal::text : pal::bad, twk::kSubText, 150);
+                tg.text(rr.x + 175, rr.y + 3, d, pal::faint, twk::kSubText, rr.w - 177);
+                if (ok && tg.clicked(rr)) { open_project(d); return; }
+                y += 14;
+            }
+            y += 8;
+        };
+        list("RECENT PROJECTS", recent_projects);
+        if (has_project) return;
+        list("EXAMPLE PROJECTS (in this Phoenix checkout)", discover_projects(root));
+        tg.text(cx, std::min(y + 4, r.bottom() - 14), "Working on the engine itself? Start the Studio with --engine-dev.", pal::faint, twk::kSubText, r.w - 20);
+    }
+
+    void new_project_dialog() {
+        struct St { std::string name = "My Game", where = "examples"; std::string err; bool first = true; };
+        auto st = std::make_shared<St>();
+        push_modal("New project", 380, 130, [this, st](twk::Gui& g, twk::Rect body) {
+            const uint32_t nid = g.id("np-name");
+            if (st->first) { g.set_focus(nid, true); g.edit().set(st->name, true); st->first = false; }
+            g.text(body.x, body.y + 3, "name", pal::dim);
+            g.text_field(nid, twk::Rect{ body.x + 70, body.y, body.w - 70, 13 }, st->name, "My Game");
+            g.text(body.x, body.y + 20, "location", pal::dim);
+            g.text_field(g.id("np-where"), twk::Rect{ body.x + 70, body.y + 17, body.w - 70, 13 }, st->where, "examples",
+                         0, "The parent folder: relative to the Phoenix checkout, or an absolute path");
+            const std::string slug = project_slug(st->name);
+            const std::string parent = st->where.empty() ? root : (st->where[0] == '/' ? st->where : join_path(root, st->where));
+            const std::string dir = join_path(parent, slug);
+            g.text(body.x, body.y + 38, "creates " + dir, pal::faint, twk::kSubText, body.w);
+            g.text(body.x, body.y + 48, "src/main.cpp, assets/ (hero sprite, tileset, level), phxproject.json", pal::faint, twk::kSubText, body.w);
+            if (!st->err.empty()) g.text(body.x, body.y + 62, st->err, pal::bad, twk::kSubText, body.w);
+            const int y = body.bottom() - 14;
+            twk::Btn cb; cb.on = true; cb.enabled = !slug.empty();
+            if (g.button(twk::Rect{ body.x, y, 80, 14 }, "Create", cb) || (!slug.empty() && g.focus() == 0 && g.key(PHX_KEY_ENTER))) {
+                const std::string problem = policy.project_dir_problem(dir);
+                if (!problem.empty()) { st->err = problem; return true; }
+                std::string err;
+                if (!create_project(dir, st->name, &err)) { st->err = err; return true; }
+                const std::string d = dir;
+                with_saved_docs("Switch project", [this, d] { open_project(d); });
+                toast("created project " + d, Toast::Good);
+                return false;
+            }
+            if (g.button(twk::Rect{ body.x + 86, y, 70, 14 }, "Cancel") || g.key(PHX_KEY_ESCAPE)) return false;
+            return true;
+        });
+    }
+    void open_project_dialog() {
+        struct St { std::string path; std::string err; bool first = true; std::vector<std::string> known; };
+        auto st = std::make_shared<St>();
+        st->known = recent_projects;
+        for (const std::string& d : discover_projects(root))
+            if (std::find(st->known.begin(), st->known.end(), d) == st->known.end()) st->known.push_back(d);
+        push_modal("Open project", 420, 190, [this, st](twk::Gui& g, twk::Rect body) {
+            const uint32_t pid = g.id("op-path");
+            if (st->first) { g.set_focus(pid, true); g.edit().set("", false); st->first = false; }
+            g.text(body.x, body.y + 3, "folder", pal::dim);
+            bool go = false;
+            if (g.focus() == pid && g.key(PHX_KEY_ENTER)) { st->path = g.edit().buf; go = true; }
+            g.text_field(pid, twk::Rect{ body.x + 44, body.y, body.w - 44, 13 }, st->path, "path/to/project (holds phxproject.json)");
+            int y = body.y + 18;
+            for (size_t i = 0; i < st->known.size() && y + 12 < body.bottom() - 18; ++i) {
+                const twk::Rect rr{ body.x, y, body.w, 12 };
+                if (g.hover(rr)) g.rect(rr, pal::hover, twk::kSubWidget);
+                g.icon(rr.x + 2, rr.y + 1, twk::kIconFileMap, pal::accent);
+                g.text(rr.x + 16, rr.y + 2, st->known[i], pal::text, twk::kSubText, rr.w - 18);
+                if (g.clicked(rr)) { st->path = st->known[i]; go = true; }
+                y += 12;
+            }
+            if (!st->err.empty()) g.text(body.x, body.bottom() - 28, st->err, pal::bad, twk::kSubText, body.w);
+            const int by = body.bottom() - 14;
+            twk::Btn ob; ob.on = true; ob.enabled = !st->path.empty();
+            go |= g.button(twk::Rect{ body.x, by, 70, 14 }, "Open", ob);
+            if (go) {
+                const std::string p = resolve_user_path(st->path);
+                if (!ProjectDoc::is_project_dir(p)) { st->err = "no phxproject.json in " + p; return true; }
+                const std::string problem = policy.project_dir_problem(p);
+                if (!problem.empty()) { st->err = problem; return true; }
+                with_saved_docs("Switch project", [this, p] { open_project(p); });
+                return false;
+            }
+            if (g.button(twk::Rect{ body.x + 76, by, 70, 14 }, "Cancel") || g.key(PHX_KEY_ESCAPE)) return false;
+            return true;
+        });
     }
 
     void on_stop(App&) override {
         if (audio_state == 1) phx_sdl_audio_stop();
         if (jobs) jobs->shutdown();
+        if (script.empty() && shot_path.empty() && (engine_dev || has_project)) ws.save_session();
+        for (int i = int(ws.docs.size()) - 1; i >= 0; --i) ws.docs[size_t(i)]->release(host);
     }
 
     void on_fixed_update(App&, scalar) override {
@@ -501,17 +842,94 @@ struct StudioGame final : Game {
     // ---------------------------------------------------------------------------------------
     void refresh_bundles() {
         const std::string cur = bundle_sel >= 0 && bundle_sel < int(bundle_paths.size()) ? bundle_paths[size_t(bundle_sel)] : "";
-        bundle_paths = find_bundles(root);
+        if (engine_dev) bundle_paths = find_bundles(root);
+        else if (has_project) bundle_paths = project.bundle_paths();   // absolute; the project's only
+        else bundle_paths.clear();
         bundle_sel = -1;
         for (size_t i = 0; i < bundle_paths.size(); ++i) {
             if (bundle_paths[i] == cur) bundle_sel = int(i);
             // pre-validate every bundle so the list can show a status dot for each
             if (!docs.count(bundle_paths[i])) {
                 std::unique_ptr<BundleDoc> d(new BundleDoc);
-                BundleDoc::load(root + "/" + bundle_paths[i], *d);
+                BundleDoc::load(bundle_abs(bundle_paths[i]), *d);
                 docs[bundle_paths[i]] = std::move(d);
             }
         }
+    }
+
+    // Drop every bundle and preview (zero-copy uploads first) and scan again.
+    void rescan_bundles() {
+        // Everything uploaded zero-copy from a cached BundleDoc must go before the cache does.
+        // (Tilemap slots have no unload API: those stay allocated but are never drawn again.)
+        for (auto& kv : map_slots) renderer->unload_texture(kv.second.tileset);
+        renderer->unload_texture(spr_tex);
+        spr_tex = kNoTexture;
+        renderer->unload_texture(tex_id);
+        tex_id = kNoTexture;
+        if (snd_playing) { queue.stop_all(); snd_playing = false; }
+        const int keep_asset = asset_sel;
+        src_hash_ = 0;
+        docs.clear(); map_slots.clear();
+        map = nullptr; map_asset = tex_asset = spr_asset = snd_asset = wave_asset = -1;
+        doc = nullptr;
+        if (has_project) {
+            project_reload_file();
+            names = NameBook{};
+            scan_names_in(project.dir, project.bundle_paths(), names);
+        }
+        refresh_bundles();
+        if (bundle_sel >= 0) {
+            select_bundle(bundle_sel);
+            if (keep_asset >= 0 && keep_asset < int(order.size())) select_asset(keep_asset);
+        }
+    }
+    // The project's bake launch (its command runs `game-assets`, not a tier-0 variant), or -1.
+    int bake_launch() const {
+        for (size_t i = 0; i < launches.size(); ++i)
+            if (launches[i].command.find("game-assets") != std::string::npos && launches[i].command.find("TIER=0") == std::string::npos &&
+                launch_missing[i].empty())
+                return int(i);
+        return -1;
+    }
+    int pending_bake_ = -1;
+
+    // The author file an asset was baked from, found by name in the workspace (the bake names
+    // assets by file stem): texture -> .png, sprite -> .sprdef / sprite .json, tilemap + its spawns
+    // -> .tmj, blob -> phxbin table .json, sound -> .wav. "" when there is none (or the name hash
+    // was never recovered).
+    std::string asset_source(const AssetEntry& a) {
+        // cached per selected asset (the preview header asks every frame; this touches the disk)
+        if (a.hash == src_hash_ && a.type == src_type_ && ticks - src_tick_ < 60) return src_cache_;
+        src_hash_ = a.hash; src_type_ = a.type; src_tick_ = ticks; src_cache_.clear();
+        const std::string* nm = names.find(a.hash);
+        if (!nm) return src_cache_;
+        FileKind want = FileKind::Image;
+        switch (a.type) {
+        case AssetType::Texture: case AssetType::Font: want = FileKind::Image; break;
+        case AssetType::Sprite:  want = FileKind::Sprite; break;
+        case AssetType::Tilemap: case AssetType::Spawns: want = FileKind::Map; break;
+        case AssetType::Blob:    want = FileKind::Table; break;
+        case AssetType::Sound:   want = FileKind::Sound; break;
+        }
+        for (const std::string& rel : asset_source_candidates(ws.all_files(), ws.tree.root, *nm, want))
+            if (policy.access(ws.tree.abs(rel)) == Access::Write) { src_cache_ = ws.tree.abs(rel); break; }
+        return src_cache_;
+    }
+    phx::NameHash src_hash_ = 0;
+    AssetType src_type_ = AssetType::Texture;
+    uint64_t src_tick_ = 0;
+    std::string src_cache_;
+    void edit_asset_source(const AssetEntry& a) {
+        const std::string src = asset_source(a);
+        const std::string* nm = names.find(a.hash);
+        if (src.empty()) {
+            toast(nm ? "no source file for '" + *nm + "' in the " + std::string(has_project ? "project" : "checkout")
+                     : std::string("this asset's name was not recovered, so its source can't be found"), Toast::Warn);
+            return;
+        }
+        if (a.type == AssetType::Sound) { toast("no sound editor yet - the source is " + src, Toast::Info); return; }
+        switch_tab(Tab::Editor);
+        ws.open(host, src);
     }
 
     void select_bundle(int i) {
@@ -647,14 +1065,34 @@ struct StudioGame final : Game {
             frames_rendered = 0;
             fps_tick = ticks;
         }
-        if (jobs) { jobs->drain(log); pull_console(); }
-        step_script(app);
 
-        if (in.just(Button::Select)) switch_tab(Tab((int(tab) + 1) % int(Tab::Count)));
+        // ---- input: the desktop event stream (or the --script driver) ----
+        twk::collect_desktop(tin);
+        step_script(app);
+        int fw = kW, fh = kH;
+        if (phx_desktop_fb_size(&fw, &fh) == 0 && fw > 0 && (fw != kW || fh != kH)) {
+            kW = fw; kH = fh; kBodyH = kH - kTopH - kBotH;
+        }
+        if (jobs) { jobs->drain(log); pull_console(); }
+        if (pending_bake_ >= 0 && jobs) {
+            const JobState st = jobs->result(pending_bake_).state;
+            if (st == JobState::Pass || st == JobState::Fail || st == JobState::Stopped) {
+                if (st == JobState::Pass) { rescan_bundles(); toast("baked - the Assets view shows the new bundle", Toast::Good); }
+                else toast("the bake failed - see the Run view", Toast::Bad);
+                pending_bake_ = -1;
+            }
+        }
+        if (ticks % 60 == 0) ws.poll_disk(host);
+        if (ticks % 600 == 0 && script.empty()) ws.save_session();
+
+        // legacy views read buttons (arrows/WASD/QE) only while nothing else owns the keyboard
+        static const InputState kNoInput{};
+        const bool kb_free = !tg.text_focus() && modals.empty() && !tg.any_popup();
+        const InputState& lin = kb_free && tab != Tab::Editor ? in : kNoInput;
 
         // decide the camera first: the tilemap preview (if any) sets it
         map_visible = false;
-        if (tab == Tab::Assets) {
+        if (tab == Tab::Assets && (engine_dev || has_project)) {
             const AssetEntry* a = current_asset();
             if (a && a->type == AssetType::Tilemap) {
                 prepare_map(r, current_index());
@@ -665,7 +1103,7 @@ struct StudioGame final : Game {
         map_rect.y += 30; map_rect.h -= 30 + 14;       // under the header + toolbar, above the layer strip
         Camera2D cam{};
         if (map_visible) {
-            pan_map(in);
+            pan_map(lin);
             cam.pos = Gui::v2(view_x - map_rect.x, view_y - map_rect.y);
             for (uint8_t l = 0; l < map->view.layers && l < 4; ++l) {
                 scalar fx = s_from_int(1), fy = s_from_int(1);
@@ -681,7 +1119,9 @@ struct StudioGame final : Game {
             for (uint8_t l = 0; l < map->view.layers; ++l)
                 if (!(layer_hidden & (1u << l))) r.draw_tilemap(map->id, l);
 
-        gui.begin(r, in, map_visible ? view_x - map_rect.x : 0, map_visible ? view_y - map_rect.y : 0);
+        tg.begin(&r, &in, tin, kW, kH, map_visible ? view_x - map_rect.x : 0, map_visible ? view_y - map_rect.y : 0);
+        gui.sync();
+        global_keys();
         if (map_visible) {                               // opaque cover around the map "window"
             const Rect h = map_rect;
             gui.rect(Rect{ 0, 0, kW, h.y }, pal::bg, kLyCover);
@@ -690,15 +1130,22 @@ struct StudioGame final : Game {
             gui.rect(Rect{ h.x + h.w, h.y, kW - h.x - h.w, h.h }, pal::bg, kLyCover);
         }
 
-        switch (tab) {
-        case Tab::Overview: draw_overview(); break;
-        case Tab::Assets:   draw_assets(r, in); break;
-        case Tab::Run:      draw_run(in); break;
+        if (!engine_dev && !has_project) draw_picker();
+        else switch (tab) {
+        case Tab::Overview: if (engine_dev) draw_overview(); break;
+        case Tab::Assets:   draw_assets(r, lin); break;
+        case Tab::Editor:   ws.draw(host, twk::Rect{ 0, kBodyY, kW, kBodyH }); break;
+        case Tab::Run:      draw_run(lin); break;
         default: break;
         }
+        gui.flush_hint();
         draw_top_bar();
         draw_status_bar(app);
-        gui.end();
+        draw_toasts();
+        draw_modal();
+        handle_quit(app);
+        update_title();
+        tg.end();
         r.end_frame();
         render_avg.push(uint32_t((plat->clock_ns() - t0) / 1000u));   // record + rasterize, in µs
         if (!pending_shot.empty()) { write_shot(pending_shot); pending_shot.clear(); }
@@ -708,8 +1155,156 @@ struct StudioGame final : Game {
         }
     }
 
-    // --script: one command list, stepped once per frame. A click holds the pointer down for
-    // one frame and releases it on the next; `wait N` idles N frames; `shot F` captures.
+    // ---------------------------------------------------------------------------------------
+    // shortcuts, modals, toasts, quit
+    // ---------------------------------------------------------------------------------------
+    void global_keys() {
+        DocView* d = tab == Tab::Editor ? ws.current() : nullptr;
+        using twk::kCtrl; using twk::kShift;
+        if (tg.key('s', kCtrl) && d) {
+            if (d->dirty()) ws.save(host, ws.active);
+            else toast("no changes to save");         // never rewrite an untouched file
+        }
+        if (tg.key('s', kCtrl | kShift)) ws.save_all(host);
+        const bool workspace = engine_dev || has_project;
+        const std::vector<Tab> vt = visible_tabs();
+        if (tg.key('p', kCtrl) && workspace) { switch_tab(Tab::Editor); ws.quick_open(host); }
+        if (tg.key('w', kCtrl) && d) ws.close(host, ws.active);
+        if (tg.key(PHX_KEY_TAB, kCtrl) && workspace) {
+            if (tab == Tab::Editor) ws.next_tab(1);
+            else for (size_t t = 0; t < vt.size(); ++t) if (vt[t] == tab) { switch_tab(vt[(t + 1) % vt.size()]); break; }
+        }
+        if (tg.key(PHX_KEY_TAB, kCtrl | kShift)) { if (tab == Tab::Editor) ws.next_tab(-1); }
+        if (tg.key('q', kCtrl)) request_quit();
+        if (tg.key('b', kCtrl) && workspace) { ws.side_open = !ws.side_open; switch_tab(Tab::Editor); }
+        for (size_t t = 0; t < vt.size(); ++t) if (tg.key(int32_t('1' + t), kCtrl)) switch_tab(vt[t]);
+        if (tg.key('=', kCtrl) || tg.key('+', kCtrl) || tg.key('=', kCtrl | kShift)) phx_desktop_set_scale(phx_desktop_scale() + 1);
+        if (tg.key('-', kCtrl)) phx_desktop_set_scale(std::max(1, phx_desktop_scale() - 1));
+        if (tg.key(PHX_KEY_F1)) show_shortcuts();
+        if (tg.key(PHX_KEY_F5)) { if (last_launch >= 0) run_launch(last_launch); }
+        if (d && modals.empty() && !tg.text_focus()) {
+            // Ctrl+Z / Ctrl+Y route to the document (a text editor handles its own when focused)
+            if (tg.key('z', kCtrl)) d->undo();
+            if (tg.key('y', kCtrl) || tg.key('z', kCtrl | kShift)) d->redo();
+        }
+        if (tin.drops.size() && workspace) { switch_tab(Tab::Editor); for (const std::string& p : tin.drops) ws.open(host, p); }
+    }
+
+    void push_modal(const std::string& title, int w, int h, std::function<bool(twk::Gui&, twk::Rect)> body) {
+        modals.push_back(Modal{ title, w, h, std::move(body) });
+    }
+    void draw_modal() {
+        if (modals.empty()) return;
+        const size_t top = modals.size() - 1;
+        Modal m = modals[top];                           // (the body may push another modal)
+        const twk::Rect body = tg.begin_modal(m.title, std::min(m.w, kW - 16), std::min(m.h, kH - 16));
+        const bool keep = m.body(tg, body);
+        tg.end_modal();
+        if (!keep) {
+            modals.erase(modals.begin() + long(top));
+            tg.blur();
+        }
+    }
+    void toast(const std::string& msg, Toast t = Toast::Info) {
+        toasts.push_back(ToastMsg{ msg, t, ticks + (t == Toast::Bad ? 360u : 210u) });
+        if (toasts.size() > 5) toasts.erase(toasts.begin());
+        std::printf("phxstudio: %s\n", msg.c_str());
+    }
+    void draw_toasts() {
+        toasts.erase(std::remove_if(toasts.begin(), toasts.end(), [&](const ToastMsg& t) { return t.until < ticks; }), toasts.end());
+        int y = kH - kBotH - 4;
+        for (size_t i = toasts.size(); i-- > 0; ) {
+            const ToastMsg& t = toasts[i];
+            const int w = std::min(kW - 20, twk::Gui::text_w(t.text) + 16);
+            const twk::Rect r{ kW - w - 8, y - 15, w, 15 };
+            const Rgba c = t.tone == Toast::Good ? pal::good : t.tone == Toast::Warn ? pal::warn : t.tone == Toast::Bad ? pal::bad : pal::info;
+            const int saved = tg.plane();
+            tg.set_plane(twk::kPlanePopup);
+            tg.rect(r, pal::bar, twk::kSubFill);
+            tg.frame_rect(r, c, twk::kSubWidget);
+            tg.rect(twk::Rect{ r.x, r.y, 3, r.h }, c, twk::kSubImage);
+            tg.text(r.x + 8, r.y + 4, t.text, pal::text, twk::kSubText, r.w - 10);
+            if (tg.clicked(r)) toasts[i].until = 0;
+            tg.set_plane(saved);
+            y -= 18;
+        }
+    }
+    void request_quit() {
+        if (!ws.any_dirty()) { quitting = true; return; }
+        if (!modals.empty()) return;
+        const int n = ws.dirty_count();
+        push_modal("Quit Phoenix Studio", 330, 80, [this, n](twk::Gui& g, twk::Rect body) {
+            g.text(body.x, body.y + 2, twk::fmt("%d file%s ha%s unsaved changes.", n, n == 1 ? "" : "s", n == 1 ? "s" : "ve"), pal::text);
+            g.text(body.x, body.y + 14, "Save them before quitting?", pal::dim);
+            const int y = body.bottom() - 14;
+            twk::Btn sb; sb.on = true;
+            if (g.button(twk::Rect{ body.x, y, 96, 14 }, "Save all & quit", sb) || g.key(PHX_KEY_ENTER)) {
+                if (ws.save_all(host)) quitting = true;
+                return false;
+            }
+            if (g.button(twk::Rect{ body.x + 100, y, 110, 14 }, "Quit without saving")) { quitting = true; return false; }
+            if (g.button(twk::Rect{ body.x + 214, y, 70, 14 }, "Cancel") || g.key(PHX_KEY_ESCAPE)) return false;
+            return true;
+        });
+    }
+    void handle_quit(App& app) {
+        if (tin.quit) request_quit();
+        if (quitting) app.request_quit();
+    }
+    void update_title() {
+        std::string t = engine_dev ? "Phoenix Studio (engine development)" : has_project ? project.name + " - Phoenix Studio" : "Phoenix Studio";
+        if (tab == Tab::Editor && (engine_dev || has_project))
+            if (DocView* d = ws.current()) t = base_name(d->path) + (d->dirty() ? " *" : "") + " - " + t;
+        if (t != title_shown) { phx_desktop_set_title(t.c_str()); title_shown = t; }
+    }
+
+    void show_shortcuts() {
+        push_modal("Keyboard shortcuts", 520, 300, [](twk::Gui& g, twk::Rect body) {
+            struct K { const char* k; const char* v; };
+            const K cols[2][14] = {
+                { { "STUDIO", "" }, { "Ctrl+1..4", "Overview / Assets / Editor / Run" }, { "Ctrl+P", "quick open a file" },
+                  { "Ctrl+S / Ctrl+Shift+S", "save / save all" }, { "Ctrl+W", "close the tab" }, { "Ctrl+Tab", "next tab / view" },
+                  { "Ctrl+Z / Ctrl+Y", "undo / redo" }, { "Ctrl+B", "toggle the Explorer" }, { "Ctrl+= / Ctrl+-", "bigger / smaller UI" },
+                  { "F5", "re-run the last launch" }, { "Ctrl+Q", "quit" }, { "", "" },
+                  { "CODE", "" }, { "Ctrl+F/H/G, Ctrl+/", "find, replace, go to line, comment" } },
+                { { "SPRITE", "" }, { "B E G I L R O M H", "pencil eraser fill pick line rect ellipse select pan" },
+                  { "X, [ ]", "swap colours, brush size" }, { ", .  P", "prev / next frame, play" },
+                  { "right button / Alt", "secondary colour / pick" }, { "", "" },
+                  { "MAP", "" }, { "B E G R I S T H", "brush eraser fill rect pick select spawn pan" },
+                  { "Tab / V", "next layer / cycle collision" }, { "Ctrl+C", "copy the selection as a stamp" },
+                  { "", "" }, { "TABLE", "" }, { "Enter/F2, typing", "edit a cell (Tab moves right)" },
+                  { "+ / -, Ctrl+D", "step a number, duplicate record" } },
+            };
+            for (int c = 0; c < 2; ++c) {
+                int y = body.y;
+                const int x = body.x + c * (body.w / 2);
+                for (const K& k : cols[c]) {
+                    if (!k.v[0] && k.k[0]) g.text(x, y, k.k, pal::accent);
+                    else if (k.k[0]) { g.text(x, y, k.k, pal::text, twk::kSubText, 118); g.text(x + 122, y, k.v, pal::dim, twk::kSubText, body.w / 2 - 126); }
+                    y += 11;
+                }
+            }
+            g.text(body.x, body.bottom() - 9, "Ctrl+wheel zooms, middle-drag pans, right-click for context menus.", pal::faint);
+            return !(g.key(PHX_KEY_ESCAPE) || g.key(PHX_KEY_F1) || g.key(PHX_KEY_ENTER) || (g.in->pressed & twk::kMouseL && !body.contains(g.mx(), g.my())));
+        });
+    }
+    void show_about() {
+        push_modal("About Phoenix Studio", 330, 110, [this](twk::Gui& g, twk::Rect body) {
+            g.image(twk::Rect{ body.x, body.y, 24, 24 }, flame_tex, 0, 0, 12, 12);
+            g.text(body.x + 32, body.y + 2, "Phoenix Studio", pal::accent, twk::kSubText, body.w, 2);
+            g.text(body.x + 32, body.y + 16, "engine v" PHX_VERSION_STRING, pal::dim);
+            g.text(body.x, body.y + 32, "One editor for one engine that runs on GBA, PSP, Windows", pal::text, twk::kSubText, body.w);
+            g.text(body.x, body.y + 42, "and Linux - drawn by the engine's own software renderer.", pal::text, twk::kSubText, body.w);
+            g.text(body.x, body.y + 58, twk::fmt("repo: %s", root.c_str()), pal::faint, twk::kSubText, body.w);
+            return !(g.key(PHX_KEY_ESCAPE) || g.key(PHX_KEY_ENTER) || (g.in->pressed & twk::kMouseL && !body.contains(g.mx(), g.my())));
+        });
+    }
+
+    // --script: one command list, stepped once per frame. The pointer commands move a scripted
+    // pointer (the real mouse is ignored while a script runs); key/type inject keyboard events.
+    //   click X Y | rclick X Y | dclick X Y | move X Y | drag X0 Y0 X1 Y1 [FRAMES]
+    //   wheel X Y N | key [ctrl+][shift+][alt+]NAME | type TEXT | open PATH | wait N
+    //   shot FILE.ppm | quit
     static std::vector<ScriptCmd> parse_script(const std::string& text) {
         std::vector<ScriptCmd> out;
         size_t p = 0;
@@ -718,38 +1313,104 @@ struct StudioGame final : Game {
             if (e == std::string::npos) e = text.size();
             const std::string c = trim(text.substr(p, e - p));
             p = e + 1;
-            if (c.empty()) continue;
+            if (c.empty() || c[0] == '#') continue;
             ScriptCmd sc;
-            char op[16] = {0}, arg[256] = {0};
-            if (std::sscanf(c.c_str(), "%15s %255s", op, arg) >= 1) {
-                sc.op = op; sc.arg = arg;
-                std::sscanf(c.c_str(), "%*s %d %d", &sc.a, &sc.b);
-                out.push_back(sc);
-            }
+            const size_t sp = c.find(' ');
+            sc.op = c.substr(0, sp);
+            sc.rest = sp == std::string::npos ? "" : c.substr(sp + 1);
+            char arg[256] = { 0 };
+            if (std::sscanf(sc.rest.c_str(), "%255s", arg) == 1) sc.arg = arg;
+            std::sscanf(sc.rest.c_str(), "%d %d %d %d %d", &sc.a, &sc.b, &sc.c, &sc.d, &sc.e);
+            out.push_back(sc);
         }
         return out;
+    }
+    static bool parse_key(const std::string& spec, int32_t& key, uint16_t& mods) {
+        std::string s = lower(spec);
+        mods = 0;
+        for (;;) {
+            if (s.compare(0, 5, "ctrl+") == 0) { mods |= twk::kCtrl; s = s.substr(5); }
+            else if (s.compare(0, 6, "shift+") == 0) { mods |= twk::kShift; s = s.substr(6); }
+            else if (s.compare(0, 4, "alt+") == 0) { mods |= twk::kAlt; s = s.substr(4); }
+            else break;
+        }
+        static const struct { const char* n; int32_t k; } names[] = {
+            { "enter", PHX_KEY_ENTER }, { "return", PHX_KEY_ENTER }, { "tab", PHX_KEY_TAB }, { "esc", PHX_KEY_ESCAPE },
+            { "escape", PHX_KEY_ESCAPE }, { "backspace", PHX_KEY_BACKSPACE }, { "delete", PHX_KEY_DELETE },
+            { "left", PHX_KEY_LEFT }, { "right", PHX_KEY_RIGHT }, { "up", PHX_KEY_UP }, { "down", PHX_KEY_DOWN },
+            { "home", PHX_KEY_HOME }, { "end", PHX_KEY_END }, { "pgup", PHX_KEY_PAGE_UP }, { "pgdn", PHX_KEY_PAGE_DOWN },
+            { "space", ' ' }, { "f1", PHX_KEY_F1 }, { "f2", PHX_KEY_F2 }, { "f3", PHX_KEY_F3 }, { "f5", PHX_KEY_F5 } };
+        for (const auto& n : names) if (s == n.n) { key = n.k; return true; }
+        if (s.size() == 1) { key = int32_t(static_cast<unsigned char>(s[0])); return true; }
+        return false;
     }
 
     void step_script(App& app) {
         if (script.empty()) return;
-        gui.scripted = true;
-        if (script_release) { gui.script_down = false; script_release = false; return; }
+        // the scripted pointer replaces the real one
+        tin.mx = sc_x; tin.my = sc_y; tin.held = sc_held;
+        tin.pressed = tin.released = 0; tin.clicks = 0; tin.wheel_x = tin.wheel_y = 0;
+        tin.keys.clear(); tin.text.clear();
+        if (!sc_frames.empty()) {
+            auto f = sc_frames.front();
+            sc_frames.erase(sc_frames.begin());
+            f(tin);
+            sc_x = tin.mx; sc_y = tin.my; sc_held = tin.held;
+            return;
+        }
         if (script_wait > 0) { --script_wait; return; }
         while (script_pc < script.size()) {
             const ScriptCmd& c = script[script_pc++];
-            if (c.op == "move")  { gui.script_x = c.a; gui.script_y = c.b; continue; }
-            if (c.op == "click") { gui.script_x = c.a; gui.script_y = c.b; gui.script_down = true; script_release = true; return; }
+            auto press = [this](int x, int y, uint32_t b, int clicks) {
+                sc_frames.push_back([=](twk::Input& in) { in.mx = x; in.my = y; in.pressed |= b; in.held |= b; in.clicks = clicks; });
+                sc_frames.push_back([=](twk::Input& in) { in.mx = x; in.my = y; in.released |= b; in.held &= ~b; });
+            };
+            if (c.op == "move")  { sc_x = c.a; sc_y = c.b; tin.mx = sc_x; tin.my = sc_y; continue; }
+            if (c.op == "click") { press(c.a, c.b, twk::kMouseL, 1); break; }
+            if (c.op == "rclick") { press(c.a, c.b, twk::kMouseR, 1); break; }
+            if (c.op == "dclick") {
+                press(c.a, c.b, twk::kMouseL, 1);
+                sc_frames.push_back([=](twk::Input& in) { in.mx = c.a; in.my = c.b; in.pressed |= twk::kMouseL; in.held |= twk::kMouseL; in.clicks = 2; });
+                sc_frames.push_back([=](twk::Input& in) { in.mx = c.a; in.my = c.b; in.released |= twk::kMouseL; in.held &= ~twk::kMouseL; });
+                break;
+            }
+            if (c.op == "drag") {
+                const int n = c.e > 0 ? c.e : 8;
+                const int x0 = c.a, y0 = c.b, x1 = c.c, y1 = c.d;
+                sc_frames.push_back([=](twk::Input& in) { in.mx = x0; in.my = y0; in.pressed |= twk::kMouseL; in.held |= twk::kMouseL; in.clicks = 1; });
+                for (int k = 1; k <= n; ++k)
+                    sc_frames.push_back([=](twk::Input& in) { in.mx = x0 + (x1 - x0) * k / n; in.my = y0 + (y1 - y0) * k / n; in.held |= twk::kMouseL; });
+                sc_frames.push_back([=](twk::Input& in) { in.mx = x1; in.my = y1; in.released |= twk::kMouseL; in.held &= ~twk::kMouseL; });
+                break;
+            }
+            if (c.op == "wheel") { const int n = c.c; sc_frames.push_back([=](twk::Input& in) { in.mx = c.a; in.my = c.b; in.wheel_y = n; }); break; }
+            if (c.op == "key") {
+                int32_t k = 0; uint16_t m = 0;
+                if (!parse_key(c.arg, k, m)) { std::fprintf(stderr, "phxstudio: --script: bad key '%s'\n", c.arg.c_str()); continue; }
+                sc_frames.push_back([=](twk::Input& in) { in.key(k, m); in.mods = m; });
+                break;
+            }
+            if (c.op == "type") { const std::string t = c.rest; sc_frames.push_back([=](twk::Input& in) { in.text += t; }); break; }
+            if (c.op == "open") { switch_tab(Tab::Editor); ws.open(host, resolve_user_path(c.arg)); continue; }
+            if (c.op == "project") { open_project(resolve_user_path(c.arg)); continue; }
+            if (c.op == "tab") { for (int t = 0; t < int(Tab::Count); ++t) if (lower(kTabNames[t]) == lower(c.arg)) switch_tab(Tab(t)); continue; }
             if (c.op == "wait")  { script_wait = std::max(0, c.a - 1); return; }
             if (c.op == "shot")  { pending_shot = c.arg; return; }
             if (c.op == "quit")  { app.request_quit(); return; }
             std::fprintf(stderr, "phxstudio: --script: unknown command '%s'\n", c.op.c_str());
+        }
+        if (!sc_frames.empty()) {
+            auto f = sc_frames.front();
+            sc_frames.erase(sc_frames.begin());
+            f(tin);
+            sc_x = tin.mx; sc_y = tin.my; sc_held = tin.held;
         }
     }
 
     // --shot: read the PRESENTED frame back through the SDL backend and write a binary PPM
     // (docs, bug reports, and a scriptable visual check of every view).
     static void write_shot(const std::string& path) {
-        std::vector<uint32_t> px(size_t(kW) * kH);
+        std::vector<uint32_t> px(size_t(kW) * size_t(kH));
         if (phx_sdl_readback(px.data(), kW, kH) != 0) { std::fprintf(stderr, "phxstudio: readback failed\n"); return; }
         FILE* f = std::fopen(path.c_str(), "wb");
         if (!f) { std::fprintf(stderr, "phxstudio: cannot write %s\n", path.c_str()); return; }
@@ -760,6 +1421,7 @@ struct StudioGame final : Game {
     }
 
     void switch_tab(Tab t) {
+        if (!tab_visible(t)) return;                     // e.g. Overview outside --engine-dev
         tab = t;
         if (t != Tab::Assets && snd_playing) { queue.stop_all(); snd_playing = false; }
     }
@@ -775,53 +1437,183 @@ struct StudioGame final : Game {
     // chrome
     // ---------------------------------------------------------------------------------------
     void draw_top_bar() {
-        gui.rect(Rect{ 0, 0, kW, kTopH }, pal::bar, kLyBar);
-        gui.rect(Rect{ 0, kTopH - 1, kW, 1 }, pal::line, kLyBar);
-        gui.image(Rect{ 5, 3, 12, 12 }, flame_tex, 0, 0, 12, 12, rgba(255, 255, 255), kLyBarText);
-        gui.text(21, 5, "PHOENIX STUDIO", pal::accent, kLyBarText);
-        gui.text(21 + Gui::text_w("PHOENIX STUDIO ") , 5, "v" PHX_VERSION_STRING, pal::faint, kLyBarText);
-        int x = 170;
-        for (int t = 0; t < int(Tab::Count); ++t) {
-            const Rect tr{ x, 2, Gui::text_w(kTabNames[t]) + 16, kTopH - 3 };
-            const bool on = int(tab) == t;
-            const bool h = gui.hover(tr);
-            gui.rect(tr, on ? pal::panel2 : h ? pal::panel : pal::bar, kLyBar);
-            if (on) gui.rect(Rect{ tr.x, tr.y + tr.h - 2, tr.w, 2 }, pal::accent, kLyBarText);
-            gui.text(tr.x + 8, 6, kTabNames[t], on ? pal::text : pal::dim, kLyBarText);
-            if (h) gui.hint = "Switch view (Tab cycles)";
-            if (gui.clicked(tr)) switch_tab(Tab(t));
-            x += tr.w + 2;
+        using twk::MenuItem;
+        tg.rect(twk::Rect{ 0, 0, kW, kTopH }, pal::bar, twk::kSubFill);
+        tg.rect(twk::Rect{ 0, kTopH - 1, kW, 1 }, pal::line, twk::kSubWidget);
+        tg.image(twk::Rect{ 4, 3, 12, 12 }, flame_tex, 0, 0, 12, 12);
+        tg.tip(twk::Rect{ 2, 0, 16, kTopH }, "Phoenix Studio v" PHX_VERSION_STRING);
+        // ---- menus ----
+        int x = 20;
+        auto menu_at = [&](const char* label, uint32_t id) {
+            const twk::Rect r{ x, 1, twk::Gui::text_w(label) + 12, kTopH - 2 };
+            tg.menu_button(id, r, label);
+            x += r.w;
+            return id;
+        };
+        DocView* d = ws.current();
+        const bool ed = tab == Tab::Editor && d && (engine_dev || has_project);
+        const std::string dir = ws.selected_dir();
+        const uint32_t m_file = menu_at("File", tg.id("m-file"));
+        const uint32_t m_edit = menu_at("Edit", tg.id("m-edit"));
+        const uint32_t m_view = menu_at("View", tg.id("m-view"));
+        const uint32_t m_build = menu_at("Build", tg.id("m-build"));
+        const uint32_t m_help = menu_at("Help", tg.id("m-help"));
+        {
+            // File menu: (item, action). Asset creation needs an open workspace; projects can be
+            // created / opened / closed from anywhere.
+            const bool wsp = engine_dev || has_project;
+            std::vector<MenuItem> items;
+            std::vector<std::function<void()>> acts;
+            auto add = [&](MenuItem m, std::function<void()> f) { items.push_back(std::move(m)); acts.push_back(std::move(f)); };
+            auto sep = [&] { items.push_back(MenuItem::sep()); acts.push_back(nullptr); };
+            add(MenuItem{ "New project...", "", true, false, false, twk::kIconPlus }, [this] { new_project_dialog(); });
+            add(MenuItem{ "Open project...", "", true, false, false, twk::kIconFolderOpen }, [this] { open_project_dialog(); });
+            if (has_project)
+                add(MenuItem{ "Close project", "", true, false, false, twk::kIconClose },
+                    [this] { with_saved_docs("Close project", [this] { close_project(); }); });
+            sep();
+            add(MenuItem{ "New sprite...", "", wsp, false, false, twk::kIconSprite }, [this, dir] { switch_tab(Tab::Editor); ws.new_sprite(host, dir); });
+            add(MenuItem{ "New tilemap...", "", wsp, false, false, twk::kIconFileMap }, [this, dir] { switch_tab(Tab::Editor); ws.new_map(host, dir); });
+            add(MenuItem{ "New data table...", "", wsp, false, false, twk::kIconFileTable }, [this, dir] { switch_tab(Tab::Editor); ws.new_table(host, dir); });
+            add(MenuItem{ "New image / tileset...", "", wsp, false, false, twk::kIconFileImage }, [this, dir] { switch_tab(Tab::Editor); ws.new_image(host, dir); });
+            add(MenuItem{ "New file...", "", wsp, false, false, twk::kIconFileCode }, [this, dir] { switch_tab(Tab::Editor); ws.new_code(host, dir); });
+            sep();
+            add(MenuItem{ "Quick open...", "Ctrl+P", wsp, false, false, twk::kIconSearch }, [this] { switch_tab(Tab::Editor); ws.quick_open(host); });
+            sep();
+            add(MenuItem{ "Save", "Ctrl+S", ed && d->dirty(), false, false, twk::kIconSave }, [this] { ws.save(host, ws.active); });
+            add(MenuItem{ "Save all", "Ctrl+Shift+S", ws.any_dirty() }, [this] { ws.save_all(host); });
+            add(MenuItem{ "Revert to disk", "", ed }, [this, d] { std::string err; if (d && !d->reload(host, &err)) toast("revert failed: " + err, Toast::Bad); });
+            add(MenuItem{ "Close tab", "Ctrl+W", ed, false, false, twk::kIconClose }, [this] { ws.close(host, ws.active); });
+            sep();
+            add(MenuItem{ "Quit", "Ctrl+Q" }, [this] { request_quit(); });
+            const int hit = tg.menu(m_file, items, 180);
+            if (hit >= 0 && size_t(hit) < acts.size() && acts[size_t(hit)]) acts[size_t(hit)]();
         }
-        // job indicator (right)
+        {
+            std::vector<MenuItem> items = { MenuItem{ "Undo", "Ctrl+Z", ed, false, false, twk::kIconUndo },
+                                            MenuItem{ "Redo", "Ctrl+Y", ed, false, false, twk::kIconRedo } };
+            std::vector<DocView::Action> acts = ed ? d->actions() : std::vector<DocView::Action>{};
+            if (!acts.empty()) items.push_back(MenuItem::sep());
+            for (const DocView::Action& a : acts) items.push_back(MenuItem{ a.label, a.shortcut, a.enabled });
+            const int hit = tg.menu(m_edit, items, 180);
+            if (hit == 0 && d) d->undo();
+            if (hit == 1 && d) d->redo();
+            if (hit >= 3 && size_t(hit - 3) < acts.size()) acts[size_t(hit - 3)].run();
+        }
+        const std::vector<Tab> vt = visible_tabs();
+        {
+            std::vector<MenuItem> items;
+            std::vector<std::function<void()>> acts;
+            for (size_t t = 0; t < vt.size(); ++t) {
+                const Tab tv = vt[t];
+                items.push_back(MenuItem{ kTabNames[int(tv)], twk::fmt("Ctrl+%d", int(t) + 1), true, tab == tv });
+                acts.push_back([this, tv] { switch_tab(tv); });
+            }
+            if (!vt.empty()) { items.push_back(MenuItem::sep()); acts.push_back(nullptr); }
+            items.push_back(MenuItem{ "Explorer", "Ctrl+B", !vt.empty(), ws.side_open });
+            acts.push_back([this] { ws.side_open = !ws.side_open; switch_tab(Tab::Editor); });
+            items.push_back(MenuItem{ "Bigger UI", "Ctrl+=", phx_desktop_scale() < 6, false, false, twk::kIconZoomIn });
+            acts.push_back([] { phx_desktop_set_scale(phx_desktop_scale() + 1); });
+            items.push_back(MenuItem{ "Smaller UI", "Ctrl+-", phx_desktop_scale() > 1, false, false, twk::kIconZoomOut });
+            acts.push_back([] { phx_desktop_set_scale(std::max(1, phx_desktop_scale() - 1)); });
+            const int hit = tg.menu(m_view, items, 150);
+            if (hit >= 0 && size_t(hit) < acts.size() && acts[size_t(hit)]) acts[size_t(hit)]();
+        }
+        // ---- view tabs (the project's name first, in project mode) ----
+        x += 10;
+        if (has_project) {
+            const std::string pn = project.name;
+            const twk::Rect pr{ x, 2, std::min(120, twk::Gui::text_w(pn) + 16), kTopH - 3 };
+            tg.icon(pr.x, 5, twk::kIconFileMap, pal::accent);
+            tg.text(pr.x + 13, 6, pn, pal::accent, twk::kSubText, pr.w - 13);
+            tg.tip(pr, "Project: " + project.dir + " - only this folder is editable");
+            x += pr.w + 6;
+        }
+        for (Tab tv : vt) {
+            const int t = int(tv);
+            const twk::Rect r{ x, 2, twk::Gui::text_w(kTabNames[t]) + 16, kTopH - 3 };
+            const bool on = int(tab) == t;
+            const bool h = tg.hover(r);
+            tg.rect(r, on ? pal::panel2 : h ? pal::panel : pal::bar, twk::kSubWidget);
+            if (on) tg.rect(twk::Rect{ r.x, r.bottom() - 2, r.w, 2 }, pal::accent, twk::kSubImage);
+            tg.text(r.x + 8, 6, kTabNames[t], on ? pal::text : pal::dim);
+            int pos = 0;
+            for (size_t k = 0; k < vt.size(); ++k) if (vt[k] == tv) pos = int(k);
+            tg.tip(r, twk::fmt("%s (Ctrl+%d)", kTabNames[t], pos + 1));
+            if (tg.clicked(r)) switch_tab(Tab(t));
+            x += r.w + 2;
+        }
+        // ---- job indicator (right) ----
         const int rid = jobs ? jobs->running_id() : -1;
         std::string s;
         Rgba c = pal::faint;
         if (rid >= 0) {
             static const char kSpin[4] = { '|', '/', '-', '\\' };
-            s = fmt("%c %s  %.0fs", kSpin[(ticks / 8) % 4], jobs->running_label().c_str(), jobs->running_seconds());
+            s = twk::fmt("%c %s  %.0fs", kSpin[(ticks / 8) % 4], jobs->running_label().c_str(), jobs->running_seconds());
             const size_t q = jobs->queued();
-            if (q) s += fmt("  +%zu queued", q);
+            if (q) s += twk::fmt("  +%zu queued", q);
             c = pal::accent;
-        } else {
-            s = "no job running";
+        } else if (!diags.empty()) {
+            int e = 0, w = 0;
+            for (const Diag& dg : diags) { e += dg.severity == 2; w += dg.severity == 1; }
+            s = twk::fmt("%d error%s, %d warning%s", e, e == 1 ? "" : "s", w, w == 1 ? "" : "s");
+            c = e ? pal::bad : pal::warn;
         }
-        const Rect jr{ kW - 6 - Gui::text_w(s), 2, Gui::text_w(s), kTopH - 3 };
-        gui.text(jr.x, 6, s, c, kLyBarText);
-        if (gui.hover(jr)) gui.hint = "Jobs run one at a time; see the Run view for output";
-        if (gui.clicked(jr)) switch_tab(Tab::Run);
+        const int avail = kW - x - 10;
+        if (!s.empty() && avail > 40) {
+            const int w = std::min(avail, twk::Gui::text_w(s));
+            const twk::Rect jr{ kW - 6 - w, 2, w, kTopH - 3 };
+            tg.text(jr.x, 6, s, c, twk::kSubText, w);
+            tg.tip(jr, rid >= 0 ? "Jobs run one at a time; the Run view has the output" : "From the last build - click to see them in the Run view");
+            if (tg.clicked(jr)) switch_tab(Tab::Run);
+        }
+        // Build menu (games + gates from the launch catalog)
+        {
+            std::vector<MenuItem> items;
+            std::vector<int> ids;
+            for (size_t i = 0; i < launches.size(); ++i) {
+                const Launch& l = launches[i];
+                if (l.group == Group::Suite) continue;
+                items.push_back(MenuItem{ l.label, "", launch_missing[i].empty(), false, false,
+                                          l.group == Group::Play ? twk::kIconPlay : twk::kIconBuild });
+                ids.push_back(int(i));
+                if (items.size() >= 18) break;
+            }
+            items.push_back(MenuItem::sep());
+            items.push_back(MenuItem{ "Re-run the last launch", "F5", last_launch >= 0, false, false, twk::kIconRefresh });
+            items.push_back(MenuItem{ "Stop the running job", "", rid >= 0 && jobs && jobs->can_stop(), false, false, twk::kIconStop });
+            const int hit = tg.menu(m_build, items, 200);
+            if (hit >= 0 && hit < int(ids.size())) { run_launch(ids[size_t(hit)]); switch_tab(Tab::Run); }
+            else if (hit == int(ids.size()) + 1 && last_launch >= 0) { run_launch(last_launch); switch_tab(Tab::Run); }
+            else if (hit == int(ids.size()) + 2 && jobs) { jobs->cancel_queue(); jobs->stop_current(); }
+        }
+        switch (tg.menu(m_help, { MenuItem{ "Keyboard shortcuts", "F1", true, false, false, twk::kIconGear },
+                                  MenuItem{ "Studio guide (instructions.md)", "", engine_dev || has_project, false, false, twk::kIconFile },
+                                  MenuItem{ "About", "" } }, 170)) {
+        case 0: show_shortcuts(); break;
+        case 1: switch_tab(Tab::Editor); ws.open(host, join_path(root, "tools/phxstudio/instructions.md")); break;
+        case 2: show_about(); break;
+        default: break;
+        }
     }
 
     void draw_status_bar(App&) {
         const int y = kH - kBotH;
-        gui.rect(Rect{ 0, y, kW, kBotH }, pal::bar, kLyBar);
-        gui.rect(Rect{ 0, y, kW, 1 }, pal::line, kLyBar);
-        const std::string perf = fmt("%u fps  render %.1f ms  %u sprites  %u tiles", fps,
-                                     double(render_avg.avg_us) / 1000.0,
-                                     unsigned(last_stats.sprites_submitted), unsigned(last_stats.tiles_drawn));
-        const int pw = Gui::text_w(perf);
-        gui.text(kW - 6 - pw, y + 3, perf, pal::faint, kLyBarText);
-        gui.text(6, y + 3, gui.hint.empty() ? std::string("Tab: next view   Esc: quit") : gui.hint,
-                 gui.hint.empty() ? pal::faint : pal::text, kLyBarText, kW - pw - 20);
+        tg.rect(twk::Rect{ 0, y, kW, kBotH }, pal::bar, twk::kSubFill);
+        tg.rect(twk::Rect{ 0, y, kW, 1 }, pal::line, twk::kSubWidget);
+        std::string right = twk::fmt("%u fps  %.1f ms", fps, double(render_avg.avg_us) / 1000.0);
+        if (tab != Tab::Editor) right += twk::fmt("  %u sprites", unsigned(last_stats.sprites_submitted));
+        std::string left = tg.hint;
+        Rgba lc = pal::text;
+        if (left.empty()) {
+            DocView* d = tab == Tab::Editor ? ws.current() : nullptr;
+            if (d) { left = d->status(); lc = pal::dim; }
+            else if (!engine_dev && !has_project) { left = "Open or create a project to start   F1: shortcuts"; lc = pal::faint; }
+            else { left = twk::fmt("Ctrl+P: open a file   F1: shortcuts   Ctrl+1..%zu: views", visible_tabs().size()); lc = pal::faint; }
+        }
+        const int pw = twk::Gui::text_w(right);
+        tg.text(kW - 6 - pw, y + 3, right, pal::faint);
+        tg.text(6, y + 3, left, lc, twk::kSubText, kW - pw - 20);
     }
 
     void section(int x, int y, int w, const std::string& title, Rgba c = pal::dim) {
@@ -1070,18 +1862,17 @@ struct StudioGame final : Game {
         gui.rect(area, pal::panel, kLyPanel);
         gui.text(area.x + 5, area.y + 4, fmt("BUNDLES (%zu)", bundle_paths.size()), pal::dim);
         const Rect rescan{ area.x + area.w - 40, area.y + 2, 36, 11 };
-        if (gui.button(rescan, "scan", false, true, "Re-scan the tree for .phxp bundles (after a bake)")) {
-            // Everything uploaded zero-copy from a cached BundleDoc must go before the cache does.
-            // (Tilemap slots have no unload API: those stay allocated but are never drawn again.)
-            for (auto& kv : map_slots) renderer->unload_texture(kv.second.tileset);
-            renderer->unload_texture(spr_tex);
-            spr_tex = kNoTexture;
-            if (snd_playing) { queue.stop_all(); snd_playing = false; }
-            docs.clear(); map_slots.clear();
-            map = nullptr; map_asset = tex_asset = spr_asset = snd_asset = wave_asset = -1;
-            doc = nullptr;
-            refresh_bundles();
-            if (bundle_sel >= 0) select_bundle(bundle_sel);
+        if (gui.button(rescan, "scan", false, true, "Re-scan the bundles (after a bake)")) rescan_bundles();
+        if (has_project) {
+            // Bake: the project's own bake launch, then a rescan when it finishes (edit an asset,
+            // bake, see the result here).
+            const int bl = bake_launch();
+            const Rect bake{ rescan.x - 33, rescan.y, 30, rescan.h };
+            const bool running = pending_bake_ >= 0;
+            if (gui.button(bake, running ? "..." : "bake", running, bl >= 0 && !running,
+                           bl >= 0 ? "Bake the project's assets (" + launches[size_t(bl)].label + ") and reload the bundle"
+                                   : "This project has no bake launch (a launch whose command runs game-assets)"))
+                if (bl >= 0) { run_launch(bl); pending_bake_ = bl; }
         }
         const int row_h = 11, top = area.y + 17;
         const int visible = (area.h - 20) / row_h;
@@ -1096,7 +1887,7 @@ struct StudioGame final : Game {
             else if (gui.hover(rr)) gui.rect(rr, pal::hover, kLyWidget);
             const Rgba dot = !d->ok ? pal::bad : d->crc < 0 ? pal::warn : pal::good;
             gui.rect(Rect{ rr.x + 3, rr.y + 4, 4, 4 }, dot, kLyOver);
-            gui.text(rr.x + 11, rr.y + 2, bundle_paths[size_t(bi)], sel ? pal::text : pal::dim, kLyText, rr.w - 13);
+            gui.text(rr.x + 11, rr.y + 2, bundle_label(bundle_paths[size_t(bi)]), sel ? pal::text : pal::dim, kLyText, rr.w - 13);
             if (gui.hover(rr))
                 gui.hint = d->ok ? fmt("%s: %zu assets, %s, %s", bundle_paths[size_t(bi)].c_str(), d->assets.size(),
                                        human_bytes(d->file_size).c_str(), tier_name(d->hdr.target))
@@ -1165,16 +1956,30 @@ struct StudioGame final : Game {
             if (gui.hover(rr))
                 gui.hint = fmt("%s '%s': %s, %s%s", type_name(a.type), names.label(a.hash).c_str(), describe(a).c_str(),
                                human_bytes(a.usize).c_str(), (a.flags & kTocLZ) ? fmt(" (LZ -> %s)", human_bytes(a.size).c_str()).c_str() : "");
-            if (gui.clicked(rr)) select_asset(row);
+            if (tg.double_clicked(Gui::tr(rr))) { select_asset(row); edit_asset_source(a); }
+            else if (gui.clicked(rr)) select_asset(row);
         }
         gui.scrollbar(2, Rect{ area.x + area.w - 7, y, 5, visible * row_h }, n, visible, asset_scroll);
     }
 
     // Header + toolbar row of the preview; returns the body rect below it.
     Rect preview_header(const Rect& p, const AssetEntry& a) {
-        gui.text(p.x + 6, p.y + 5, names.label(a.hash), pal::text, kLyText, p.w - 140, 1);
+        const std::string label = names.label(a.hash);
+        const int lw = std::min(Gui::text_w(label), p.w - 240);
+        gui.text(p.x + 6, p.y + 5, label, pal::text, kLyText, p.w - 240, 1);
+        if (a.type != AssetType::Sound) {
+            const std::string src = asset_source(a);
+            twk::Btn eb;
+            eb.icon = twk::kIconPencil;
+            eb.enabled = !src.empty();
+            const std::string help = src.empty() ? "No source file with this asset's name in the " + std::string(has_project ? "project" : "checkout")
+                                                 : "Open " + (path_within(src, ws_root) ? src.substr(ws_root.size() + 1) : src) +
+                                                   " in its editor (double-click the asset too); bake to see the change here";
+            eb.help = help.c_str();
+            if (tg.button(twk::Rect{ p.x + 12 + lw, p.y + 2, Gui::text_w("edit source") + 24, 13 }, "edit source", eb)) edit_asset_source(a);
+        }
         const std::string d = describe(a);
-        gui.text(p.x + p.w - 6 - std::min(Gui::text_w(d), 180), p.y + 5, d, type_colour(a.type), kLyText, 180);
+        gui.text(p.x + p.w - 6 - std::min(Gui::text_w(d), 150), p.y + 5, d, type_colour(a.type), kLyText, 150);
         return Rect{ p.x + 4, p.y + 30, p.w - 8, p.h - 34 };
     }
 
@@ -1611,6 +2416,7 @@ struct StudioGame final : Game {
 
     void run_launch(int i) {
         if (!launch_missing[size_t(i)].empty() || !jobs) return;
+        diags.clear();                                   // errors now come from this build
         jobs->enqueue(i, launches[size_t(i)].label, launches[size_t(i)].command);
         last_launch = i;
         con_follow = true;
@@ -1714,10 +2520,46 @@ struct StudioGame final : Game {
         }
         for (int i = 0; i < visible && con_scroll + i < n; ++i) {
             const ConLine& l = con[size_t(con_scroll + i)];
+            const Rect lr{ con_r.x + 2, top + i * row_h, con_r.w - 12, row_h };
+            if (l.diag >= 0 && l.diag < int(diags.size())) {
+                // compiler diagnostics are links: click to open the file at the line
+                const Diag& dg = diags[size_t(l.diag)];
+                const Access acc = policy.access(dg.file);
+                if (gui.hover(lr)) {
+                    if (acc != Access::None) {
+                        gui.rect(lr, pal::hover, kLyWidget);
+                        gui.hint = twk::fmt("open %s at line %d%s", dg.file.c_str(), dg.line, acc == Access::Read ? " (read-only)" : "");
+                        tg.cursor = PHX_CURSOR_HAND;
+                    } else {
+                        gui.hint = "this message is about engine code, which is not part of the project";
+                    }
+                }
+                if (acc != Access::None && gui.clicked(lr)) {
+                    switch_tab(Tab::Editor);
+                    ws.open(host, dg.file, false, dg.line, dg.col);
+                }
+            }
             gui.text(con_r.x + 5, top + i * row_h, l.text, tone_colour(l.tone), kLyText, con_r.w - 16);
         }
         if (gui.scrollbar(5, Rect{ con_r.x + con_r.w - 7, top, 5, visible * row_h }, n, visible, con_scroll))
             con_follow = con_scroll >= n - visible;
+    }
+
+    // Compiler output quotes names with U+2018/U+2019 (and U+201C/D); the tool font is ASCII.
+    static std::string ascii_quotes(const std::string& t) {
+        std::string o;
+        o.reserve(t.size());
+        for (size_t i = 0; i < t.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(t[i]);
+            if (c == 0xE2 && i + 2 < t.size() && static_cast<unsigned char>(t[i + 1]) == 0x80) {
+                const unsigned char d = static_cast<unsigned char>(t[i + 2]);
+                if (d == 0x98 || d == 0x99) { o += '\''; i += 2; continue; }
+                if (d == 0x9C || d == 0x9D) { o += '"'; i += 2; continue; }
+                if (d == 0x93 || d == 0x94) { o += '-'; i += 2; continue; }
+            }
+            o += char(c);
+        }
+        return o;
     }
 
     // Wrap newly logged lines to the console width (compiler command lines stay one truncated row).
@@ -1729,11 +2571,19 @@ struct StudioGame final : Game {
         if (fresh > log.size()) fresh = log.size();
         const size_t cols = size_t((kW - kCatW - 12 - 16) / kAdv);
         for (size_t i = log.size() - size_t(fresh); i < log.size(); ++i) {
-            const LogLine& l = log.at(i);
-            if (l.tone == Tone::Dim || l.text.size() <= cols) { con.push_back(ConLine{ l.text, l.tone }); continue; }
+            LogLine l = log.at(i);
+            l.text = ascii_quotes(l.text);                  // GCC's curly quotes -> the ASCII font's
+            int di = -1;
+            Diag dg;
+            if (parse_diag(l.text, dg) && diags.size() < 2000) {
+                dg.file = resolve_diag_file(dg.file);
+                diags.push_back(dg);
+                di = int(diags.size()) - 1;
+            }
+            if (l.tone == Tone::Dim || l.text.size() <= cols) { con.push_back(ConLine{ l.text, l.tone, di }); continue; }
             bool first = true;
             for (const std::string& part : wrap(l.text, cols - 2)) {
-                con.push_back(ConLine{ first ? part : "  " + part, l.tone });
+                con.push_back(ConLine{ first ? part : "  " + part, l.tone, di });
                 first = false;
             }
         }
@@ -1741,23 +2591,94 @@ struct StudioGame final : Game {
     }
 };
 
-uint32_t StudioGame::g_font_px[phxtool::kAsciiFontW * phxtool::kAsciiFontH];
 uint32_t StudioGame::g_flame_px[12 * 12];
 
+// ---- StudioHost: the editor panels' view of the studio ----
+twk::Gui& StudioHost::gui() { return s->tg; }
+phx::Renderer& StudioHost::renderer() { return *s->renderer; }
+const std::string& StudioHost::root() const { return s->ws_root; }
+Access StudioHost::access(const std::string& path_abs) { return s->policy.access(path_abs); }
+std::vector<std::pair<std::string, std::string>> StudioHost::api_dirs() { return s->api_dirs(); }
+std::string StudioHost::project_name() const { return s->has_project ? s->project.name : std::string(); }
+uint64_t StudioHost::ticks() const { return s->ticks; }
+void StudioHost::toast(const std::string& msg, Toast t) { s->toast(msg, t); }
+void StudioHost::modal(const std::string& title, int w, int h, std::function<bool(twk::Gui&, twk::Rect)> body) {
+    s->push_modal(title, w, h, std::move(body));
+}
+bool StudioHost::modal_open() const { return !s->modals.empty(); }
+void StudioHost::open_file(const std::string& path_abs, int line, int col) {
+    s->switch_tab(Tab::Editor);
+    s->ws.open(*this, path_abs, false, line, col);
+}
+void StudioHost::open_tile(const std::string& path_abs, int index, int tw, int th) {
+    s->switch_tab(Tab::Editor);
+    s->ws.open_tile(*this, path_abs, index, tw, th);
+}
+std::vector<std::string> StudioHost::prefab_types() {
+    // Every phxbin table's NAME column (a str 'type'/'name' field): the shared prefab vocabulary.
+    if (s->prefab_dirty) {
+        s->prefab_dirty = false;
+        s->prefab_cache.clear();
+        for (const std::string& rel : s->ws.all_files()) {
+            if (lower_ext(rel) != ".json" || rel.compare(0, 6, "build/") == 0) continue;
+            const std::string abs = join_path(s->root, rel);
+            const std::string head = read_head(abs, 4096);
+            if (kind_for(rel, head) != FileKind::Table) continue;
+            std::string text;
+            if (!read_text(abs, text)) continue;
+            phxtool::BinDoc d;
+            if (!phxtool::BinDoc::load(text, d)) continue;
+            for (const std::string& n : d.name_column()) s->prefab_cache.push_back(n);
+        }
+    }
+    return s->prefab_cache;
+}
+std::vector<std::string> StudioHost::files_with(const std::vector<std::string>& exts) {
+    std::vector<std::string> out;
+    for (const std::string& rel : s->ws.all_files())
+        for (const std::string& e : exts) if (lower_ext(rel) == e) { out.push_back(rel); break; }
+    return out;
+}
+bool StudioHost::run_make(const std::string& target) {
+    if (!s->jobs) return false;
+    s->diags.clear();
+    s->jobs->enqueue(100000, "make " + target, "make " + target);
+    s->toast("make " + target + " - see the Run view");
+    return true;
+}
+void StudioHost::file_saved(const std::string& path_abs) {
+    if (lower_ext(path_abs) == ".json") s->prefab_dirty = true;
+    s->ws.refresh_tree();
+}
+std::vector<Diag> StudioHost::diagnostics_for(const std::string& path_abs) {
+    std::vector<Diag> out;
+    const std::string want = canon_path(path_abs);
+    for (const Diag& d : s->diags) if (d.file == want) out.push_back(d);
+    return out;
+}
+
 void usage() {
-    std::printf("usage: phxstudio [--root DIR] [--scale N] [--tab overview|assets|run] [--bundle FILE.phxp]\n"
-                "                 [--asset NAME] [--run TARGET]... [--shot OUT.ppm [--shot-frame N]]\n"
-                "                 [--script \"CMD; CMD...\" | FILE]\n"
+    std::printf("usage: phxstudio [--project DIR | --engine-dev] [--root DIR] [--scale N] [--tab editor|assets|run|overview]\n"
+                "                 [--open FILE]... [--bundle FILE.phxp] [--asset NAME] [--run LAUNCH]... [--fresh]\n"
+                "                 [--shot OUT.ppm [--shot-frame N]] [--script \"CMD; CMD...\" | FILE]\n"
+                "  --project DIR  open a game project (a folder with a phxproject.json). The Studio then\n"
+                "                 edits ONLY that folder; the engine's public API headers are read-only and\n"
+                "                 nothing else of the engine can be opened. Without it: a project picker.\n"
+                "  --engine-dev   work on the Phoenix engine itself: the whole checkout, the module graph,\n"
+                "                 every gate and suite (the Studio's engine-maintenance mode)\n"
                 "  --root    the Phoenix repository (default: found from the current directory)\n"
-                "  --scale   integer window scale of the 640x360 canvas (default 2 = 1280x720)\n"
-                "  --tab     the view to open first\n"
+                "  --scale   integer UI scale (default 2: the 640x360 canvas opens as 1280x720)\n"
+                "  --tab     the view to open first (default: editor)\n"
+                "  --open    open a file in the Editor (repeatable; relative to the project)\n"
+                "  --fresh   don't reopen the last session's documents\n"
                 "  --bundle  preselect a bundle in the Assets view (path relative to the root)\n"
                 "  --asset   preselect an asset of that bundle: NAME or TYPE:NAME (e.g. sprite:hero)\n"
-                "  --run     queue a launch at startup by make target or label (repeatable),\n"
-                "            e.g. --run check, --run emberwing-sdl\n"
+                "  --run     queue a launch at startup by make target or label (repeatable)\n"
                 "  --shot    render N frames (default 45), write the window to a PPM, and quit\n"
-                "  --script  drive the pointer from commands (inline or a file), e.g.\n"
-                "            \"click 250 9; wait 30; shot out.ppm; quit\" (canvas coordinates, 640x360)\n");
+                "  --script  drive the studio from commands (inline or a file):\n"
+                "            click|rclick|dclick|move X Y; drag X0 Y0 X1 Y1 [N]; wheel X Y N;\n"
+                "            key [ctrl+][shift+][alt+]NAME; type TEXT; open PATH; tab NAME;\n"
+                "            project DIR; wait N; shot FILE.ppm; quit   (canvas coordinates)\n");
 }
 
 } // namespace
@@ -1769,11 +2690,15 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--root" && i + 1 < argc)        root_arg = argv[++i];
-        else if (a == "--scale" && i + 1 < argc)  scale = std::atoi(argv[++i]);
+        else if (a == "--scale" && i + 1 < argc)  { scale = std::atoi(argv[++i]); game.auto_size = false; }
         else if (a == "--bundle" && i + 1 < argc) game.initial_bundle = argv[++i];
         else if (a == "--asset" && i + 1 < argc)  game.initial_asset = argv[++i];
         else if (a == "--shot" && i + 1 < argc)   game.shot_path = argv[++i];
         else if (a == "--run" && i + 1 < argc)    game.initial_runs.push_back(argv[++i]);
+        else if (a == "--open" && i + 1 < argc)   game.initial_opens.push_back(argv[++i]);
+        else if (a == "--project" && i + 1 < argc) game.project_arg = argv[++i];
+        else if (a == "--engine-dev")             game.engine_dev = true;
+        else if (a == "--fresh")                  game.fresh = true;
         else if (a == "--script" && i + 1 < argc) {
             std::string text = argv[++i];
             std::string file;
@@ -1783,7 +2708,7 @@ int main(int argc, char** argv) {
         else if (a == "--shot-frame" && i + 1 < argc) game.shot_frame = std::atoi(argv[++i]);
         else if (a == "--tab" && i + 1 < argc) {
             const std::string t = argv[++i];
-            game.tab = t == "assets" ? Tab::Assets : t == "run" ? Tab::Run : Tab::Overview;
+            game.tab = t == "assets" ? Tab::Assets : t == "run" ? Tab::Run : t == "overview" ? Tab::Overview : Tab::Editor;
         } else if (a == "--help" || a == "-h") { usage(); return 0; }
         else { std::fprintf(stderr, "phxstudio: unknown argument '%s'\n", a.c_str()); usage(); return 1; }
     }
@@ -1795,7 +2720,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    phx_sdl_set_window_scale(scale);
+    phx_desktop_set_scale(scale);
+    if (!game.script.empty() || !game.shot_path.empty()) { game.fresh = true; game.auto_size = false; }   // reproducible runs
     Config cfg = Config::from_defaults();
     cfg.title = "Phoenix Studio";
     cfg.width = kW; cfg.height = kH;
