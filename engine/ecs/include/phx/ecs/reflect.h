@@ -43,6 +43,8 @@ struct ComponentInfo {
     uint8_t          field_count;
     // Add the component (default-constructed) to an entity and return its storage.
     void* (*add)(ecs::World&, ecs::Entity);
+    // The entity's instance, or nullptr when it has none (tools: the live inspector).
+    void* (*get)(ecs::World&, ecs::Entity);
     // Write a default-constructed instance into `out` (size bytes): the defaults tools show.
     void  (*make_default)(void* out);
 };
@@ -100,6 +102,7 @@ inline const ComponentInfo* find_reflected(NameHash name) {
             #T, ::phx::fnv1a(#T), uint16_t(sizeof(T)), kFields,                                    \
             uint8_t(sizeof(kFields) / sizeof(kFields[0])),                                         \
             [](::phx::ecs::World& w, ::phx::ecs::Entity e) -> void* { return &w.add<T>(e, T{}); }, \
+            [](::phx::ecs::World& w, ::phx::ecs::Entity e) -> void* { return w.get<T>(e); },        \
             [](void* out) { *static_cast<T*>(out) = T{}; } };                                      \
         const bool kRegistered = ::phx::reflect_detail::add(&kInfo);                               \
     }                                                                                              \

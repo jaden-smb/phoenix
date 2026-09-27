@@ -26,6 +26,7 @@
 #include "project.h"
 #include "pixeldoc.h"
 #include "../phxtmap/editor.h"     // TmapDoc (the template level)
+#include "ascii_font.h"            // tools/common: the template's font sheet
 
 #include <cstdio>
 #include <string>
@@ -288,16 +289,17 @@ inline const char* main_cpp() {
 // checkout:  make play | play-gba | play-psp PROJECT=path/to/this/project
 //
 // The GAME is data you edit in the Studio, not code:
-//   assets/level.tmj     the map: tiles, per-tile collision (spikes are hazard tiles) and the
+//   assets/flow.json     the screens and their order: the title, the levels (each a map, with
+//                        its lives and HUD), game over, the ending (phx/runtime/flow.h)
+//   assets/level.tmj     a level: tiles, per-tile collision (spikes are hazard tiles) and the
 //                        spawns you place with the map editor's T tool
-//   assets/prefabs.json  what each spawn type is: its sprite, collider, and its COMPONENTS: the
+//   assets/prefabs.json  what each spawn type is: sprite, collider, and its components: the
 //                        engine's stock behaviours (PlatformerController, Patrol, Pickup, Hazard,
-//                        Checkpoint, Exit, CameraFollow; phx/runtime/behaviours.h) tuned by
-//                        columns like Patrol_range, or your own PHX_COMPONENTs
-// This file loads the level and runs the behaviours. Add your own rules in on_fixed_update
-// (behaviours.hits() are this step's contacts, behaviours.counter("coins"_hash) the tallies).
+//                        Checkpoint, Exit, CameraFollow) tuned by columns, or your own
+// This file just runs the flow. Add your own rules in on_fixed_update, around flow.update():
+// flow.behaviours() has this step's contacts, flow.total("coins"_hash) the tallies.
 #include "phx/runtime/main.h"
-#include "phx/runtime/behaviours.h"
+#include "phx/runtime/flow.h"
 #include "phx/resource/cache.h"
 #include "phx/core/log.h"
 
@@ -307,9 +309,7 @@ namespace {
 
 struct @TYPE@ final : Game {
     ResourceCache* res = nullptr;
-    Level          level;
-    PhysicsWorld   physics;
-    Behaviours     behaviours;
+    GameFlow       flow;
 
     // Before boot. The budgets arrive sized for the target (GBA, PSP, PC); 240x160 is the GBA's
     // screen, which fits every target.
@@ -326,26 +326,11 @@ struct @TYPE@ final : Game {
             PHX_LOG_ERROR("@SLUG@: no bundle - bake the assets first (Run > Bake assets)");
             return;
         }
-        if (level.load(app, *res, &physics) != Status::Ok) {
-            PHX_LOG_ERROR("@SLUG@: the bundle has no 'level' map (assets/level.tmj)");
-            return;
-        }
-        physics.set_gravity(vec2{ s_from_int(0), s_from_int(420) });
-        behaviours.start(app, level, *res, physics);
-        if (behaviours.player() == ecs::kInvalid) PHX_LOG_ERROR("@SLUG@: no spawn has a PlatformerController (assets/prefabs.json)");
+        flow.start(app, *res);
     }
 
-    void on_fixed_update(App& app, scalar dt) override {
-        behaviours.update(app, dt);
-    }
-
-    void on_render(App& app, scalar) override {
-        Renderer& r = app.render();
-        r.begin_frame(behaviours.camera());
-        level.draw(r);
-        draw_sprites(app.world(), r);
-        r.end_frame();
-    }
+    void on_fixed_update(App& app, scalar dt) override { flow.update(app, dt); }
+    void on_render(App& app, scalar) override { flow.render(app); }
 };
 
 } // namespace
@@ -423,10 +408,49 @@ inline PixelDoc slime() {
     return s;
 }
 
+// The door: one 16x16 frame (the level's exit).
+inline PixelDoc door() {
+    PixelDoc d = PixelDoc::blank(16, 16, 0);
+    const uint32_t wood = px_rgba(150, 96, 56), dark = px_rgba(96, 58, 32), knob = px_rgba(250, 210, 90);
+    d.rect(3, 1, 12, 15, wood, true);
+    d.rect(3, 1, 12, 15, dark, false);
+    d.rect(5, 3, 10, 7, dark, false);
+    d.rect(5, 9, 10, 13, dark, false);
+    d.set(10, 8, knob);
+    return d;
+}
+
+// The font sheet the flow's screens and HUD write with: printable ASCII in 8x8 cells, 16 per row.
+inline PixelDoc font() {
+    PixelDoc f = PixelDoc::blank(phxtool::kAsciiFontW, phxtool::kAsciiFontH, 0);
+    phxtool::build_ascii_font(f.px.data());
+    return f;
+}
+
+// The game flow (a phxbin table, phx/runtime/flow.h): the screens in order. `name` is the game's
+// title line. Add a level: a row of kind "level" with its own `map` (a new .tmj).
+inline std::string flow_json(const std::string& name) {
+    std::string title;
+    for (char c : name) if (c != '"' && c != '\\' && c != '|') title += c;
+    if (title.size() > 40) title.resize(40);
+    return "{ \"struct\":\"Screen\",\n"
+           "  \"fields\":[{\"name\":\"name\",\"type\":\"str16\"}, {\"name\":\"kind\",\"type\":\"str16\"},"
+           " {\"name\":\"map\",\"type\":\"str16\"}, {\"name\":\"text\",\"type\":\"str64\"}, {\"name\":\"next\",\"type\":\"str16\"},"
+           " {\"name\":\"lives\",\"type\":\"u8\"}, {\"name\":\"counter\",\"type\":\"str16\"}, {\"name\":\"label\",\"type\":\"str16\"}],\n"
+           "  \"records\":[\n"
+           "    {\"name\":\"title\", \"kind\":\"title\", \"text\":\"" + title + "|a Phoenix game\"},\n"
+           "    {\"name\":\"level1\", \"kind\":\"level\", \"map\":\"level\", \"text\":\"LEVEL 1\", \"lives\":3,"
+           " \"counter\":\"coins\", \"label\":\"COINS\"},\n"
+           "    {\"name\":\"end\", \"kind\":\"end\", \"text\":\"YOU WIN!|thanks for playing\"},\n"
+           "    {\"name\":\"gameover\", \"kind\":\"title\", \"text\":\"GAME OVER\", \"next\":\"level1\"}\n"
+           "  ] }\n";
+}
+
 // The prefab table (a phxbin table, edited in the Studio's table editor): what each spawn type in
 // the level is made of. The engine's level loader reads these columns by name (phx/runtime/level.h),
 // and `components` attaches behaviours (phx/runtime/behaviours.h, or your own PHX_COMPONENTs) tuned
-// by `Component_field` columns. Collision: the player (layer 1) reports coins (2) and slimes (4).
+// by `Component_field` columns. Collision: the player (layer 1) reports coins (2), slimes (4) and
+// the door (8).
 inline const char* prefabs_json() {
     return "{ \"struct\":\"Prefab\",\n"
            "  \"fields\":[{\"name\":\"type\",\"type\":\"str16\"}, {\"name\":\"sprite\",\"type\":\"str16\"},"
@@ -435,12 +459,14 @@ inline const char* prefabs_json() {
            " {\"name\":\"components\",\"type\":\"str64\"}, {\"name\":\"Pickup_value\",\"type\":\"i16\"},"
            " {\"name\":\"Pickup_sound\",\"type\":\"str16\"}, {\"name\":\"Patrol_range\",\"type\":\"i16\"}],\n"
            "  \"records\":[\n"
-           "    {\"type\":\"player\", \"sprite\":\"hero\", \"w\":10, \"h\":16, \"body\":1, \"layer\":1, \"mask\":6,"
+           "    {\"type\":\"player\", \"sprite\":\"hero\", \"w\":10, \"h\":16, \"body\":1, \"layer\":1, \"mask\":14,"
            " \"components\":\"PlatformerController CameraFollow\"},\n"
            "    {\"type\":\"coin\", \"sprite\":\"coin\", \"w\":8, \"h\":8, \"body\":0, \"layer\":2, \"mask\":1,"
            " \"components\":\"Pickup\", \"Pickup_value\":1, \"Pickup_sound\":\"coin\"},\n"
            "    {\"type\":\"slime\", \"sprite\":\"slime\", \"w\":12, \"h\":16, \"body\":1, \"layer\":4, \"mask\":1,"
-           " \"components\":\"Patrol Hazard\", \"Patrol_range\":24}\n"
+           " \"components\":\"Patrol Hazard\", \"Patrol_range\":24},\n"
+           "    {\"type\":\"door\", \"sprite\":\"door\", \"w\":12, \"h\":16, \"body\":0, \"layer\":8, \"mask\":1,"
+           " \"components\":\"Exit\"}\n"
            "  ] }\n";
 }
 
@@ -496,6 +522,8 @@ inline phxtool::TmapDoc level() {
     d.set_prop(2, "Pickup_value", "int", "5");  // the coin on the block is worth 5 (a spawn property)
     d.add_spawn("slime", 100, 126);             // patrols the ground under the plank
     d.spawns.back().name = "slime";
+    d.add_spawn("door", 228, 128);              // the exit: the level ends here (Exit)
+    d.spawns.back().name = "door";
     return d;
 }
 
@@ -559,6 +587,11 @@ inline bool create_project(const std::string& dir, const std::string& name, std:
     slime_spr.sheet = "slime.png"; slime_spr.frame_w = 16; slime_spr.frame_h = 16;
     slime_spr.clips = { SprClip{ "idle", 0, 2, 3, true } };
     if (!slime_spr.save(dir + "/assets/slime.sprdef", &e)) return fail(e);
+    PixelDoc door = tmpl::door();
+    if (!door.save_png(dir + "/assets/door.png", &e)) return fail(e);
+    PixelDoc font = tmpl::font();
+    if (!font.save_png(dir + "/assets/font.png", &e)) return fail(e);
+    if (!write("assets/flow.json", tmpl::flow_json(name.empty() ? slug : name))) return fail("cannot write assets/flow.json");
     if (!write("assets/prefabs.json", tmpl::prefabs_json())) return fail("cannot write assets/prefabs.json");
 
     ProjectDoc p;

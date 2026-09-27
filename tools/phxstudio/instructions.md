@@ -110,12 +110,62 @@ app.audio().play(jump);                              // or play_music(), stop_al
 The template plays `assets/jump.wav` when you jump (A, Z on a keyboard) and `assets/coin.wav`
 when you collect a coin. Nothing starts until the first sound, so a silent game pays nothing.
 
-**The template is a small platformer driven by its data.** `level.load()` builds the map, its
-collision and every spawn from `assets/level.tmj` and `assets/prefabs.json` (see [what a spawn
-becomes](#tilemap-editor)). `src/main.cpp` adds only the rules: run and jump, collect coins,
-and go back to the start on a spike tile. Coins carry the game's own reflected `Coin { value }`
-component. The prefab sets `Coin_value` = 1, and the coin on the block overrides it with a spawn
-property of 5 (see [Components](#data-table-editor)).
+**The template is a whole small game made only of data.**
+- **`assets/flow.json`** chains the screens: a title with the project's name, the level (3
+  lives, a coin HUD), a "you win" ending, and a game over that retries.
+- **The level** is built from `assets/level.tmj` and `assets/prefabs.json` (see [what a spawn
+  becomes](#tilemap-editor)). Each prefab's `components` are the engine's **stock behaviours**:
+  - the player: `PlatformerController CameraFollow`;
+  - coins: `Pickup` with a coin sound; the coin on the block overrides `Pickup_value` to 5 with
+    a spawn property;
+  - the slime: `Patrol Hazard`, `Patrol_range` 24;
+  - the door at the end: `Exit`.
+- **Spike tiles** are hazard tiles in the map.
+- **Text** uses `assets/font.png`, a 16-column 8×8 ASCII sheet.
+
+`src/main.cpp` only runs the flow; your own rules go around `flow.update()`.
+
+**The game flow** (`phx/runtime/flow.h`): `assets/flow.json` is a table, one row per screen,
+edited in the table editor.
+
+| Column | Meaning |
+|---|---|
+| `name` | the screen's name |
+| `kind` | `title`, `level` or `end` |
+| `map` | a level's tilemap |
+| `text` | the lines a title or end screen shows (`\|` breaks a line), or a level's opening banner |
+| `next` | the screen after (default: the next row) |
+| `lives` | deaths before the screen called `gameover` (0 = no limit) |
+| `counter`, `label` | the HUD's counter and caption |
+| `music` | a sound to loop |
+
+How screens chain:
+- START (or A) leaves a title.
+- In a level, START pauses.
+- Touching an `Exit` goes to the screen its `target` names, else to `next`.
+- An end screen's START restarts at the first row with the totals cleared.
+
+**To add a level:** make a new map (File > New > Tilemap), add a `level` row naming it, and give
+the previous level's door an `Exit_target` spawn property (or rely on the row order). Counters
+such as coins add up across levels.
+
+**Stock behaviours** (`phx/runtime/behaviours.h`): add them to a prefab by name in the table
+editor's COMPONENTS section, and tune them with their `Component_field` columns or spawn
+properties.
+
+| Component | Does | Fields |
+|---|---|---|
+| `PlatformerController` | Left/Right run, A jumps; plays the walk/idle/jump clips by name; hazard tiles send it back | `speed` `jump` `jump_sound` `idle_clip` `walk_clip` `jump_clip` |
+| `Patrol` | walks back and forth around its spawn, turning at walls (needs `body` 1) | `speed` `range` |
+| `Pickup` | touched by the player: adds `value` to a counter, plays `sound`, disappears | `value` `counter` (default `coins`) `sound` |
+| `Hazard` | touched by the player: back to the respawn point (`deaths` + 1) | `sound` |
+| `Checkpoint` | touched by the player: becomes the respawn point | `sound` |
+| `Exit` | touched by the player: `behaviours.exit()` returns its `target` (load that level) | `target` |
+| `CameraFollow` | the camera follows it, inside the level | `offset_y` |
+
+"The player" is the first `PlatformerController`. A contact needs the two colliders' layers
+and masks to match (the player's `mask` includes the others' `layer`s). Game code reads
+`behaviours.counter("coins"_hash)`, `behaviours.hits()` and `behaviours.exit()`.
 
 **GBA ROM** and **PSP EBOOT** in a new project's Run view are `play-gba` and `play-psp`. They
 need devkitARM (`$DEVKITARM`) and pspsdk (`psp-g++` on `PATH`). `make phxnew` builds `phxnew DIR
@@ -272,6 +322,7 @@ entity spawns and parallax. It is the same panel as `phxtmap`
 | I / S | picker (drag a box to pick a stamp) / select (Ctrl+C turns the box into a stamp; Delete clears it) |
 | T | spawns: click to place or select, drag to move (Shift = no snapping), Delete removes |
 | Tab / Shift+Tab, V | next / previous layer, cycle the brush tile's collision flag |
+| ▶ (toolbar), Shift+F5 | **play from here**: save, build and run the game with the player at the centre of the view (Shift+F5: at the pointer) |
 
 - **Tiles tab**: the tileset palette. Click for a tile and drag for a stamp. **Double-click a
   tile** (or right-click > Edit tile, or **this tile**) to paint it in the pixel editor, zoomed on
@@ -313,8 +364,15 @@ with the T tool: it appears in the game with no code. Game code finds entities b
 (`level.find(world, "player"_hash)`, or each `PrefabRef`) or by name
 (`level.find_named(world, "door_a"_hash)`). It reads any setting with the same inheritance the
 loader uses: `level.get_int(ref, "speed"_hash, 60)` is the spawn's property, else the prefab's
-column, else 60. `get_str` and `get_hash` do the same for text. The template does
-exactly this: its C++ adds only run/jump, coin pickup and spikes.
+column, else 60. `get_str` and `get_hash` do the same for text.
+- **Spawns look like the game.** A spawn whose prefab has a `sprite` is drawn as that sprite's
+  first frame (its "idle" clip), centred where the level places the entity; click it to select
+  it. A type with no sprite keeps a coloured marker. Edits to the sprite or the prefab table show
+  within a couple of seconds.
+- **Play from here** (▶, Shift+F5) saves the map and runs the project's **Play** launch with
+  `PHX_PLAY_FROM=x,y`. The engine's desktop entry starts the player there, and makes it the
+  respawn point. It works with any game that uses the stock behaviours; a game of its own calls
+  `set_start_override` itself.
 - **Map tab**: size (resize with an anchor; spawns move with it), the tileset name (the texture the
   bake references), and the tileset image (saved as Tiled's `image`, so Tiled opens the map with
   its art too).
@@ -434,6 +492,27 @@ This is how the views were verified, including under ASan:
 make studio BUILD=build/asan EXTRA_CXXFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1"
 ASAN_OPTIONS=detect_leaks=0 ./build/asan/phxstudio --project mygame --script "open assets/level.tmj; drag 250 150 300 170; key ctrl+z; quit"
 ```
+
+## Developer tools in the running game
+
+A game built with `make game` / Play (the engine's desktop entry) has developer tools built in
+(`phx/runtime/devtools.h`). Console builds don't.
+
+| Key | Does |
+|---|---|
+| F1 | show / hide the overlay |
+| F5 | pause / resume the simulation (drawing goes on) |
+| F6 | advance exactly one fixed step |
+| F7 / F8, click | select the previous / next entity, or the one under the pointer |
+
+The overlay is a live **inspector** of the selected entity:
+- its prefab type and spawn;
+- its Transform, Body (velocity, on the ground), collider and animation;
+- every reflected component it has (the stock behaviours and your `PHX_COMPONENT`s), with its
+  fields' current values.
+
+The entity's collider is outlined in the world. The overlay is drawn over the game's frame and
+uses none of its sprites or budgets.
 
 ## Notes & limits
 

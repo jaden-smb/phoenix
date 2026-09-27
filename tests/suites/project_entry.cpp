@@ -3,8 +3,8 @@
 // profile (budgets + fixed resolution, phx/runtime/main.h) so the host runs the game exactly as
 // the console entry would configure it. Linked with the null platform; never a shipping entry.
 //
-// Input is scripted like a player's: idle, a tap of A (the template's jump sound) while walking
-// right, then walking left. With PHX_EXPECT_AUDIO=1 the run fails unless the game queued a sound
+// Input is scripted like a player's: idle, A (past a title screen, or a jump), walking right with
+// another A (a jump: the template's jump sound), then walking left. With PHX_EXPECT_AUDIO=1 the run fails unless the game queued a sound
 // and the App's headless mix of it was audible (App::audio(): no device on the null platform).
 #include "phx/runtime/main.h"
 
@@ -31,7 +31,7 @@ int main() {
     if (target.screen_w == 240 && target.screen_h == 160) target.total_ram += 240u * 160u * 4u + 64u;
 
     for (uint32_t f = 0; f < 120; ++f)
-        g_script[f] = f < 30 ? 0u : f < 60 ? (kRight | (f == 30 ? kA : 0u)) : f < 90 ? kLeft : 0u;
+        g_script[f] = f < 30 ? 0u : f < 60 ? (kRight | ((f == 30 || f == 45) ? kA : 0u)) : f < 90 ? kLeft : 0u;
     phx_null_set_button_script(g_script, 120);
 
     phx::Game& game = phx::game_instance();

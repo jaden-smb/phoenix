@@ -21,7 +21,10 @@
 > - **The rest of Phase 3**: no in-process bake (projects bake through `make game-assets`) and no
 >   sources glob list.
 > - **Phase 5**: per-tier previews exist in the Assets view, but the editors paint RGBA.
-> - **Phase 6**: no in-process play mode; games launch as child processes.
+> - **Phase 6**: no in-process play mode. Games launch as child processes, and the map editor can
+>   **play from here**. Pause, single-step and a live entity inspector live in the running game
+>   instead (`phx/runtime/devtools.h`). There is no input replay yet. (Phase 5's spawn art is
+>   done: the map editor draws spawns as their prefab sprites.)
 > - **Phase 8** is done differently from this plan. `PHX_COMPONENT` (`phx/ecs/reflect.h`)
 >   registers a game's components; `make game` exports them to `build/components.json`; the
 >   table editor ticks them onto prefab records; and the level loader builds them from those

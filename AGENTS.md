@@ -37,7 +37,8 @@ contributor guide.
 
 `make check` runs many separate suite binaries (`smoke render ppu gu playable physics anim scene ui
 platformer emberwing emberwing-ppu audio texcache png sprite tiled resource phxpack pipeline tools`,
-plus `level`: the engine level loader over baked map/prefabs/sprite, and `project-check`: the Studio's
+plus `level`: the engine level loader over baked map/prefabs/sprite, `behaviours`: the stock
+behaviours played from prefab data alone, `flow`: the data-driven game flow, and `project-check`: the Studio's
 new-project template baked and run headlessly on the PC, GBA and PSP profiles). Each is its own Make
 target that builds and runs one binary — e.g. `make physics`, `make ppu`, `make pipeline`. **To run
 a single suite, run its target.** There is no per-test-case filter; the unit harness
@@ -106,7 +107,8 @@ the engine owns `main()` per target (`engine/runtime/src/entry/{desktop,gba,psp}
 by the project rules) and applies each target's profile (GBA: 160 KB arena, 240x160; PSP: 4 MB).
 `phx::Level` (`phx/runtime/level.h`) builds entities from a map's spawns + the `prefabs` table (columns
 read by name via phxbin's schema trailer, `phx/resource/table.h`); per-spawn properties override columns;
-`PHX_COMPONENT` (`phx/ecs/reflect.h`) makes a game's components data-buildable and exportable to the Studio.
+`PHX_COMPONENT` (`phx/ecs/reflect.h`) makes a game's components data-buildable and exportable to the Studio;
+the engine's stock behaviours (`phx/runtime/behaviours.h`) are such components, run by one `Behaviours` system.
 
 GBA has no filesystem: `gba-platformer` bakes the `.phxp` bundle on the host (tier 0 — sounds are
 resampled to the GBA device rate at bake time) and links it into the ROM with `bin2s`. Canonical

@@ -95,6 +95,7 @@ int App::run(Game* game) {
 
         plat_->poll_input(&raw);
         input_.update(raw);        // raw -> semantic edges, once per frame
+        if (dev_.frame) steps = dev_.frame(dev_.user, *this, steps);   // developer pause / step
 
         // Phase profiling: stamp each phase with the platform clock (µs into prof_). Four
         // clock reads per frame — cheap enough to keep on unconditionally, even on GBA.
@@ -112,6 +113,7 @@ int App::run(Game* game) {
 
         const uint64_t t_ren = plat_->clock_ns();
         game->on_render(*this, acc_.alpha());
+        if (dev_.overlay) dev_.overlay(dev_.user, *this);                // developer overlay
         if (audio_.pump_) audio_.pump_(audio_);   // no device: mix this frame's sound here
 
         mem_->swap_frame();        // double-buffered transient reclaim, O(1)

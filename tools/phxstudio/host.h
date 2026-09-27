@@ -65,6 +65,9 @@ public:
     virtual std::vector<std::string> files_with(const std::vector<std::string>& exts) { (void)exts; return {}; }
     // Run a make target in the job runner (Studio only). Returns false when unsupported.
     virtual bool run_make(const std::string& target) { (void)target; return false; }
+    // Play the project with the player starting at map pixel (x, y) (the map editor's "Play from
+    // here"): the project's Play launch, with PHX_PLAY_FROM set. False when unsupported.
+    virtual bool play_from(int x, int y) { (void)x; (void)y; return false; }
     // Tell the host the file on disk changed (so explorers/bundles refresh).
     virtual void file_saved(const std::string& path_abs) { (void)path_abs; }
     // Compiler diagnostics from the last build that point into this file.

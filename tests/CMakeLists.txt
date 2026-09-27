@@ -74,7 +74,8 @@ set(_itests
   pipeline:pipeline_test
   editors:editors_test
   level:level_test
-  behaviours:behaviours_test)
+  behaviours:behaviours_test
+  flow:flow_test)
 
 foreach(spec ${_itests})
   string(REPLACE ":" ";" parts ${spec})

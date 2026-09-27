@@ -17,6 +17,13 @@ PHX_COMPONENT(Checkpoint, PHX_FIELD_HASH(Checkpoint, sound));
 PHX_COMPONENT(Exit, PHX_FIELD_HASH(Exit, target));
 PHX_COMPONENT(CameraFollow, PHX_FIELD(CameraFollow, offset_y));
 
+namespace {
+bool    g_start_set = false;               // set_start_override(): used once, by the next start()
+int32_t g_start_x = 0, g_start_y = 0;
+} // namespace
+
+void set_start_override(int32_t x, int32_t y) { g_start_set = true; g_start_x = x; g_start_y = y; }
+
 bool play_clip(ecs::World& w, ecs::Entity e, NameHash clip) {
     const SpriteRenderer* s = w.get<SpriteRenderer>(e);
     Animator* an = w.get<Animator>(e);
@@ -37,7 +44,11 @@ void Behaviours::start(App& app, Level& level, ResourceCache& res, PhysicsWorld&
     w.each<PlatformerController, PrefabRef>([&](ecs::Entity e, PlatformerController&, PrefabRef& p) {
         if (p.spawn < first) { first = p.spawn; player_ = e; }
     });
-    if (player_ != ecs::kInvalid) respawn_ = w.get<Transform>(player_)->pos;
+    if (player_ != ecs::kInvalid) {
+        Transform* t = w.get<Transform>(player_);
+        if (g_start_set) { t->pos = vec2{ s_from_int(g_start_x), s_from_int(g_start_y) }; g_start_set = false; }
+        respawn_ = t->pos;
+    }
     for (uint32_t i = 0; i < kMaxCounters; ++i) { counter_names_[i] = 0; counters_[i] = 0; }
     exit_ = 0; hit_count_ = 0;
     camera_ = Camera2D{};

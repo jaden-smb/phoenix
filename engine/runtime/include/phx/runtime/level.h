@@ -91,7 +91,8 @@ public:
     // Upload the map, set `physics`' collision grid (if given), spawn every entity into
     // app.world(). Ok, or why not (NotFound: no such map in the mounted bundles).
     Status load(App& app, ResourceCache& res, PhysicsWorld* physics, const LevelOptions& opt = {});
-    // Despawn this level's entities and free its sprite textures (the tilemap slot stays).
+    // Despawn this level's entities and free its sprite textures. The map stays uploaded (its
+    // tilemap slot and tileset), so loading the same map again with this Level reuses it.
     void unload(App& app);
 
     void draw(Renderer& r) const;            // every tile layer, backdrops first
@@ -109,6 +110,9 @@ public:
     ecs::Entity find(ecs::World& w, NameHash type) const;
     // The entity whose spawn was named `name` in the map editor ("door_a"_hash), else kInvalid.
     ecs::Entity find_named(ecs::World& w, NameHash name) const;
+    // The level loaded last (nullptr after its unload): what the developer overlay names
+    // entities from (phx/runtime/devtools.h). Header-inline: reading it links no level code.
+    static const Level* active();
 
     // A setting of the entity `ref` made: its spawn's property `key`, else its prefab row's
     // column `key`, else `def`. The same lookup the loader uses for the engine's columns.
@@ -131,9 +135,17 @@ private:
     const SpriteSlot* sprite(ResourceCache& res, Renderer& r, NameHash name);
     void attach_components(ecs::World& w, ecs::Entity e, const PrefabRef& ref, const char* list);
 
+    // Maps this Level has uploaded: loading one again reuses its tilemap slot and tileset texture
+    // (renderer tilemap slots are never freed), so a game flow can restart and revisit levels.
+    static constexpr uint32_t kMapCache = 8;
+    struct MapCache { NameHash map = 0; TilemapId id = kNoTilemap; TextureId tileset = kNoTexture; };
+    MapCache    cache_[kMapCache]{};
+    uint32_t    cache_n_ = 0;
+
     TilemapView view_{};
     TilemapId   map_ = kNoTilemap;
     TextureId   tileset_ = kNoTexture;
+    bool        tileset_cached_ = false;
     TileGrid    grid_{};
     TableView   prefabs_{};
     SpawnsView  spawns_{};
@@ -144,6 +156,9 @@ private:
 
 // Draw every (SpriteRenderer, Transform) entity, following its Animator when it has one.
 void draw_sprites(ecs::World& w, Renderer& r);
+
+namespace level_detail { inline const Level* g_active = nullptr; }   // set by load, cleared by unload
+inline const Level* Level::active() { return level_detail::g_active; }
 
 } // namespace phx
 #endif // PHX_RUNTIME_LEVEL_H

@@ -83,6 +83,9 @@ public:
     // A counter ("coins"_hash, "deaths"_hash, or any Pickup's), 0 when it never counted.
     int32_t     counter(NameHash name) const;
     void        set_counter(NameHash name, int32_t v);
+    // Every counter slot (i < kMaxCounters): its name (0 = unused) and value.
+    NameHash    counter_name(uint32_t i) const { return i < kMaxCounters ? counter_names_[i] : 0; }
+    int32_t     counter_value(uint32_t i) const { return i < kMaxCounters ? counters_[i] : 0; }
     // The target of the Exit the player touched (0: none yet). clear_exit() after acting on it.
     NameHash    exit() const { return exit_; }
     void        clear_exit() { exit_ = 0; }
@@ -117,6 +120,11 @@ private:
 // Play a clip of an entity's sprite by name (the level keeps each sprite's clip names). False when
 // the entity has no such clip; playing the clip it is already in does not restart it.
 bool play_clip(ecs::World& w, ecs::Entity e, NameHash clip);
+
+// "Play from here": the next Behaviours::start puts the player (and its respawn point) at (x, y)
+// instead of its spawn, once. The desktop entry sets it from PHX_PLAY_FROM="x,y", which Phoenix
+// Studio's map editor passes when you play from a spot on the map.
+void set_start_override(int32_t x, int32_t y);
 
 } // namespace phx
 #endif // PHX_RUNTIME_BEHAVIOURS_H

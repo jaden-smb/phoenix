@@ -4,6 +4,10 @@
 #include "phx/runtime/app.h"
 #include "phx/runtime/main.h"
 #include "phx/ecs/reflect.h"
+#include "phx/runtime/devtools.h"
+#include "phx/physics/physics.h"
+#include "phx/platform/desktop.h"
+#include "phx/platform/gfx_soft.h"
 #include "phx/core/log.h"
 
 #include <cstdio>
@@ -12,6 +16,7 @@
 // hooks exported by the null backend to make the loop deterministic
 extern "C" void phx_null_set_step_ns(uint64_t ns);
 extern "C" void phx_null_set_max_frames(uint64_t n);
+extern "C" void phx_null_desktop_push(const phx_desktop_event* e);
 
 using namespace phx;
 
@@ -87,6 +92,31 @@ struct SoundGame : CountGame {
         CountGame::on_start(app);
         for (int i = 0; i < 512; ++i) tone[i] = (i & 32) ? int16_t(8000) : int16_t(-8000);
         queued = app.audio().play(SoundView{ tone, 512, 44100 });
+    }
+};
+
+// Under the developer tools: reads the finished frame at teardown, where the overlay drew.
+struct DevGame : CountGame {
+    ecs::Entity marked = ecs::kInvalid;
+    uint32_t panel_px = 0, clear_px = 0;
+    void on_start(App& app) override {
+        CountGame::on_start(app);
+        marked = app.world().spawn();
+        app.world().add<Speedy>(marked, Speedy{});          // a reflected component for the inspector
+        app.world().add<Transform>(marked, Transform{ vec2{ s_from_int(20), s_from_int(20) } });
+    }
+    void on_render(App& app, scalar a) override {
+        CountGame::on_render(app, a);
+        app.render().begin_frame(Camera2D{});
+        app.render().end_frame();
+    }
+    void on_stop(App& app) override {
+        CountGame::on_stop(app);
+        const phx_soft_fb fb = phx_gfx_soft_lock(app.platform()->gfx());
+        if (fb.pixels && fb.w > 150 && fb.h > 30) {
+            panel_px = fb.pixels[size_t(20) * size_t(fb.w) + 180];   // inside the overlay panel
+            clear_px = fb.pixels[size_t(fb.h - 1) * size_t(fb.w) + size_t(fb.w - 1)];   // outside it
+        }
     }
 };
 
@@ -174,6 +204,23 @@ int main() {
     ok = ok && quiet_rc == 0 && quiet_app.audio().plays() == 0 && quiet_app.audio().peak() == 0 &&
          sound_rc == 0 && sound.queued && sound_app.audio().plays() == 1 && sound_app.audio().peak() > 0 &&
          !sound_app.audio().has_device() && sound_app.audio().rate() == GameAudio::kHeadlessRate;
+
+    // Developer tools: F5 pauses, F6 steps once each, the overlay draws over the frame.
+    {
+        auto key = [](int k) { phx_desktop_event e{}; e.kind = PHX_DEV_KEY_DOWN; e.key = k; phx_null_desktop_push(&e); };
+        key(PHX_KEY_F5); key(PHX_KEY_F6); key(PHX_KEY_F6);
+        phx_null_set_max_frames(10);
+        Config dc = cfg;
+        dc.width = 240; dc.height = 64;
+        App dev_app(dc);
+        install_devtools(dev_app);
+        DevGame dev;
+        const int dev_rc = dev_app.run(&dev);
+        const bool darker = (dev.panel_px & 0xFF) < (dev.clear_px & 0xFF);
+        std::printf("devtools results: rc=%d fixed=%d renders=%d overlay_px=%08x clear_px=%08x\n", dev_rc,
+                    dev.fixed_updates, dev.renders, unsigned(dev.panel_px), unsigned(dev.clear_px));
+        ok = ok && dev_rc == 0 && dev.fixed_updates == 2 && dev.renders == 10 && darker;
+    }
 
     // The component schema tools read: names, field types, and the C++ defaults.
     std::string schema;

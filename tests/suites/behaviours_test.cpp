@@ -108,6 +108,7 @@ struct BehaviourGame final : Game {
         flag = w.get<Transform>(level.find(w, "flag"_hash))->pos;
         start = beh.player() != ecs::kInvalid ? w.get<Transform>(beh.player())->pos : vec2{};
         started_ok = beh.player() == level.find(w, "player"_hash) && beh.respawn_point().x == start.x &&
+                     start.x == s_from_int(24) &&                 // the start override (Play from here)
                      w.has<PlatformerController>(beh.player()) && w.has<CameraFollow>(beh.player()) &&
                      w.has<Patrol>(slime) && w.has<Hazard>(slime) && w.get<Patrol>(slime)->range == 10;
     }
@@ -143,6 +144,7 @@ struct BehaviourGame final : Game {
 int main() {
     check(bake(), "bake the level with the real converters");
     for (uint32_t f = 0; f < 200; ++f) g_script[f] = f < 9 ? 0u : f == 9 ? kA : f < 140 ? kRight : 0u;
+    set_start_override(24, 36);                               // "Play from here": 4 px right of the spawn
     phx_null_set_button_script(g_script, 200);
     phx_null_set_max_frames(190);
 

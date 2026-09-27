@@ -177,6 +177,9 @@ public:
     Result<SpawnsView>  spawns(NameHash);
     Result<SoundDataView> sound(NameHash);
     Result<BlobView>    blob(NameHash);
+    // Is there an asset `name` of `type`? Quiet: unlike the typed getters, a name that exists
+    // only as another type logs nothing (for loaders that try one type, then another).
+    bool has(NameHash name, AssetType type) const;
 
     uint32_t asset_count() const { return total_assets_; }
     uint32_t mount_count() const { return mount_count_; }
@@ -196,6 +199,7 @@ private:
     };
 
     const TocEntry* find(NameHash, AssetType) const;
+    const TocEntry* lookup(NameHash, AssetType, bool& saw_other, uint16_t& other_type) const;
     // Resolve a TOC entry to the bytes of its blob, decompressing once into the arena and
     // caching the result if the asset is stored compressed (uncompressed stays zero-copy).
     const uint8_t* resolve(const TocEntry*);

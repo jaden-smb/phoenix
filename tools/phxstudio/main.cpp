@@ -262,6 +262,7 @@ struct StudioHost final : Host {
     std::vector<std::string> prefab_types() override;
     std::vector<std::string> files_with(const std::vector<std::string>& exts) override;
     bool run_make(const std::string& target) override;
+    bool play_from(int x, int y) override;
     void file_saved(const std::string& path_abs) override;
     std::vector<Diag> diagnostics_for(const std::string& path_abs) override;
 };
@@ -2630,6 +2631,10 @@ std::vector<std::string> StudioHost::prefab_types() {
             if (!read_text(abs, text)) continue;
             phxtool::BinDoc d;
             if (!phxtool::BinDoc::load(text, d)) continue;
+            // only prefab tables (a `type` column, what the level loader matches spawns by): a
+            // flow table's `name`s or a dialogue table's lines are not placeable
+            const size_t nf = d.name_field();
+            if (nf >= d.fields.size() || d.fields[nf].name != "type") continue;
             for (const std::string& n : d.name_column()) s->prefab_cache.push_back(n);
         }
     }
@@ -2640,6 +2645,22 @@ std::vector<std::string> StudioHost::files_with(const std::vector<std::string>& 
     for (const std::string& rel : s->ws.all_files())
         for (const std::string& e : exts) if (lower_ext(rel) == e) { out.push_back(rel); break; }
     return out;
+}
+bool StudioHost::play_from(int x, int y) {
+    if (!s->jobs || !s->has_project) return false;
+    for (size_t i = 0; i < s->launches.size(); ++i) {
+        const Launch& l = s->launches[i];
+        if (l.group != Group::Play || l.label != "Play") continue;
+        if (!s->launch_missing[i].empty()) { s->toast("Play needs " + s->launch_missing[i], Toast::Warn); return true; }
+        s->diags.clear();
+        s->jobs->enqueue(int(i), "Play from " + std::to_string(x) + "," + std::to_string(y),
+                         "export PHX_PLAY_FROM='" + std::to_string(x) + "," + std::to_string(y) + "'; " + l.command);
+        s->last_launch = int(i);
+        s->con_follow = true;
+        s->toast(fmt("playing from %d,%d - see the Run view", x, y), Toast::Good);
+        return true;
+    }
+    return false;
 }
 bool StudioHost::run_make(const std::string& target) {
     if (!s->jobs) return false;

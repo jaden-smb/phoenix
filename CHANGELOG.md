@@ -8,6 +8,59 @@ All notable changes to Phoenix are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **The game flow as data.** `phx::GameFlow` (`phx/runtime/flow.h`) runs a flow table
+  (`assets/flow.json`, one row per screen) with title, level and end screens:
+  - chaining by `next` or an Exit's target;
+  - lives, and a "gameover" screen;
+  - START to pause;
+  - a HUD of a counter and the lives left;
+  - counters totalled across levels;
+  - per-screen music.
+
+  Text is drawn with `phx::UI` from a font sheet, so it works on every target.
+  - **`Level` caches uploaded maps**, so revisiting or restarting a level reuses its tilemap slot
+    and tileset. Renderer slots are never freed, so repeated restarts no longer run out.
+  - **`ResourceCache::has(name, type)`** probes quietly: a sprite name that is a plain texture
+    (the door) no longer logs a warning.
+  - **The Studio's placeable spawn types** come only from tables with a `type` column, so a flow
+    table's screen names aren't offered.
+  - **The template is a complete small game:** a title screen with the project's name, the level
+    with 3 lives and a coin HUD, a door (stock `Exit`) to a "you win" ending, and a game over
+    that retries. It adds `font.png` and `door.png`, and `src/main.cpp` only runs the flow.
+  - The new `flow` suite covers it on both scalar tiers.
+- **A scene view that looks like the game, Play from here, and in-game developer tools.**
+  - The map editor draws each spawn as its prefab's sprite (the first frame of its "idle" clip),
+    centred where the level puts it, and selects it by that sprite. `spawnart.h` resolves type →
+    prefab `sprite` → the project's `.sprdef`/`.png`.
+  - **Play from here** (▶, Shift+F5 at the pointer) saves the map and runs the project's Play
+    with `PHX_PLAY_FROM=x,y`. The desktop entry passes it to `set_start_override`, and
+    `Behaviours::start` puts the player there.
+  - **Developer tools** (`phx/runtime/devtools.h`; desktop builds only, installed by the engine's
+    desktop entry): F1 overlay, F5 pause, F6 single step, F7/F8 or click to select, and a live
+    inspector of the selected entity. The inspector shows its Transform, Body, collider, animation
+    and every reflected component's fields. The overlay draws into the software framebuffer after
+    the frame.
+  - Supporting changes: `App::set_dev_hooks`, `Renderer::camera()`, `ComponentInfo::get`, and
+    `Level::active()`.
+- **Stock behaviours: common gameplay without code.** `phx/runtime/behaviours.h` provides these
+  as engine components a prefab lists in its `components` column and tunes with columns or
+  spawn properties:
+  - `PlatformerController`: run, jump, clips by name, jump sound; hazard tiles respawn it;
+  - `Patrol`: back and forth within a range, turning at walls;
+  - `Pickup`: counters and a sound;
+  - `Hazard`: sends the player back to the respawn point;
+  - `Checkpoint`: becomes the respawn point;
+  - `Exit`: reports a target level;
+  - `CameraFollow`: the camera follows it, clamped to the level.
+
+  One `Behaviours` system runs them in order: control, patrol, physics, contacts, animation,
+  camera. It exposes `counter()`, `hits()`, `exit()`, `respawn_point()` and `camera()`.
+  - `play_clip()` plays a clip by name. `SpriteRenderer` now carries its sprite's clip names.
+  - phxbin gains **`str64`**. A `components` list such as "PlatformerController CameraFollow"
+    (33 characters) no longer fits a `str32`, which silently cut it off.
+  - The **template** is now data only: player, coins and a new patrolling **slime** enemy are all
+    stock components, and `src/main.cpp` just loads the level and updates the behaviours.
+  - The new `behaviours` suite plays a data-only level with scripted input on both scalar tiers.
 - **Component reflection and a prefab inspector.** A game declares its components once with
   `PHX_COMPONENT(Enemy, PHX_FIELD(Enemy, range), …)` (`phx/ecs/reflect.h`). Supported field types
   are ints, bool, `scalar` and `PHX_FIELD_HASH` names. The registry is static, with no heap.
@@ -19,7 +72,6 @@ All notable changes to Phoenix are documented here. The format follows
   - **Studio:** the table editor's new COMPONENTS section ticks components on a prefab record,
     creating their typed columns at the C++ defaults.
   - `TableView::get_q16` and `SpawnsView::get_q16` read decimals exactly on both tiers.
-  - The template's coins carry a `Coin { value }` component.
   - **Tests:** `level`, `smoke` (schema export) and `editors` (the inspector model) cover it,
     and `project-check` now also checks the export.
 - **Per-spawn properties.** The map editor's spawn inspector has a PROPERTIES list (name, int,

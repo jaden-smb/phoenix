@@ -7,8 +7,10 @@ phx_add_module(runtime
     src/game_main.cpp
     src/level.cpp
     src/behaviours.cpp
+    src/flow.cpp
     src/component_schema.cpp
+    src/devtools.cpp
   DEPS
     phx_core phx_memory phx_platform phx_render phx_ecs phx_input phx_audio phx_resource
-    phx_physics phx_anim
+    phx_physics phx_anim phx_ui
 )

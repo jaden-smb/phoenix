@@ -32,6 +32,7 @@
 #include "../../tools/phxstudio/host.h"
 #include "../../tools/phxstudio/projectdoc.h"
 #include "../../tools/phxstudio/components.h"
+#include "../../tools/phxstudio/spawnart.h"
 
 #include <cstdio>
 #include <cstring>
@@ -872,6 +873,33 @@ PHX_TEST(project_launch_command_and_discovery) {
           std_l[4].group == "console" && std_l[4].command.find("play-psp PROJECT=") != std::string::npos);
 }
 
+PHX_TEST(map_editor_draws_spawns_as_their_prefab_sprites) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const std::string dir = canon_path("build/e_spawnart");
+    fs::remove_all(dir, ec);
+    std::string err;
+    CHECK(create_project(dir, "Art Check", &err));
+    std::vector<std::string> files;                          // root-relative, like the Studio's list
+    for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+        if (it->is_regular_file(ec)) files.push_back(fs::relative(it->path(), dir, ec).generic_string());
+    const std::map<std::string, SpawnArt> art = resolve_spawn_art(dir, files);
+    CHECK(art.size() == 4 && art.count("player") && art.count("coin") && art.count("slime") && art.count("door"));
+    if (art.count("door")) CHECK(art.at("door").w == 16 && art.at("door").h == 16);   // a plain PNG: the whole image
+    if (art.count("player")) {
+        const SpawnArt& p = art.at("player");                // hero.sprdef: 16x16 frames, "idle" starts at 0
+        CHECK(p.sheet == dir + "/assets/hero.png" && p.sx == 0 && p.sy == 0 && p.w == 16 && p.h == 16);
+    }
+    if (art.count("coin")) CHECK(art.at("coin").sheet == dir + "/assets/coin.png" && art.at("coin").w == 8);
+    // a prefab whose sprite is a plain PNG draws the whole image; a type with no sprite has no art
+    const std::string pj = "{ \"struct\":\"P\", \"fields\":[{\"name\":\"type\",\"type\":\"str16\"},{\"name\":\"sprite\",\"type\":\"str16\"}],"
+                           " \"records\":[{\"type\":\"crate\",\"sprite\":\"tiles\"},{\"type\":\"ghost\",\"sprite\":\"\"}] }";
+    if (FILE* f = std::fopen((dir + "/assets/more.json").c_str(), "wb")) { std::fwrite(pj.data(), 1, pj.size(), f); std::fclose(f); }
+    files.push_back("assets/more.json");
+    const std::map<std::string, SpawnArt> art2 = resolve_spawn_art(dir, files);
+    CHECK(art2.count("crate") && art2.at("crate").w == 64 && art2.at("crate").h == 8 && !art2.count("ghost"));
+}
+
 PHX_TEST(prefab_inspector_applies_reflected_components) {
     // what component_schema.cpp writes for a game's PHX_COMPONENTs
     const char* json = "{ \"components\": [\n"
@@ -944,7 +972,7 @@ PHX_TEST(new_project_template_is_complete_and_bakeable) {
         if (f) { char b[65536]; size_t n; while ((n = std::fread(b, 1, sizeof(b), f)) > 0) tmj.append(b, n); std::fclose(f); }
     }
     phxtool::TiledMap tm;
-    CHECK(phxtool::tiled_load(tmj, tm, &err) && tm.tileset == "tiles" && tm.layers.size() == 2 && tm.spawns.size() == 5);
+    CHECK(phxtool::tiled_load(tmj, tm, &err) && tm.tileset == "tiles" && tm.layers.size() == 2 && tm.spawns.size() == 6);
     {   // the prefab table names every spawn type the level places, and the map editor offers them
         std::string pj;
         FILE* f = std::fopen((dir + "/assets/prefabs.json").c_str(), "rb");
@@ -952,7 +980,17 @@ PHX_TEST(new_project_template_is_complete_and_bakeable) {
         phxtool::BinDoc pd;
         CHECK(phxtool::BinDoc::load(pj, pd));
         const std::vector<std::string> types = pd.name_column();
-        CHECK(types.size() == 3 && types[0] == "player" && types[1] == "coin" && types[2] == "slime");
+        CHECK(types.size() == 4 && types[0] == "player" && types[1] == "coin" && types[2] == "slime" && types[3] == "door");
+        // the game flow: title -> level1 (the map) -> end, with a game over that retries
+        std::string fj;
+        if (FILE* ff = std::fopen((dir + "/assets/flow.json").c_str(), "rb")) {
+            char b[8192]; size_t n; while ((n = std::fread(b, 1, sizeof(b), ff)) > 0) fj.append(b, n); std::fclose(ff);
+        }
+        phxtool::BinDoc fd;
+        CHECK(phxtool::BinDoc::load(fj, fd) && fd.records.size() == 4 && fd.str_cell(0, 0) == "title" &&
+              fd.str_cell(1, 2) == "level" && fd.str_cell(0, 3) == "Test Quest|a Phoenix game");
+        CHECK(fs::exists(dir + "/assets/font.png") && fs::exists(dir + "/assets/door.png") &&
+              main_cpp.find("flow.update(app, dt)") != std::string::npos);
         for (const auto& s : tm.spawns) CHECK(std::find(types.begin(), types.end(), s.type) != types.end());
         phxtool::SprDef cd, sd2;
         CHECK(phxtool::load_sprdef(dir + "/assets/coin.sprdef", cd) && cd.fw == 8 && cd.clips.size() == 1);
@@ -968,7 +1006,7 @@ PHX_TEST(new_project_template_is_complete_and_bakeable) {
         uint32_t rate = 0;
         CHECK(phxtool::wav_decode(reinterpret_cast<const uint8_t*>(wav.data()), wav.size(), mono, rate) &&
               rate == 22050 && mono.size() == 22050u * 18 / 100);
-        CHECK(fs::exists(dir + "/assets/jump.wav") && main_cpp.find("behaviours.update(app, dt)") != std::string::npos);
+        CHECK(fs::exists(dir + "/assets/jump.wav") && fs::exists(dir + "/assets/coin.wav"));
     }
     phxtool::TmapDoc md;
     CHECK(phxtool::TmapDoc::load(tmj, md, &err) && md.tileset_image == "tiles.png" && md.has_tile_flags());

@@ -34,9 +34,20 @@ struct Game {
     virtual void on_stop(App&)                 {}
 };
 
+// Developer tools a desktop entry may install (phx/runtime/devtools.h). Both hooks are optional
+// and never set on a console build.
+struct DevHooks {
+    void* user = nullptr;
+    // Before the frame's fixed steps: returns how many to run (0 = paused, 1 = a single step).
+    int  (*frame)(void* user, App& app, int steps) = nullptr;
+    // After on_render (the frame is drawn), before present: draw over it.
+    void (*overlay)(void* user, App& app) = nullptr;
+};
+
 class App {
 public:
     explicit App(const Config& cfg) : cfg_(cfg) {}
+    void set_dev_hooks(const DevHooks& h) { dev_ = h; }
 
     int  run(Game* game);          // boots subsystems, runs the loop, tears down; returns exit code
     void request_quit() { quit_ = true; }
@@ -66,6 +77,7 @@ private:
     ecs::World*          world_  = nullptr;
     Renderer*            render_ = nullptr;
     GameAudio            audio_;
+    DevHooks             dev_    {};
     InputState           input_  {};
     StepAccumulator      acc_;
     FrameProfile         prof_   {};

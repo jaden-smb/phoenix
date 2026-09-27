@@ -139,7 +139,8 @@ APP_SRC := engine/core/src/assert.cpp \
            engine/runtime/src/game_main.cpp
 
 # The smoke binary: the loop + its own main.
-SMOKE_SRC := $(APP_SRC) engine/audio/src/mixer.cpp engine/runtime/src/component_schema.cpp tests/suites/smoke_app.cpp
+SMOKE_SRC := $(APP_SRC) engine/audio/src/mixer.cpp engine/runtime/src/component_schema.cpp \
+             engine/runtime/src/devtools.cpp tests/suites/smoke_app.cpp
 SMOKE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(SMOKE_SRC))
 
 # The playable binary: full stack (memory+ecs+input+render+loop) driven by scripted input.
@@ -468,6 +469,13 @@ BEHAV_SRC := $(APP_SRC) engine/resource/src/cache.cpp engine/runtime/src/level.c
 BEHAV_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(BEHAV_SRC))
 BEHAV     := $(BUILD)/phx_behaviours
 
+# The flow suite: the game flow (phx/runtime/flow.h) — screens, levels, lives, pause, HUD — from data.
+FLOW_SRC := $(APP_SRC) engine/resource/src/cache.cpp engine/runtime/src/level.cpp \
+            engine/runtime/src/behaviours.cpp engine/runtime/src/flow.cpp engine/audio/src/mixer.cpp \
+            tests/suites/flow_test.cpp
+FLOW_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(FLOW_SRC))
+FLOW     := $(BUILD)/phx_flow
+
 EDITORS_SRC := $(APP_SRC) tests/suites/editors_test.cpp
 EDITORS_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(EDITORS_SRC))
 EDITORS     := $(BUILD)/phx_editors
@@ -497,16 +505,16 @@ GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/
             $(patsubst tests/suites/render_test.cpp,tests/suites/gu_test.cpp,$(RENDER_SRC)))
 GU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(GU_SRC))
 
-.PHONY: studio test smoke render ppu gu playable physics level behaviours anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl miracle miracle-headless miracle-test gba-miracle-ppu size-gate-miracle tinyllm tinyllm-sdl tinyllm-test tinyllm-fixture tinyllm-model gba-tinyllm-ppu size-gate-tinyllm sdl gl sdl-verify gl-verify audio-verify game-audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline editors tools game game-check game-assets play game-src-check game-console-check game-gba play-gba game-psp play-psp project-check project-run project-schema phxnew size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
+.PHONY: studio test smoke render ppu gu playable physics level behaviours flow anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl miracle miracle-headless miracle-test gba-miracle-ppu size-gate-miracle tinyllm tinyllm-sdl tinyllm-test tinyllm-fixture tinyllm-model gba-tinyllm-ppu size-gate-tinyllm sdl gl sdl-verify gl-verify audio-verify game-audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline editors tools game game-check game-assets play game-src-check game-console-check game-gba play-gba game-psp play-psp project-check project-run project-schema phxnew size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
 
 # Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstones + audio + resource + dep gate.
-check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test audio texcache png sprite tiled resource phxpack pipeline editors level behaviours tools project-check depcheck
+check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test audio texcache png sprite tiled resource phxpack pipeline editors level behaviours flow tools project-check depcheck
 
 # --- M7 release gates --------------------------------------------------------------------------
 # Determinism gate: the SAME suites under scalar=float (pc) and scalar=fixed16 (gba_sim) must
 # print identical outcomes AND render the byte-identical frame. Cheap to run: the per-tier
 # object dirs mean the second tier is mostly relinks. This is a named release gate (docs/09 §5).
-DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test level behaviours
+DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test level behaviours flow
 determinism:
 	@echo "determinism gate: pc (scalar=float) vs gba_sim (scalar=fixed16)"
 	@$(MAKE) -s $(DET_SUITES) TIER=pc      | grep -aE "PASS|FAIL" > $(BUILD)/det-pc.log
@@ -731,8 +739,8 @@ GAME_HAS_MAIN = $(shell grep -lE '^[[:space:]]*int[[:space:]]+main[[:space:]]*[$
 PUBLIC_INCLUDES := $(addprefix -I,$(wildcard engine/*/include))
 GAME_ENGINE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) \
                    engine/resource/src/cache.cpp engine/audio/src/mixer.cpp engine/audio/src/stream.cpp \
-                   engine/runtime/src/level.cpp engine/runtime/src/behaviours.cpp \
-                   engine/runtime/src/component_schema.cpp)
+                   engine/runtime/src/level.cpp engine/runtime/src/behaviours.cpp engine/runtime/src/flow.cpp \
+                   engine/runtime/src/component_schema.cpp engine/runtime/src/devtools.cpp)
 GAME_ENTRY_OBJ  := $(HOSTOBJ)/engine/runtime/src/entry/desktop_main.o
 GAME_NULL_OBJ   := $(HOSTOBJ)/engine/platform/src/null/null_platform.o
 
@@ -1338,7 +1346,7 @@ GAME_CONSOLE_ENGINE := engine/core/src/assert.cpp engine/core/src/fixed.cpp engi
                        engine/render/src/renderer.cpp engine/physics/src/physics.cpp \
                        engine/anim/src/anim.cpp engine/scene/src/scene.cpp engine/ui/src/ui.cpp \
                        engine/runtime/src/app.cpp engine/runtime/src/game_main.cpp engine/runtime/src/level.cpp \
-                       engine/runtime/src/behaviours.cpp \
+                       engine/runtime/src/behaviours.cpp engine/runtime/src/flow.cpp \
                        engine/resource/src/cache.cpp engine/audio/src/mixer.cpp
 GAME_GBA_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GAME_CONSOLE_ENGINE) engine/render/src/gba/gba_ppu.cpp \
                   engine/platform/src/gba/gba_platform.cpp engine/runtime/src/entry/gba_main.cpp)
@@ -1509,6 +1517,9 @@ level: $(LEVEL)
 
 behaviours: $(BEHAV)
 	@./$(BEHAV)
+
+flow: $(FLOW)
+	@./$(FLOW)
 
 # Studio / editor document models + widget kit, headless (no SDL, no display).
 editors: $(EDITORS)
@@ -1748,6 +1759,10 @@ $(BEHAV): $(BEHAV_OBJ)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(BEHAV_OBJ) -o $@
 
+$(FLOW): $(FLOW_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(FLOW_OBJ) -o $@
+
 $(HOSTOBJ)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
@@ -1763,7 +1778,7 @@ $(TIERSTAMP):
 HOST_BINS := $(BIN) $(SMOKE) $(RENDER) $(PPU) $(GU) $(PLAYABLE) $(PHYSICS) $(ANIM) $(SCENE) \
              $(UI) $(PLATFORMER) $(PLATAPP) $(EMBERWING) $(EMBERWING_PPU) $(EWAPP) \
              $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) \
-             $(RESOURCE) $(PIPELINE) $(LEVEL) $(BEHAV) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) \
+             $(RESOURCE) $(PIPELINE) $(LEVEL) $(BEHAV) $(FLOW) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) \
              $(PLATBAKE) $(EWBAKE)
 $(HOST_BINS): $(TIERSTAMP)
 

@@ -41,6 +41,12 @@ phoenix/
 │   │   │                         target profiles, run_game: the engine-owned entry for game projects)
 │   │   │                         · audio.h (GameAudio = App::audio(): mixer + queue + the seam's
 │   │   │                         device, started on first play; headless mix where there's none)
+│   │   │                         · flow.h (GameFlow: the flow table's screens — title, levels,
+│   │   │                         lives, pause, HUD, end — run from data)
+│   │   │                         · devtools.h (desktop: F1 overlay, F5 pause, F6 step, live
+│   │   │                         entity inspector over the reflected components)
+│   │   │                         · behaviours.h (stock components: PlatformerController, Patrol,
+│   │   │                         Pickup, Hazard, Checkpoint, Exit, CameraFollow + the Behaviours system)
 │   │   │                         · level.h (Level: tilemap + collision grid + spawns -> entities
 │   │   │                         from the prefab table; SpriteRenderer, PrefabRef, draw_sprites)
 │   │   └── src/                  app.cpp (boot -> loop w/ per-phase profiling -> teardown) ·
@@ -97,7 +103,8 @@ phoenix/
 │   │                             its Windows half: sh.exe in a Job Object) · main.cpp = shell ·
 │   │                             new_main.cpp = `phxnew DIR [NAME]` (File > New project, headless) ·
 │   │                             components.h = the game's reflected components (build/components.json)
-│   │                             + the table editor's prefab inspector logic
+│   │                             + the table editor's prefab inspector logic · spawnart.h = spawn type ->
+│   │                             its prefab sprite's first frame (the map editor draws spawns with it)
 │   └── common/                   depcheck.py (layering gate) · size_gate.py (GBA budget gate) ·
 │                                 bin2s.py (portable asset embedding) · debug_font.h (shared tool font) ·
 │                                 ascii_font.h (full-ASCII 5x7 tool font) · twk.h (+ twk_geom.h,

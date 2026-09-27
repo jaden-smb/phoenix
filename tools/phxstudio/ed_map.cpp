@@ -18,12 +18,14 @@
 #include "../phxtmap/editor.h"
 #include "../phxentity/editor.h"
 #include "pixeldoc.h"
+#include "spawnart.h"               // spawn type -> its prefab sprite's first frame
 
 #include "phx/render/renderer.h"
 #include "phx/resource/bundle.h"   // kTileFlag*
 
 #include <algorithm>
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -115,6 +117,34 @@ public:
         for (Comp& c : comps_) r.unload_texture(c.tex);
         comps_.clear();
         r.unload_texture(col_.tex); col_ = Comp{};
+        for (auto& kv : art_tex_) r.unload_texture(kv.second.tex);
+        art_tex_.clear();
+    }
+
+    // ---- spawn art: each spawn drawn as its prefab's sprite (spawnart.h) ----
+    struct ArtTex { TextureId tex = kNoTexture; int64_t stamp = -1; int w = 0, h = 0; std::vector<uint32_t> px; };
+    std::map<std::string, phxstudio::SpawnArt> art_;      // spawn type -> frame
+    std::map<std::string, ArtTex> art_tex_;               // sheet path -> texture (pixels kept alive)
+    uint64_t art_checked_ = ~uint64_t(0);
+
+    void refresh_art(Host& h) {
+        if (art_checked_ != ~uint64_t(0) && h.ticks() - art_checked_ < 90) return;   // every ~1.5 s
+        art_checked_ = h.ticks();
+        art_ = phxstudio::resolve_spawn_art(h.root(), h.files_with({ ".json", ".sprdef", ".png" }));
+        for (const auto& kv : art_) {
+            ArtTex& t = art_tex_[kv.second.sheet];
+            const int64_t st = file_stamp(kv.second.sheet);
+            if (st == t.stamp) continue;
+            t.stamp = st;
+            phxstudio::PixelDoc pd;
+            if (!phxstudio::PixelDoc::load_png(kv.second.sheet, pd)) continue;
+            h.renderer().unload_texture(t.tex);
+            t.px = std::move(pd.px); t.w = pd.w; t.h = pd.h;
+            phx::TextureDesc d{};
+            d.pixels = t.px.data(); d.size = uint32_t(t.px.size() * 4);
+            d.width = uint16_t(t.w); d.height = uint16_t(t.h);
+            t.tex = h.renderer().load_texture(d);
+        }
     }
     bool undo() override { if (!doc.undo()) return false; after_structure_change(); return true; }
     bool redo() override { if (!doc.redo()) return false; after_structure_change(); return true; }
@@ -409,6 +439,9 @@ private:
         toggle(kIconFlag, spawns_, "Show entity spawns");
         toggle(kIconEyeOff, dim_, "Dim every layer except the one you paint");
         toggle(kIconLayers, parallax_, "Parallax preview: each layer scrolls by its factor as you pan (painting is off while on)");
+        if (g.icon_button(row.take(15), kIconPlay, "Play from here: save, build and run the game with the player at the "
+                                                   "centre of the view (Shift+F5: at the pointer)"))
+            play_here(h, view_cx_, view_cy_);
         if (g.icon_button(row.take_right(14), kIconZoomIn, "Zoom in (Ctrl+wheel)")) cv_.zoom_at(r.x + r.w / 2, r.y + 100, Canvas::step_zoom(cv_.zoom, 1));
         const std::string z = fmt("%dx", cv_.zoom);
         g.text(row.take_right(Gui::text_w(z)).x, r.y + 4, z, g.th.dim);
@@ -416,9 +449,24 @@ private:
         if (g.button(row.take_right(24), "fit", Btn{ false, true, false, 0, "Fit the whole map (F)" })) cv_.fitted = false;
     }
 
+    // "Play from here": save the map, then the project's Play with the player at map pixel (x, y).
+    int view_cx_ = 0, view_cy_ = 0;          // the map pixel at the centre of the view (draw_canvas)
+    void play_here(Host& h, int x, int y) {
+        x = std::max(0, std::min(x, doc.width * doc.tile_w - 1));
+        y = std::max(0, std::min(y, doc.height * doc.tile_h - 1));
+        std::string err;
+        if (doc.dirty && !save(h, &err)) { h.toast("cannot save the map: " + err, Toast::Bad); return; }
+        if (!h.play_from(x, y)) h.toast("Play from here needs a project with a Play launch", Toast::Warn);
+    }
+
     void keys(Host& h) {
         Gui& g = h.gui();
         if (g.text_focus() || h.modal_open()) return;
+        if (g.hotkey(PHX_KEY_F5, kShift)) {        // (plain F5 is the Studio's "run the last launch")
+            const int px = cv_.to_cx(g.mx()), py = cv_.to_cy(g.my());
+            const bool on_map = px >= 0 && py >= 0 && px < doc.width * doc.tile_w && py < doc.height * doc.tile_h;
+            play_here(h, on_map ? px : view_cx_, on_map ? py : view_cy_);
+        }
         for (const MToolInfo& t : kMTools) if (g.hotkey(t.key)) tool_ = t.t;
         if (g.hotkey(PHX_KEY_TAB)) layer_ = (layer_ + 1) % int(doc.layers.size());
         if (g.hotkey(PHX_KEY_TAB, kShift)) layer_ = (layer_ + int(doc.layers.size()) - 1) % int(doc.layers.size());
@@ -457,6 +505,8 @@ private:
         g.push_clip(area);
         cv_.navigate(g, area, g.id("pan"), tool_ == MTool::Hand);
         const Rect map_r{ cv_.ox, cv_.oy, mw * cv_.zoom, mh * cv_.zoom };
+        view_cx_ = cv_.to_cx(area.x + area.w / 2);
+        view_cy_ = cv_.to_cy(area.y + area.h / 2);
         g.rect(intersect(map_r, area), rgba(34, 36, 50), kSubFill);
         if (comp_too_big_) {
             g.text(area.x + 10, area.y + 10, "map too large to preview as layer images (> 64 MB); editing still works", g.th.warn);
@@ -486,7 +536,7 @@ private:
             g.dashed(sr, g.th.text, rgba(20, 20, 30), int(g.frame / 6), kSubTop);
         }
         // spawns
-        if (spawns_) draw_spawns(g, map_r);
+        if (spawns_) draw_spawns(h, g, map_r);
 
         // hover cell + brush preview
         hx_ = hy_ = -1;
@@ -524,15 +574,29 @@ private:
         if (tool_ != MTool::Hand) use_tool(h, area, map_r);
     }
 
-    void draw_spawns(Gui& g, const Rect& map_r) {
+    void draw_spawns(Host& h, Gui& g, const Rect& map_r) {
+        refresh_art(h);
         for (size_t i = 0; i < doc.spawns.size(); ++i) {
             const TiledSpawn& s = doc.spawns[i];
             const int w = (s.w > 0 ? s.w : doc.tile_w) * cv_.zoom, hh = (s.h > 0 ? s.h : doc.tile_h) * cv_.zoom;
-            const Rect sr{ map_r.x + s.x * cv_.zoom, map_r.y + s.y * cv_.zoom, std::max(3, w), std::max(3, hh) };
+            Rect sr{ map_r.x + s.x * cv_.zoom, map_r.y + s.y * cv_.zoom, std::max(3, w), std::max(3, hh) };
             const bool sel = int(i) == spawn_sel_;
             const Rgba c = type_colour(s.type);
-            g.stipple(sr, c, kSubOver);
-            g.frame_rect(sr, sel ? g.th.text : c, kSubText);
+            // As the game draws it: its prefab sprite's first frame, centred where the level puts
+            // the entity (the spawn's centre); a type with no sprite keeps the coloured marker.
+            const auto art = art_.find(s.type);
+            const auto tex = art != art_.end() ? art_tex_.find(art->second.sheet) : art_tex_.end();
+            if (tex != art_tex_.end() && tex->second.tex != kNoTexture) {
+                const phxstudio::SpawnArt& a = art->second;
+                const int fw = a.w ? a.w : tex->second.w, fh = a.h ? a.h : tex->second.h;
+                const int cx = s.x + s.w / 2, cy = s.y + s.h / 2;
+                sr = Rect{ map_r.x + (cx - fw / 2) * cv_.zoom, map_r.y + (cy - fh / 2) * cv_.zoom, fw * cv_.zoom, fh * cv_.zoom };
+                g.image(sr, tex->second.tex, a.sx, a.sy, fw, fh, rgba(255, 255, 255), uint8_t(kSubImage + kSubImageSpan - 1));
+                if (sel) g.frame_rect(sr, g.th.text, kSubText);
+            } else {
+                g.stipple(sr, c, kSubOver);
+                g.frame_rect(sr, sel ? g.th.text : c, kSubText);
+            }
             if (sel) g.frame_rect(Rect{ sr.x - 1, sr.y - 1, sr.w + 2, sr.h + 2 }, g.th.accent, kSubTop);
             if (cv_.zoom >= 2 || sel) {
                 const std::string label = s.type.empty() ? s.name : s.type;
@@ -542,6 +606,22 @@ private:
             }
         }
     }
+    // The topmost spawn under map pixel (px, py): its drawn sprite when it has one, else the
+    // doc's marker box.
+    int spawn_hit(int px, int py) const {
+        for (size_t i = doc.spawns.size(); i-- > 0; ) {
+            const TiledSpawn& s = doc.spawns[i];
+            const auto art = art_.find(s.type);
+            if (art == art_.end()) continue;
+            const auto tex = art_tex_.find(art->second.sheet);
+            if (tex == art_tex_.end() || tex->second.tex == kNoTexture) continue;
+            const int fw = art->second.w ? art->second.w : tex->second.w, fh = art->second.h ? art->second.h : tex->second.h;
+            const int x0 = s.x + s.w / 2 - fw / 2, y0 = s.y + s.h / 2 - fh / 2;
+            if (px >= x0 && py >= y0 && px < x0 + fw && py < y0 + fh) return int(i);
+        }
+        return doc.spawn_at(px, py);
+    }
+
     static Rgba type_colour(const std::string& t) {
         uint32_t hsh = 2166136261u;
         for (char c : t) { hsh ^= uint8_t(c); hsh *= 16777619u; }
@@ -625,7 +705,7 @@ private:
         case MTool::Spawn: {
             const bool snap = !(g.in->mods & kShift);
             if (first) {
-                const int hit = doc.spawn_at(px, py);
+                const int hit = spawn_hit(px, py);
                 if (hit >= 0) {
                     spawn_sel_ = hit;
                     spawn_dx_ = px - doc.spawns[size_t(hit)].x; spawn_dy_ = py - doc.spawns[size_t(hit)].y;

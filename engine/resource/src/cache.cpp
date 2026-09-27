@@ -154,10 +154,29 @@ const uint8_t* ResourceCache::resolve(const TocEntry* e) {
     return nullptr;
 }
 
+bool ResourceCache::has(NameHash name, AssetType type) const {
+    uint16_t other = 0;
+    bool saw = false;
+    return lookup(name, type, saw, other) != nullptr;
+}
+
 const TocEntry* ResourceCache::find(NameHash name, AssetType type) const {
-    // search mounts in order; TOC within a mount is sorted by name_hash -> binary search.
     uint16_t other_type = 0;   // a hash hit under a different asset type (kept for the miss log)
     bool     saw_other  = false;
+    if (const TocEntry* e = lookup(name, type, saw_other, other_type)) return e;
+    if (saw_other)
+        // The name exists but only as another type — almost always a call-site bug
+        // (texture("level") for a tilemap asset), so say so instead of a bare miss.
+        PHX_LOG_WARN("resource: asset 0x%08x exists but as type %u, not the requested %u",
+                     uint32_t(name), unsigned(other_type), unsigned(type));
+    else
+        PHX_LOG_DEBUG("resource: asset 0x%08x (type %u) not found in %u mounted bundle(s)",
+                      uint32_t(name), unsigned(type), mount_count_);
+    return nullptr;
+}
+
+const TocEntry* ResourceCache::lookup(NameHash name, AssetType type, bool& saw_other, uint16_t& other_type) const {
+    // search mounts in order; TOC within a mount is sorted by name_hash -> binary search.
     for (uint32_t mi = 0; mi < mount_count_; ++mi) {
         const Mounted& m = mounts_[mi];
         uint32_t lo = 0, hi = m.count;
@@ -179,15 +198,7 @@ const TocEntry* ResourceCache::find(NameHash name, AssetType type) const {
             }
         }
     }
-    if (saw_other)
-        // The name exists but only as another type — almost always a call-site bug
-        // (texture("level") for a tilemap asset), so say so instead of a bare miss.
-        PHX_LOG_WARN("resource: asset 0x%08x exists but as type %u, not the requested %u",
-                     uint32_t(name), unsigned(other_type), unsigned(type));
-    else
-        PHX_LOG_DEBUG("resource: asset 0x%08x (type %u) not found in %u mounted bundle(s)",
-                      uint32_t(name), unsigned(type), mount_count_);
-    return nullptr;
+    return nullptr;                                         // silent: find() reports the miss
 }
 
 Result<TextureView> ResourceCache::texture(NameHash name) {
