@@ -796,6 +796,7 @@ entity: $(ENTITY_OBJ) $(SDL_PLATFORM_OBJ)
 # models are unit-tested in the editors + pipeline suites. Needs SDL2 + a display.
 STUDIO_TOOL_SRC := tools/phxstudio/main.cpp tools/phxstudio/workspace.cpp tools/phxstudio/ed_code.cpp \
                    tools/phxstudio/ed_sprite.cpp tools/phxstudio/ed_map.cpp tools/phxstudio/ed_table.cpp \
+                   tools/phxstudio/ed_sfx.cpp tools/phxstudio/ed_song.cpp tools/phxstudio/ed_font.cpp \
                    tools/phxstudio/winjob.cpp
 STUDIO_ENGINE   := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) engine/audio/src/mixer.cpp
 STUDIO_OBJ      := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(STUDIO_ENGINE) $(STUDIO_TOOL_SRC))

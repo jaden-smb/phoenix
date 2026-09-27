@@ -126,3 +126,44 @@ PHX_TEST(anim_state_machine_transitions) {
     CHECK(sm.set_trigger(a, 2));               // run --STOP--> idle
     CHECK_EQ(a.clip, 0u);
 }
+
+PHX_TEST(anim_edges_any_clip_and_priority) {
+    const AnimEdge kEdges[3] = {
+        { kAnyClip, 2, "jump"_hash },          // from anywhere
+        { 1,        0, "jump"_hash },          // ...but run has its own edge, which wins
+        { kAnyClip, 1, "move"_hash },
+    };
+    Animator a = make_animator(0);
+    a.edges = Span<const AnimEdge>{ kEdges, 3 };
+    CHECK(a.trigger("jump"_hash));             // idle: only the any-clip edge matches
+    CHECK_EQ(a.clip, 2u);
+    CHECK(a.trigger("move"_hash));
+    CHECK_EQ(a.clip, 1u);
+    a.frame = 2;
+    CHECK(!a.trigger("move"_hash));            // any-clip edge into the playing clip: no restart
+    CHECK_EQ(a.frame, 2u);
+    CHECK(a.trigger("jump"_hash));             // run's own edge beats the any-clip one
+    CHECK_EQ(a.clip, 0u);
+    CHECK(!a.trigger("nope"_hash));
+}
+
+PHX_TEST(anim_done_trigger_fires_when_a_clip_ends) {
+    World* w = fresh_world();
+    AnimationSystem sys;
+    // clip 0: one frame, non-looping, 10 fps -> finishes after 0.1 s; clip 1: loops
+    static const AnimClip kOneShot[2] = { { 0, 1, 10, false }, { 1, 2, 10, true } };
+    static const AnimEdge kDone[1] = { { 0, 1, kAnimDone } };
+    Animator an{};
+    an.clips = Span<const AnimClip>{ kOneShot, 2 };
+    an.edges = Span<const AnimEdge>{ kDone, 1 };
+    an.sheet = SpriteSheet{ 8, 8, 4 };
+    Entity e = w->spawn();
+    w->add<Animator>(e, an);
+    for (int i = 0; i < 3; ++i) sys.tick(*w, kDt);
+    CHECK_EQ(w->get<Animator>(e)->clip, 0u);   // still in the one-frame clip
+    for (int i = 0; i < 8; ++i) sys.tick(*w, kDt);
+    Animator* a = w->get<Animator>(e);
+    CHECK_EQ(a->clip, 1u);                     // "done" took the edge
+    CHECK(!a->finished);
+    CHECK_EQ(a->cur_sx, 8);                    // and the rect follows the new clip
+}

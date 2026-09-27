@@ -546,7 +546,7 @@ inline void scan_names_in(const std::string& dir, const std::vector<std::string>
             std::string text;
             if (read_text(p.string(), text)) book.add_literals(text);
         }
-        if (ext == ".png" || ext == ".wav" || ext == ".tmj" || ext == ".json" || ext == ".sprdef")
+        if (ext == ".png" || ext == ".wav" || ext == ".sfx" || ext == ".song" || ext == ".font" || ext == ".fnt" || ext == ".tmj" || ext == ".json" || ext == ".sprdef")
             book.add(p.stem().string());
         const std::string n = p.filename().string();
         if (n.size() > 13 && n.compare(n.size() - 13, 13, ".manifest.txt") == 0) {
@@ -574,7 +574,7 @@ inline void scan_names(const std::string& root, NameBook& book) {
                 std::string text;
                 if (read_text(p.string(), text)) book.add_literals(text);
             }
-            if (ext == ".png" || ext == ".wav" || ext == ".tmj" || ext == ".json" || ext == ".sprdef")
+            if (ext == ".png" || ext == ".wav" || ext == ".sfx" || ext == ".song" || ext == ".font" || ext == ".fnt" || ext == ".tmj" || ext == ".json" || ext == ".sprdef")
                 book.add(p.stem().string());
         }
     }
@@ -724,7 +724,7 @@ struct TexView {
 };
 
 inline bool view_texture(const AssetEntry& a, TexView& v) {
-    if (a.type != phx::AssetType::Texture && a.type != phx::AssetType::Font) return false;
+    if (a.type != phx::AssetType::Texture) return false;
     if (a.data.size() < sizeof(phx::TextureBlobHeader)) return false;
     phx::TextureBlobHeader th{};
     std::memcpy(&th, a.data.data(), sizeof(th));
@@ -830,6 +830,7 @@ struct SpriteInfo {
     phx::NameHash texture = 0;
     uint16_t frame_w = 0, frame_h = 0, cols = 0;
     std::vector<phx::SpriteClipDef> clips;
+    std::vector<phx::SpriteTransDef> trans;   // the transitions trailer (bundle.h), if any
 };
 
 inline bool view_sprite(const AssetEntry& a, SpriteInfo& v) {
@@ -842,7 +843,41 @@ inline bool view_sprite(const AssetEntry& a, SpriteInfo& v) {
     v.clips.resize(sh.clip_count);
     if (sh.clip_count)
         std::memcpy(v.clips.data(), a.data.data() + sizeof(sh), v.clips.size() * sizeof(phx::SpriteClipDef));
+    const size_t end = sizeof(sh) + v.clips.size() * sizeof(phx::SpriteClipDef);
+    if (end + 8 <= a.data.size()) {
+        uint32_t hdr[2];
+        std::memcpy(hdr, a.data.data() + end, sizeof(hdr));
+        if (hdr[0] == phx::kSpriteTransMagic && end + 8 + size_t(hdr[1]) * sizeof(phx::SpriteTransDef) <= a.data.size()) {
+            v.trans.resize(hdr[1]);
+            if (hdr[1]) std::memcpy(v.trans.data(), a.data.data() + end + 8, v.trans.size() * sizeof(phx::SpriteTransDef));
+        }
+    }
     return v.frame_w > 0 && v.frame_h > 0;
+}
+
+// A Font asset: the glyph table (bundle.h FontBlobHeader + FontGlyphDef) of its atlas texture.
+struct FontInfo {
+    phx::FontBlobHeader hdr{};
+    std::vector<phx::FontGlyphDef> glyphs;
+};
+inline bool view_font(const AssetEntry& a, FontInfo& v) {
+    if (a.type != phx::AssetType::Font || a.data.size() < sizeof(phx::FontBlobHeader)) return false;
+    v = FontInfo{};
+    std::memcpy(&v.hdr, a.data.data(), sizeof(v.hdr));
+    if (sizeof(v.hdr) + size_t(v.hdr.glyph_count) * sizeof(phx::FontGlyphDef) > a.data.size()) return false;
+    v.glyphs.resize(v.hdr.glyph_count);
+    if (v.hdr.glyph_count)
+        std::memcpy(v.glyphs.data(), a.data.data() + sizeof(v.hdr), v.glyphs.size() * sizeof(phx::FontGlyphDef));
+    return true;
+}
+// The pen width of `s` in font `f` (UI::text_width's rule: characters past the table use the header advance).
+inline int font_text_width(const FontInfo& f, const std::string& s) {
+    int w = 0;
+    for (unsigned char c : s) {
+        const int i = int(c) - int(f.hdr.first_char);
+        w += i >= 0 && i < int(f.glyphs.size()) ? f.glyphs[size_t(i)].advance : f.hdr.advance;
+    }
+    return w;
 }
 
 struct SoundInfo {
@@ -875,8 +910,15 @@ inline bool view_spawns(const AssetEntry& a, std::vector<phx::SpawnDef>& out) {
 inline std::string describe(const AssetEntry& a) {
     char b[96];
     switch (a.type) {
-    case phx::AssetType::Texture:
     case phx::AssetType::Font: {
+        FontInfo f;
+        if (!view_font(a, f)) return "malformed font";
+        std::snprintf(b, sizeof(b), "%u glyphs from '%c', line %u, %s", unsigned(f.glyphs.size()),
+                      f.hdr.first_char >= 32 && f.hdr.first_char < 127 ? char(f.hdr.first_char) : '?',
+                      unsigned(f.hdr.line_h), (f.hdr.flags & phx::kFontProportional) ? "proportional" : "fixed");
+        return b;
+    }
+    case phx::AssetType::Texture: {
         TexView v;
         if (!view_texture(a, v)) return "malformed texture";
         std::snprintf(b, sizeof(b), "%ux%u %s", unsigned(v.w), unsigned(v.h), format_name(v.fmt));
@@ -892,9 +934,11 @@ inline std::string describe(const AssetEntry& a) {
     case phx::AssetType::Sprite: {
         SpriteInfo v;
         if (!view_sprite(a, v)) return "malformed sprite";
-        std::snprintf(b, sizeof(b), "%ux%u frames, %zu clip%s", unsigned(v.frame_w), unsigned(v.frame_h),
-                      v.clips.size(), v.clips.size() == 1 ? "" : "s");
-        return b;
+        std::snprintf(b, sizeof(b), "%ux%u frames, %u clip%s", unsigned(v.frame_w), unsigned(v.frame_h),
+                      unsigned(v.clips.size()), v.clips.size() == 1 ? "" : "s");
+        std::string d = b;
+        if (!v.trans.empty()) d += ", " + std::to_string(v.trans.size()) + " transition" + (v.trans.size() == 1 ? "" : "s");
+        return d;
     }
     case phx::AssetType::Sound: {
         SoundInfo v;
@@ -1466,7 +1510,7 @@ inline std::vector<std::string> find_bundles(const std::string& root) {
         std::vector<std::string> here;
         for (const auto& e : fs::directory_iterator(dir, ec))
             if (e.is_regular_file(ec) && e.path().extension() == ".phxp")
-                here.push_back(fs::relative(e.path(), root, ec).string());
+                here.push_back(fs::relative(e.path(), root, ec).generic_string());
         std::sort(here.begin(), here.end());
         out.insert(out.end(), here.begin(), here.end());
     }

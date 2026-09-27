@@ -258,7 +258,35 @@ Result<SpriteView> ResourceCache::sprite(NameHash name) {
     v.cols       = sh->cols;
     v.clip_count = sh->clip_count;
     v.clips      = reinterpret_cast<const SpriteClipDef*>(p + sizeof(SpriteBlobHeader));
+
+    // The optional transitions trailer (bundle.h), bounds-checked like the spawn extension.
+    const uint64_t end = sizeof(SpriteBlobHeader) + uint64_t(v.clip_count) * sizeof(SpriteClipDef);
+    if (end + 8u <= e->usize) {
+        uint32_t hdr[2];
+        std::memcpy(hdr, p + end, sizeof(hdr));
+        if (hdr[0] == kSpriteTransMagic && end + 8u + uint64_t(hdr[1]) * sizeof(SpriteTransDef) <= e->usize) {
+            v.trans_count = hdr[1];
+            v.trans       = reinterpret_cast<const SpriteTransDef*>(p + end + 8u);
+        }
+    }
     return Result<SpriteView>::good(v);
+}
+
+Result<FontView> ResourceCache::font(NameHash name) {
+    const TocEntry* e = find(name, AssetType::Font);
+    if (!e) return Result<FontView>::fail(Status::NotFound);
+    const uint8_t* p = resolve(e);
+    if (!p) return Result<FontView>::fail(Status::IoError);
+    if (e->usize < sizeof(FontBlobHeader)) return Result<FontView>::fail(Status::Corrupt);
+    FontBlobHeader h;
+    std::memcpy(&h, p, sizeof(h));
+    if (sizeof(FontBlobHeader) + uint64_t(h.glyph_count) * sizeof(FontGlyphDef) > e->usize)
+        return Result<FontView>::fail(Status::Corrupt);
+    FontView v;
+    v.texture = h.texture; v.glyph_count = h.glyph_count; v.first_char = h.first_char;
+    v.line_h = h.line_h; v.cell_w = h.cell_w; v.cell_h = h.cell_h; v.advance = h.advance; v.flags = h.flags;
+    v.glyphs = reinterpret_cast<const FontGlyphDef*>(p + sizeof(FontBlobHeader));
+    return Result<FontView>::good(v);
 }
 
 Result<SpawnsView> ResourceCache::spawns(NameHash name) {

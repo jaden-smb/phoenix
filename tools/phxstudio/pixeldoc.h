@@ -21,6 +21,7 @@
 #include "png_write.h"   // tools/common
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -403,11 +404,20 @@ struct SprClip {
     bool loop = true;
 };
 
+// A transition of the sprite's animation state machine (a `trans` line): in clip `from` ("*" = any
+// clip), the event `trigger` switches to clip `to`. The engine sends the stock events (stock_triggers)
+// from PlatformerController and the anim system; a game sends its own (phx::anim_trigger).
+struct SprEdge {
+    std::string from, to, trigger;
+    bool operator==(const SprEdge& o) const { return from == o.from && to == o.to && trigger == o.trigger; }
+};
+
 class SprDoc {
 public:
     std::string sheet;           // as written in the file (bare file name = next to the def)
     int frame_w = 16, frame_h = 16;
     std::vector<SprClip> clips;
+    std::vector<SprEdge> trans;  // the state machine (clip names; resolved at bake time)
     bool json = false;           // the file's format (.json sidecar vs .sprdef)
     bool dirty = false;
 
@@ -438,6 +448,11 @@ public:
                     c.loop = kv.second.find("loop") && kv.second.find("loop")->boolean;
                     out.clips.push_back(c);
                 }
+            if (const phxtool::JsonValue* tr = root.find("transitions"); tr && tr->is_arr())
+                for (const phxtool::JsonValue& t : tr->arr) {
+                    const std::string from = t.str_at("from");
+                    out.trans.push_back(SprEdge{ from.empty() ? std::string("*") : from, t.str_at("to"), t.str_at("on") });
+                }
         } else {
             size_t p = 0;
             while (p < text.size()) {
@@ -448,11 +463,13 @@ public:
                 if (!line.empty() && line.back() == '\r') line.pop_back();
                 const size_t hash = line.find('#');
                 if (hash != std::string::npos) line.resize(hash);
-                char a[256], b[256];
+                char a[256], b[256], c[256];
                 int v1, v2, v3, v4;
                 if (std::sscanf(line.c_str(), " sheet %255s %d %d", a, &v1, &v2) == 3) { out.sheet = a; out.frame_w = v1; out.frame_h = v2; }
                 else if (std::sscanf(line.c_str(), " clip %255s %d %d %d %d", b, &v1, &v2, &v3, &v4) == 5)
                     out.clips.push_back(SprClip{ b, v1, v2, v3, v4 != 0 });
+                else if (std::sscanf(line.c_str(), " trans %255s %255s %255s", a, b, c) == 3)
+                    out.trans.push_back(SprEdge{ a, b, c });
             }
         }
         if (out.sheet.empty()) return fail(as_json ? "missing \"image\" (the sheet PNG)" : "missing 'sheet <png> <w> <h>' line");
@@ -483,13 +500,24 @@ public:
                 for (int k = 0; k < c.count; ++k) { if (k) o += ","; o += std::to_string(c.first + k); }
                 o += "], \"fps\": " + std::to_string(c.fps) + ", \"loop\": " + (c.loop ? "true" : "false") + " }";
             }
-            o += clips.empty() ? "}\n}\n" : "\n  }\n}\n";
+            o += clips.empty() ? "}" : "\n  }";
+            if (!trans.empty()) {
+                o += ",\n  \"transitions\": [";
+                for (size_t i = 0; i < trans.size(); ++i) {
+                    const SprEdge& t = trans[i];
+                    o += i ? ",\n    " : "\n    ";
+                    o += "{ \"from\": \"" + t.from + "\", \"to\": \"" + t.to + "\", \"on\": \"" + t.trigger + "\" }";
+                }
+                o += "\n  ]";
+            }
+            o += "\n}\n";
         } else {
             o = "# sprite definition (phxsprite) - edited in Phoenix Studio\n";
             o += "sheet " + sheet + " " + std::to_string(frame_w) + " " + std::to_string(frame_h) + "\n";
             for (const SprClip& c : clips)
                 o += "clip " + c.name + " " + std::to_string(c.first) + " " + std::to_string(c.count) + " " +
                      std::to_string(c.fps) + " " + (c.loop ? "1" : "0") + "\n";
+            for (const SprEdge& t : trans) o += "trans " + t.from + " " + t.to + " " + t.trigger + "\n";
         }
         return o;
     }
@@ -524,6 +552,36 @@ public:
         for (size_t i = 0; i < clips.size(); ++i) if (clips[i].name == n) return int(i);
         return -1;
     }
+    // Rename a clip, and every transition that names it.
+    void rename_clip(size_t i, const std::string& to) {
+        if (i >= clips.size()) return;
+        const std::string from = clips[i].name;
+        clips[i].name = to;
+        for (SprEdge& t : trans) { if (t.from == from) t.from = to; if (t.to == from) t.to = to; }
+    }
+    // Remove a clip, and the transitions into or out of it.
+    void remove_clip(size_t i) {
+        if (i >= clips.size()) return;
+        const std::string n = clips[i].name;
+        clips.erase(clips.begin() + std::ptrdiff_t(i));
+        trans.erase(std::remove_if(trans.begin(), trans.end(), [&](const SprEdge& t) { return t.from == n || t.to == n; }),
+                    trans.end());
+    }
+    // The events the engine sends by itself (behaviours.h): what most transitions are keyed on.
+    static const std::vector<std::string>& stock_triggers() {
+        static const std::vector<std::string> k = { "jump", "fall", "land", "move", "stop", "hurt", "done" };
+        return k;
+    }
+    // A new transition out of clip `from`: to the next clip, on "done" when `from` does not loop.
+    SprEdge suggest_edge(int from) const {
+        SprEdge e{ "*", clips.empty() ? std::string() : clips.front().name, "jump" };
+        if (from >= 0 && from < int(clips.size())) {
+            e.from = clips[size_t(from)].name;
+            e.to = clips.size() > 1 ? clips[size_t((from + 1) % int(clips.size()))].name : e.from;
+            e.trigger = clips[size_t(from)].loop ? "move" : "done";
+        }
+        return e;
+    }
     // A clip name that is not taken yet ("clip", "clip2", ...).
     std::string fresh_name(const std::string& base) const {
         if (find_clip(base) < 0) return base;
@@ -542,6 +600,13 @@ public:
             if (c.first < 0 || c.first + c.count > n) out.push_back("clip '" + c.name + "' runs past the last frame (" + std::to_string(n) + ")");
             if (c.fps <= 0 && c.count > 1) out.push_back("clip '" + c.name + "' has fps 0 (it will never advance)");
             if (c.name.find_first_of(" \t#\"") != std::string::npos) out.push_back("clip '" + c.name + "' has spaces/quotes in its name");
+        }
+        for (const SprEdge& t : trans) {
+            const std::string what = "transition " + t.from + " -> " + t.to;
+            if (t.from != "*" && find_clip(t.from) < 0) out.push_back(what + ": no clip '" + t.from + "'");
+            if (find_clip(t.to) < 0) out.push_back(what + ": no clip '" + t.to + "'");
+            if (t.trigger.empty()) out.push_back(what + " has no trigger");
+            else if (t.trigger.find_first_of(" \t#\"") != std::string::npos) out.push_back(what + ": the trigger has spaces/quotes");
         }
         return out;
     }

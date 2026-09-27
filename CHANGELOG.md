@@ -8,6 +8,59 @@ All notable changes to Phoenix are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Fonts.**
+  - **Author formats:** a `.font` over a grid sheet PNG, or an imported BMFont text `.fnt`. The
+    Font asset (formerly reserved) now bakes a glyph table: each character's rect, offset and
+    advance (`FontBlobHeader` / `FontGlyphDef`, `ResourceCache::font()`), over the sheet texture.
+    - `.font` widths are proportional (measured from each glyph's pixels) or fixed.
+    - `.fnt` comes from BMFont, Hiero, Littera and similar tools.
+  - **Bake:** `phxsprite` bakes both (`tools/phxpack/font.h`), and `bake_project.py` routes them.
+  - **Runtime:**
+    - `phx::load_font()` (`phx/runtime/font.h`) turns the asset into a `BitmapFont` whose glyph
+      table is read in place; an older project's plain `font.png` still loads as the classic grid.
+    - `BitmapFont` gains an optional `FontGlyph` table.
+    - `UI::text_width()` / `glyph_advance()` measure text, and `text()`, `button()` and the
+      dialogue wrap all lay out by pixel width. A fixed-width font lays out exactly as before.
+    - The game flow uses `load_font` and centres and right-aligns by measured width.
+  - **Studio:** a **font editor** shows the sheet with each glyph's measured box (click a glyph
+    to paint it), the font settings, and a live sample line with its width. **New font**, **New
+    sound effect** and **New song** join the Explorer and welcome-page create menus. The asset
+    view shows a Font's metrics and glyph table.
+  - **Template:** new projects' `assets/font.font` makes the flow's text proportional.
+- **Sound effects and music, authored in the Studio.**
+  - `tools/phxpack/synth.h` renders two new author formats to PCM at bake time.
+    - **`.sfx`**: an sfxr-style parameter set (wave, pitch, slide, vibrato, arpeggio, duty,
+      envelope, filters). It comes with seeded presets plus randomize and mutate.
+    - **`.song`**: a pattern tracker (up to 8 channels, synth instruments with an envelope,
+      slide and vibrato, patterns of up to 128 rows, an order list).
+  - `phxsnd`, `phxpack` and `bake_project.py` bake both to ordinary Sound assets named after the
+    file, including the tier-0 resample. The runtime is unchanged: `GameAudio::play()` /
+    `play_music()`.
+  - Phoenix Studio gains a **sound effect editor** (presets, randomize/mutate, parameter sliders,
+    waveform, auto-play) and a **song editor**. The song editor has a tracker grid with piano-key
+    note entry, patterns, an order list and instruments, and plays the song or a pattern with a
+    playhead.
+  - Both editors play the exact PCM the bake produces, through a new `Host::play_pcm()`. Numbers
+    are saved at the shortest precision that reads back exactly, so the bake renders what the
+    editor played.
+  - The flow table's `music` screens take a `music_vol` column (percent, default 60) to leave
+    headroom for sound effects.
+  - New projects get `jump.sfx`, `coin.sfx` and a `theme.song` started by the title screen,
+    replacing the generated WAVs.
+- **Animation state machines as data.** A sprite's clips can carry transitions:
+  `trans <from|*> <to> <trigger>` lines in a `.sprdef`, or a `"transitions"` list in sprite
+  `.json`. The bake resolves clip names to indices, so an unknown clip fails the bake, and writes
+  a backward-compatible trailer after the clips (`SpriteTransDef`, `SpriteView::trans`).
+  `phx::Animator` now carries its edges and `trigger(name)`. An edge from the current clip beats
+  a `*` edge, and a `*` edge into the playing clip does nothing. The anim system fires `done`
+  when a non-looping clip ends; a one-frame non-looping clip now finishes after its frame time.
+  `Level` gives every spawned animator its sprite's transitions, read in place from the bundle
+  (the baked layout is `AnimEdge`'s). A sprite keeps up to 12 clips, up from 8. When a sprite has transitions, `PlatformerController` sends it
+  `jump`/`fall`/`land`/`move`/`stop`/`hurt` instead of playing clips by name, and games call
+  `phx::anim_trigger(world, e, "attack"_hash)`. Phoenix Studio's sprite editor gains a
+  Transitions list in the Clips tab. Renaming or deleting a clip updates its transitions, and the
+  asset view counts them. The project template's hero gains jump and land frames and a six-edge
+  state machine. `AnimStateMachine::Edge` is now `AnimEdge`, whose trigger is a `NameHash`.
 - **The game flow as data.** `phx::GameFlow` (`phx/runtime/flow.h`) runs a flow table
   (`assets/flow.json`, one row per screen) with title, level and end screens:
   - chaining by `next` or an Exit's target;
@@ -217,6 +270,9 @@ All notable changes to Phoenix are documented here. The format follows
   also reachable as `phx_desktop_set_scale()`).
 
 ### Fixed
+- Phoenix Studio on Windows: opened files kept native `\` separators, so a sprite def naming its
+  sheet by bare file name (every template sprite) failed to open with "the sheet is outside the
+  project". Opened paths and bundle listings now always use `/`.
 - **`make game-assets TIER=0|1` rebuilt every host tool.** A bake tier was also taken as the
   scalar tier, so it switched the host object directory and relinked every host binary. It is now
   only a bake tier.

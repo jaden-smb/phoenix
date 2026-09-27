@@ -234,6 +234,7 @@ private:
     bool want_resize_ = false, want_mkdef_ = false;
     std::string hex_;
     int clip_scroll_ = 0;
+    int trans_ = -1, trans_scroll_ = 0;    // the selected transition (Clips tab)
 
     // ---- document plumbing ----
     void push_img_undo() { img.push_undo(); hist_.push_back('i'); redo_hist_.clear(); }
@@ -281,7 +282,7 @@ private:
         const std::string dir = dir_name(img_path), me = base_name(img_path);
         std::error_code ec;
         for (pfs::directory_iterator it(dir.empty() ? "." : dir, ec), end; !ec && it != end; it.increment(ec)) {
-            const std::string f = it->path().string(), ext = lower_ext(f);
+            const std::string f = it->path().generic_string(), ext = lower_ext(f);
             if (ext == ".tmj") {
                 phxtool::TmapDoc m;
                 std::string text = read_head(f, 1u << 22);
@@ -887,7 +888,7 @@ private:
             g.text(b.x + 106, b.y + 2, fmt("%d frames", frame_count()), g.th.faint, kSubText, b.w - 106);
             if (c1 || c2) { spr_edit(); spr.frame_w = fw; spr.frame_h = fh; frame_ = std::min(frame_, frame_count() - 1); }
         }
-        Rect b = panel_section(g, col, std::max(120, col.h), "CLIPS");
+        Rect b = panel_section(g, col, std::max(120, col.h - 116), "CLIPS");
         const int rows = std::max(2, std::min(int(spr.clips.size()), 6));
         const Rect list{ b.x, b.y, b.w, rows * 11 + 2 };
         g.rect(list, g.th.field, kSubWidget);
@@ -912,10 +913,11 @@ private:
                 clip_ = int(spr.clips.size()) - 1;
             }
             const bool have = clip_ >= 0 && clip_ < int(spr.clips.size());
-            if (g.button(row.take(40), "delete", Btn{ false, have, false, 0, "Remove the selected clip" }) && have) {
+            if (g.button(row.take(40), "delete", Btn{ false, have, false, 0, "Remove the selected clip (and its transitions)" }) && have) {
                 spr_edit();
-                spr.clips.erase(spr.clips.begin() + clip_);
+                spr.remove_clip(size_t(clip_));
                 clip_ = std::min(clip_, int(spr.clips.size()) - 1);
+                trans_ = std::min(trans_, int(spr.trans.size()) - 1);
             }
             if (g.icon_button(row.take(12), kIconUp, "Move clip up", false, have && clip_ > 0) && have && clip_ > 0) { spr_edit(); std::swap(spr.clips[size_t(clip_)], spr.clips[size_t(clip_ - 1)]); --clip_; }
             if (g.icon_button(row.take(12), kIconDown, "Move clip down", false, have && clip_ + 1 < int(spr.clips.size())) && have && clip_ + 1 < int(spr.clips.size())) { spr_edit(); std::swap(spr.clips[size_t(clip_)], spr.clips[size_t(clip_ + 1)]); ++clip_; }
@@ -929,8 +931,10 @@ private:
             if (g.text_field(g.id("cname"), Rect{ b.x + 38, y, b.w - 38, 12 }, nm, "clip name", 0, "The name the game plays: animator.play(\"walk\"_hash)")) {
                 std::string clean;
                 for (char ch2 : nm) if (ch2 != ' ' && ch2 != '"' && ch2 != '#') clean += ch2;
-                if (!clean.empty() && (clean == c.name || spr.find_clip(clean) < 0)) { c.name = clean; ch = true; }
-                else h.toast("clip names must be unique and non-empty", Toast::Warn);
+                if (!clean.empty() && clean != c.name && spr.find_clip(clean) < 0) {
+                    spr_edit(); spr.rename_clip(size_t(clip_), clean);          // transitions follow
+                    c.name = clean;
+                } else if (clean != c.name) h.toast("clip names must be unique and non-empty", Toast::Warn);
             }
             y += 15;
             g.text(b.x, y + 2, "frames", g.th.dim);
@@ -958,6 +962,78 @@ private:
             y += 11;
         }
         if (probs.empty() && y + 10 < b.bottom()) g.text(b.x, y, "bakes clean (phxsprite)", g.th.good, kSubText, b.w);
+        draw_transitions(h, col);
+    }
+
+    // The sprite's animation state machine: `trans <from> <to> <trigger>` lines. The engine sends
+    // the stock events itself (PlatformerController, the anim system's "done"); a game its own.
+    void draw_transitions(Host& h, Rect& col) {
+        Gui& g = h.gui();
+        Rect b = panel_section(g, col, std::max(100, col.h), "TRANSITIONS");
+        const int n = int(spr.trans.size());
+        const int rows = std::max(2, std::min(n, 4));
+        const Rect list{ b.x, b.y, b.w, rows * 11 + 2 };
+        g.rect(list, g.th.field, kSubWidget);
+        g.wheel_scroll(list, trans_scroll_, n, rows, 1);
+        for (int i = 0; i < rows && trans_scroll_ + i < n; ++i) {
+            const int k = trans_scroll_ + i;
+            const SprEdge& t = spr.trans[size_t(k)];
+            const Rect rr{ list.x + 1, list.y + 1 + i * 11, list.w - 2, 11 };
+            if (k == trans_) g.rect(rr, g.th.sel, kSubImage);
+            else if (g.hover(rr)) g.rect(rr, g.th.hover, kSubImage);
+            g.text(rr.x + 3, rr.y + 2, t.from + " -> " + t.to, g.th.text, kSubText, rr.w - 54);
+            g.text(rr.right() - 50, rr.y + 2, t.trigger, g.th.accent, kSubText, 48);
+            if (g.clicked(rr)) trans_ = k;
+        }
+        if (!n) g.text(list.x + 3, list.y + 3, "none: clips play by name", g.th.faint, kSubText, list.w - 6);
+        int y = list.bottom() + 3;
+        {
+            Gui::Row row(Rect{ b.x, y, b.w, 12 }, 3);
+            if (g.button(row.take(48), "+ trans", Btn{ false, !spr.clips.empty(), false, 0,
+                         "Add a transition out of the selected clip" }) && !spr.clips.empty()) {
+                spr_edit();
+                spr.trans.push_back(spr.suggest_edge(clip_));
+                trans_ = int(spr.trans.size()) - 1;
+                trans_scroll_ = std::max(0, trans_ - rows + 1);
+            }
+            const bool have = trans_ >= 0 && trans_ < n;
+            if (g.button(row.take(40), "delete", Btn{ false, have, false, 0, "Remove the selected transition" }) && have) {
+                spr_edit();
+                spr.trans.erase(spr.trans.begin() + trans_);
+                trans_ = std::min(trans_, int(spr.trans.size()) - 1);
+            }
+        }
+        y += 16;
+        if (trans_ < 0 || trans_ >= int(spr.trans.size())) {
+            g.text(b.x, y, "in clip FROM, the event TRIGGER plays TO", g.th.faint, kSubText, b.w);
+            return;
+        }
+        SprEdge t = spr.trans[size_t(trans_)];
+        std::vector<std::string> froms{ "*" }, tos;
+        for (const SprClip& c : spr.clips) { froms.push_back(c.name); tos.push_back(c.name); }
+        int fsel = 0, tsel = spr.find_clip(t.to);
+        for (size_t i = 1; i < froms.size(); ++i) if (froms[i] == t.from) fsel = int(i);
+        bool ch = false;
+        const int half = (b.w - 38) / 2 - 2;
+        g.text(b.x, y + 2, "from", g.th.dim);
+        if (g.dropdown(g.id("tfrom"), Rect{ b.x + 38, y, half, 12 }, froms, fsel, "The clip it leaves (* = any clip)")) { t.from = froms[size_t(fsel)]; ch = true; }
+        if (g.dropdown(g.id("tto"), Rect{ b.x + 42 + half, y, half, 12 }, tos, tsel, "The clip it plays")) { t.to = tos[size_t(tsel)]; ch = true; }
+        y += 15;
+        g.text(b.x, y + 2, "on", g.th.dim);
+        std::string trig = t.trigger;
+        if (g.text_field(g.id("ttrig"), Rect{ b.x + 38, y, half, 12 }, trig, "trigger", 0,
+                         "The event: anim_trigger(world, e, \"attack\"_hash), or a stock one")) {
+            std::string clean;
+            for (char c : trig) if (c != ' ' && c != '"' && c != '#') clean += c;
+            if (!clean.empty() && clean != t.trigger) { t.trigger = clean; ch = true; }
+        }
+        const std::vector<std::string>& stock = SprDoc::stock_triggers();
+        int ssel = -1;
+        for (size_t i = 0; i < stock.size(); ++i) if (stock[i] == t.trigger) ssel = int(i);
+        if (g.dropdown(g.id("tstock"), Rect{ b.x + 42 + half, y, half, 12 }, stock, ssel,
+                       "Stock events: jump/fall/land/move/stop/hurt from PlatformerController, done when a non-looping clip ends"))
+            { t.trigger = stock[size_t(ssel)]; ch = true; }
+        if (ch && !(t == spr.trans[size_t(trans_)])) { spr_edit(); spr.trans[size_t(trans_)] = t; }
     }
 
     // ---- dialogs ----

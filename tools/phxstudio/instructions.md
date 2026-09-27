@@ -155,7 +155,7 @@ properties.
 
 | Component | Does | Fields |
 |---|---|---|
-| `PlatformerController` | Left/Right run, A jumps; plays the walk/idle/jump clips by name; hazard tiles send it back | `speed` `jump` `jump_sound` `idle_clip` `walk_clip` `jump_clip` |
+| `PlatformerController` | Left/Right run, A jumps; plays the walk/idle/jump clips by name, or (a sprite with transitions) sends its state machine `jump` `fall` `land` `move` `stop` `hurt`; hazard tiles send it back | `speed` `jump` `jump_sound` `idle_clip` `walk_clip` `jump_clip` |
 | `Patrol` | walks back and forth around its spawn, turning at walls (needs `body` 1) | `speed` `range` |
 | `Pickup` | touched by the player: adds `value` to a counter, plays `sound`, disappears | `value` `counter` (default `coins`) `sound` |
 | `Hazard` | touched by the player: back to the respawn point (`deaths` + 1) | `sound` |
@@ -244,7 +244,8 @@ view and click **edit source** (or double-click the asset) to open the file it w
 | sprite | its `.sprdef` / sprite `.json`: sheet pixels, frame grid and clips |
 | tilemap, spawns | the `.tmj` in the map editor |
 | blob | the phxbin table `.json` |
-| sound | no sound editor yet; the Studio names the `.wav` |
+| font | its `.font` in the [font editor](#font-editor) (a `.fnt` opens as text) |
+| sound | its `.sfx` in the [sound effect editor](#sound-effect-editor) or its `.song` in the [song editor](#song-editor) (a `.wav` has no editor; the Studio names it) |
 
 The bake names each asset after its file (`hero` is `assets/hero.sprdef`), which is how the
 Studio finds the source. After you save, **bake** (next to **scan**, in a project) runs the
@@ -296,7 +297,17 @@ Opens a `.png` to paint it, or a sprite definition (`.sprdef` / sprite `.json`) 
   PICO-8, Game Boy or Ember. Right-click a swatch to set the secondary colour.
 - **Clips tab** (sprite defs): frame size and the clip list (add, delete, reorder). For each clip:
   name, first frame, count, fps and loop. Warnings flag anything the bake would reject
-  (a clip past the last frame, fps 0, a sheet that isn't a whole number of frames).
+  (a clip past the last frame, fps 0, a sheet that isn't a whole number of frames, a transition
+  naming a clip that doesn't exist).
+- **Transitions** (the Clips tab, under the clips): the sprite's animation state machine, saved as
+  `trans <from> <to> <trigger>` lines. Each row reads "in clip FROM (`*` = any clip), the event
+  TRIGGER plays clip TO". **+ trans** adds one out of the selected clip (on `done` when that clip
+  doesn't loop). Pick FROM and TO from the clip lists, and type the trigger or choose a stock one:
+  `jump` `fall` `land` `move` `stop` `hurt` (sent by `PlatformerController`) or `done` (sent when a
+  non-looping clip ends). Game code sends its own with `phx::anim_trigger(world, e, "attack"_hash)`.
+  Renaming a clip renames it in the transitions, and deleting a clip deletes its transitions. The
+  template's hero has `idle ⇄ walk`, `* → jump` on `jump`/`fall`, `jump → land` and `land → idle`
+  on `done`.
 - **Frame strip + preview**: thumbnails of every frame (the selected clip's frames are outlined)
   and the selected clip playing at its fps.
 - **Tile mode** (plain PNGs such as tilesets): a grid of W×H tiles, each labelled with its **GID**
@@ -418,6 +429,71 @@ shows the prefab vocabulary (the `type`/`name` column), duplicate names, and the
 - **In the game.** The level attaches `Enemy` to every entity spawned from that prefab, filled
   from those columns. A placed spawn's property `Enemy_range` overrides the value for that one
   spawn. Code reads it with `world.get<Enemy>(entity)`.
+
+### Font editor
+
+A `.font` is a font over a grid sheet PNG: `assets/font.font` is the font the template's title
+screens and HUD use (`load_font(r, *res, "font"_hash, font)`).
+
+- **The sheet** is shown scaled up, with the cell grid and each glyph's measured box. Hover a
+  cell to see its character and metrics. **Click a glyph** (or **edit sheet**) to paint it in
+  the pixel editor; the font re-measures when the PNG is saved.
+- **Settings**: cell size, the first character, how many cells, **proportional** (each glyph's
+  opaque width + `spacing`, `space` for empty cells) or fixed (`advance`), and the line height.
+- **Sample**: type any text to see it laid out as `phx::UI` will draw it, with its width in pixels.
+
+**New font** (Explorer or welcome page) writes a 128×48 sheet of 8×8 cells with a 5×7 ASCII font
+to repaint, plus its `.font`. To use a font made elsewhere, export it as a BMFont **text** `.fnt`
+plus PNG into `assets/`; the bake reads it the same way. TrueType files are not converted.
+
+### Sound effect editor
+
+An sfxr-style generator for `.sfx` files. A `.sfx` is the parameters of one sound effect, not
+samples. The bake renders it with the same code the editor plays (`tools/phxpack/synth.h`). It
+becomes a Sound asset named after the file: `assets/coin.sfx` is `res->sound("coin"_hash)`, and
+a prefab's `Pickup_sound` = `coin`.
+
+- **Presets**: pickup, laser, explosion, powerup, hurt, jump and blip. Each click gives a new
+  variation of that kind.
+- **randomize** (R) makes an entirely new sound. **mutate** (M) nudges the current one.
+- **Wave** (1–5): square, saw, triangle, sine or noise.
+- **Parameters**: pitch (`freq`, `slide`, `dslide`, `freq_min`, vibrato, `arp_mult` and
+  `arp_time`), the square's `duty` and its sweep, `repeat`, the envelope (`attack`, `sustain`,
+  `punch` and `decay`), low-pass and high-pass filters, and `volume`. Drag a slider or type a
+  value; hover a name to see what it does.
+- Every change plays the sound (Space plays it again, and so does a click on the waveform).
+  Undo works per change.
+
+New ones: **New sound effect** (Explorer right-click, or the welcome page) starts from a preset.
+**New song** starts from a small 4-instrument song.
+
+### Song editor
+
+A small pattern tracker for `.song` files. The bake renders the song once to a looping Sound
+asset named after the file. A game plays it with `app.audio().play_music(...)`, or from the flow
+table's `music` column (`music_vol` sets its volume in percent; the default is 60). The template's
+title screen starts `assets/theme.song`, and screens with no `music` keep it playing.
+
+- **The grid**: a pattern's rows (every `rows/beat` row is shaded) × its channels. A cell holds a
+  note and an instrument, `off` (the note is released), or nothing (the note keeps sounding).
+  When the channels don't fit, the view scrolls to the cursor's channel.
+- **Entering notes**: the piano keys enter the current instrument, and each note plays as you
+  enter it.
+  - `Z S X D C V G B H N J M , L . ; /` start at the octave's C.
+  - `Q 2 W 3 E R 5 T 6 Y 7 U I 9 O 0 P` start one octave higher.
+  - `1` enters `off`; Delete and Backspace clear the cell.
+  - After an entry the cursor moves down `step` rows.
+  - `F` / Shift+`F` change the octave.
+  - Arrows, PgUp/PgDn, Home and End move the cursor.
+- **Patterns**: add, duplicate, delete, rename, and set the row count (up to 128).
+- **Order**: the patterns in play order (add the selected one, delete, reorder). The song is
+  the order list played once; the game loops it.
+- **Instruments**: a wave with an envelope (`attack`, `decay` to the `sustain` level, and
+  `release` after `off`), `volume`, a pitch `slide` (a fast fall makes a kick drum) and vibrato.
+  Noise makes drums and hats. **hear** plays one note of the instrument.
+- **song** plays the order list and **pattern** plays this pattern, with an optional loop. A
+  playhead follows the rows; with **follow** on, the grid shows the pattern that is playing.
+- The toolbar also sets `bpm`, rows per beat (`rpb`) and the number of channels (`ch`, up to 8).
 
 ## How it works
 

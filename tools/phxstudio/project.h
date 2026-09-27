@@ -20,13 +20,14 @@ namespace phxstudio {
 
 namespace pfs = std::filesystem;
 
-enum class FileKind : uint8_t { Dir, Code, Text, Image, Sprite, Map, Table, Sound, Bundle, Other };
+enum class FileKind : uint8_t { Dir, Code, Text, Image, Sprite, Map, Table, Sound, Sfx, Song, Font, Bundle, Other };
 
 inline const char* kind_name(FileKind k) {
     switch (k) {
     case FileKind::Dir: return "folder";   case FileKind::Code: return "code";    case FileKind::Text: return "text";
     case FileKind::Image: return "image";  case FileKind::Sprite: return "sprite"; case FileKind::Map: return "map";
     case FileKind::Table: return "table";  case FileKind::Sound: return "sound";   case FileKind::Bundle: return "bundle";
+    case FileKind::Sfx: return "sound effect"; case FileKind::Song: return "song"; case FileKind::Font: return "font";
     default: return "file";
     }
 }
@@ -68,6 +69,10 @@ inline FileKind kind_for(const std::string& path, const std::string& json_head =
     if (e == ".sprdef") return FileKind::Sprite;
     if (e == ".tmj") return FileKind::Map;
     if (e == ".wav") return FileKind::Sound;
+    if (e == ".sfx") return FileKind::Sfx;                         // tools/phxpack/synth.h
+    if (e == ".song") return FileKind::Song;
+    if (e == ".font") return FileKind::Font;                       // tools/phxpack/font.h
+    if (e == ".fnt") return FileKind::Text;                        // a BMFont import: baked, edited as text
     if (e == ".phxp") return FileKind::Bundle;
     if (e == ".json") {
         if (json_head.find("\"records\"") != std::string::npos && json_head.find("\"fields\"") != std::string::npos) return FileKind::Table;
@@ -97,7 +102,8 @@ inline std::string read_head(const std::string& path, size_t n = 4096) {
 // The author files an asset named `stem` was baked from, among `files` (paths relative to
 // `root`), best first. The bake names every asset by its file stem (bake_project.py and the
 // converters' --name), so a source is a file with that stem that opens in the editor of kind
-// `want` (Image for a texture, Sprite, Map for a tilemap or its spawns, Table for a blob, Sound).
+// `want` (Image for a texture, Sprite, Map for a tilemap or its spawns, Table for a blob, Sound —
+// which a .sfx or .song bakes too).
 // Copies under a build/ folder sort after the author's own files.
 inline std::vector<std::string> asset_source_candidates(const std::vector<std::string>& files, const std::string& root,
                                                         const std::string& stem, FileKind want) {
@@ -106,7 +112,8 @@ inline std::vector<std::string> asset_source_candidates(const std::vector<std::s
         if (stem_of(rel) != stem) continue;
         const std::string e = lower_ext(rel);
         if (e == ".ppm") continue;                                  // a screenshot, never baked
-        if (kind_for(rel, e == ".json" ? read_head(join_path(root, rel)) : std::string()) == want) out.push_back(rel);
+        const FileKind k = kind_for(rel, e == ".json" ? read_head(join_path(root, rel)) : std::string());
+        if (k == want || (want == FileKind::Sound && (k == FileKind::Sfx || k == FileKind::Song))) out.push_back(rel);
     }
     std::stable_partition(out.begin(), out.end(), [](const std::string& r) {
         return r.compare(0, 6, "build/") != 0 && r.find("/build/") == std::string::npos;

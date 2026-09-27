@@ -245,25 +245,30 @@ baked by `phxsprite`.
 ```cpp
 namespace phx {
 struct AnimClip { uint16_t first, count; uint8_t fps; bool loop; };
+struct AnimEdge { uint8_t from, to; NameHash trigger; };   // from == kAnyClip: any clip
 struct Animator {                              // ECS component
-    SpriteSheetId sheet; uint16_t clip; uint16_t frame; scalar timer; uint8_t state;
-};
-struct AnimStateMachine {                      // data-driven transitions
-    struct Edge { uint8_t from, to; uint16_t trigger; };
-    Span<AnimClip> clips; Span<Edge> edges;
-    void set_trigger(Animator&, uint16_t trig);   // request state change
+    Span<const AnimClip> clips; Span<const AnimEdge> edges; SpriteSheet sheet;
+    uint16_t clip, frame; scalar timer; bool finished; /* + output rect */
+    void play(uint16_t clip);
+    bool trigger(NameHash trig);               // take a matching edge, if any
 };
 class AnimationSystem {
 public:
-    void tick(ecs::World&, scalar dt);         // advance timers, pick frame, set SpriteRef
+    void tick(ecs::World&, scalar dt) const;   // advance timers, pick frame, fire kAnimDone
 };
 } // namespace phx
 ```
 
 - `AnimationSystem` advances each `Animator`, computes the current frame, and writes the
   source rect into the entity's `SpriteRef` — so the render system stays dumb.
-- The **state machine** is data (clips + edges from the prefab/`phxsprite` sidecar), not
-  code: `idle ⇄ run ⇄ jump ⇄ fall` for the player is authored, not hardcoded.
+- The **state machine** is data (clips + edges: `trans <from|*> <to> <trigger>` lines in a
+  `.sprdef`, the Studio sprite editor's Transitions list), not code: `idle ⇄ run ⇄ jump ⇄ fall`
+  for the player is authored, not hardcoded. The bake resolves clip names to indices; `Level`
+  gives each spawned `Animator` its sprite's edges. An edge from the current clip beats a `*`
+  edge, and a `*` edge into the playing clip is a no-op, so triggers can be sent every step.
+- Triggers come from `PlatformerController` (`jump`, `fall`, `land`, `move`, `stop`, `hurt`), from
+  the anim system itself (`done`, when a non-looping clip ends), and from game code
+  (`phx::anim_trigger(world, e, "attack"_hash)`). A sprite without edges is played by clip name.
 - Frame timing uses `scalar` so fixed/float builds animate identically.
 
 ```
@@ -302,7 +307,12 @@ public:
 Supported surfaces:
 - **Menus** — focus-based navigation by D-pad/buttons (not just mouse), because
   consoles have no pointer. `button()` participates in a focus ring.
-- **Text rendering** — bitmap font atlas; fixed-width glyphs on GBA to save tiles.
+- **Text rendering** — bitmap font atlas. A `BitmapFont` is a fixed grid, optionally with a
+  glyph table (`FontGlyph`: rect, offset, advance per character) that makes it proportional.
+  `phx::load_font` (`phx/runtime/font.h`) builds one from a baked Font asset: a `.font` grid
+  sheet whose widths are measured at bake, or an imported BMFont `.fnt`.
+  `UI::text_width` / `glyph_advance` measure text, and `text()`, `button()` and the dialogue
+  wrap all lay out with them. Each glyph is one sprite on every tier, proportional or not.
 - **HUD** — `bar()`, `image()`, `text_fmt()` for score/health/lives; cheap, per-frame.
 - **Dialogue** — typewriter reveal driven by `reveal_t`, fed from `phxbin` dialogue
   tables; portrait via `image()`.

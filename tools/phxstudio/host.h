@@ -72,6 +72,14 @@ public:
     virtual void file_saved(const std::string& path_abs) { (void)path_abs; }
     // Compiler diagnostics from the last build that point into this file.
     virtual std::vector<Diag> diagnostics_for(const std::string& path_abs) { (void)path_abs; return {}; }
+    // Audition mono 16-bit PCM through the Studio's mixer (the SFX and song editors); the host
+    // keeps its own copy alive while it plays. A new call replaces what plays. False when there is
+    // no audio device.
+    virtual bool play_pcm(const std::vector<int16_t>& pcm, uint32_t rate, bool loop = false) {
+        (void)pcm; (void)rate; (void)loop;
+        return false;
+    }
+    virtual void stop_pcm() {}
 };
 
 class DocView {
@@ -111,6 +119,9 @@ std::unique_ptr<DocView> make_code_view(Host&, const std::string& path, std::str
 std::unique_ptr<DocView> make_sprite_view(Host&, const std::string& path, std::string* err);
 std::unique_ptr<DocView> make_map_view(Host&, const std::string& path, std::string* err);
 std::unique_ptr<DocView> make_table_view(Host&, const std::string& path, std::string* err);
+std::unique_ptr<DocView> make_sfx_view(Host&, const std::string& path, std::string* err);
+std::unique_ptr<DocView> make_song_view(Host&, const std::string& path, std::string* err);
+std::unique_ptr<DocView> make_font_view(Host&, const std::string& path, std::string* err);
 // A view over a document that exists only in memory yet (saved to `path` on the first save).
 std::unique_ptr<DocView> make_map_view_new(Host&, const std::string& path, const phxtool::TmapDoc& doc);
 std::unique_ptr<DocView> make_table_view_new(Host&, const std::string& path, const phxtool::BinDoc& doc);
@@ -132,6 +143,9 @@ inline std::unique_ptr<DocView> open_view(Host& h, const std::string& path, bool
         return make_sprite_view(h, path, err);
     case FileKind::Map:    return make_map_view(h, path, err);
     case FileKind::Table:  return make_table_view(h, path, err);
+    case FileKind::Sfx:    return make_sfx_view(h, path, err);
+    case FileKind::Song:   return make_song_view(h, path, err);
+    case FileKind::Font:   return make_font_view(h, path, err);
     case FileKind::Code: case FileKind::Text: case FileKind::Other: return make_code_view(h, path, err);
     default: break;
     }
@@ -145,6 +159,8 @@ inline int kind_icon(FileKind k) {
     case FileKind::Image: return twk::kIconFileImage;  case FileKind::Sprite: return twk::kIconSprite;
     case FileKind::Map: return twk::kIconFileMap;      case FileKind::Table: return twk::kIconFileTable;
     case FileKind::Sound: return twk::kIconFileSound;  case FileKind::Bundle: return twk::kIconLayers;
+    case FileKind::Sfx: return twk::kIconFileSound;    case FileKind::Song: return twk::kIconFileSound;
+    case FileKind::Font: return twk::kIconFileImage;
     default: return twk::kIconFile;
     }
 }
@@ -152,7 +168,9 @@ inline Rgba kind_colour(const twk::Theme& th, FileKind k) {
     switch (k) {
     case FileKind::Dir: return th.warn;     case FileKind::Code: return th.info;   case FileKind::Image: return th.violet;
     case FileKind::Sprite: return th.accent; case FileKind::Map: return th.good;    case FileKind::Table: return rgba(96, 212, 220);
-    case FileKind::Sound: return th.violet; case FileKind::Bundle: return th.dim;  default: return th.faint;
+    case FileKind::Sound: return th.violet; case FileKind::Bundle: return th.dim;
+    case FileKind::Sfx: return th.violet;   case FileKind::Song: return th.violet;
+    case FileKind::Font: return th.accent;  default: return th.faint;
     }
 }
 

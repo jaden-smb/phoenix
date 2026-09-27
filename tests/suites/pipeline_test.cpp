@@ -17,8 +17,13 @@
 #include "../../tools/phxstudio/model.h"      // Phoenix Studio's headless model
 
 #include "fixtures/png_fixtures.h"
+#include "ascii_font.h"                  // tools/common: the font sheet the font tests bake
+#include "png_write.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -56,7 +61,8 @@ const char* kTmj =
 "       { \"name\":\"p\", \"type\":\"player\", \"x\":8,  \"y\":16, \"width\":8, \"height\":8 },"
 "       { \"name\":\"c\", \"type\":\"coin\",   \"x\":16, \"y\":8,  \"width\":8, \"height\":8 } ] } ] }";
 
-const char* kSprdef = "sheet p_sheet.png 2 2\nclip walk 0 4 8 1\nclip idle 0 1 0 0\n";
+const char* kSprdef = "sheet p_sheet.png 2 2\nclip walk 0 4 8 1\nclip idle 0 1 0 0\n"
+                      "trans idle walk move\ntrans * idle stop\n";
 
 const char* kItems =
 "{ \"struct\":\"ItemRecord\","
@@ -128,7 +134,10 @@ int main() {
     check(spr.ok(), "sprite('hero') merged");
     if (spr.ok()) { SpriteView s = spr.unwrap();
         check(s.texture == "p_sheet"_hash && s.frame_w == 2 && s.frame_h == 2 && s.cols == 4, "sprite frame grid");
-        check(s.clip_count == 2 && s.clips && s.clips[0].name == "walk"_hash && s.clips[0].count == 4, "sprite clips"); }
+        check(s.clip_count == 2 && s.clips && s.clips[0].name == "walk"_hash && s.clips[0].count == 4, "sprite clips");
+        check(s.trans_count == 2 && s.trans && s.trans[0].from == 1 && s.trans[0].to == 0 &&
+              s.trans[0].trigger == "move"_hash && s.trans[1].from == kSpriteTransAny && s.trans[1].to == 1 &&
+              s.trans[1].trigger == "stop"_hash, "sprite transitions: clip names resolved to indices, '*' = any"); }
 
     // tilemap (+ spawns), from phxtile
     auto mv = cache->tilemap("level"_hash);
@@ -815,6 +824,168 @@ int main() {
         check(human_bytes(224 * 1024) == "224 KB" && human_bytes(1536) == "1.5 KB" && human_bytes(12) == "12 B",
               "studio: human_bytes");
         check(!find_repo_root(".").empty(), "studio: the repo root is found from the working directory");
+    }
+
+    // ---- synthesized audio: .sfx sound effects + .song tracker music (tools/phxpack/synth.h) ----
+    {
+        using namespace phxtool;
+        // sound effects: deterministic, length = attack + sustain + decay, round-trips through JSON
+        SfxParams p = sfx_preset("pickup", 7);
+        const std::vector<int16_t> a = render_sfx(p), b = render_sfx(p);
+        check(!a.empty() && a == b && a.size() == size_t(p.length() * kSynthRate),
+              "sfx: a render is deterministic and as long as its envelope");
+        int peak = 0;
+        for (int16_t v : a) peak = std::max(peak, v < 0 ? -int(v) : int(v));
+        check(peak > 4000, "sfx: the pickup preset is audible");
+        check(sfx_preset("pickup", 7) == p && sfx_preset("pickup", 8) != p && sfx_random(3) == sfx_random(3) &&
+              sfx_mutate(p, 5) == sfx_mutate(p, 5) && sfx_mutate(p, 5).wave == p.wave,
+              "sfx: presets / randomize / mutate are reproducible from their seed");
+        for (const std::string& n : sfx_preset_names()) {
+            const SfxParams q = sfx_preset(n, 1);
+            check(!render_sfx(q).empty(), ("sfx: preset '" + n + "' renders").c_str());
+        }
+        SfxParams r;
+        check(sfx_from_json(sfx_to_json(p), r) && r == p, "sfx: JSON round trip");
+        check(sfx_from_json("{ \"wave\": \"noise\", \"freq\": 200 }", r) && r.wave == Wave::Noise && r.freq == 200 &&
+              r.decay == SfxParams{}.decay, "sfx: missing keys keep their defaults");
+        std::string err;
+        check(!sfx_from_json("{ \"wave\": \"kazoo\" }", r, &err) && err.find("kazoo") != std::string::npos,
+              "sfx: an unknown wave is an error");
+        SfxParams fall; fall.freq = 800; fall.slide = -8; fall.freq_min = 200; fall.sustain = 1; fall.decay = 1;
+        check(render_sfx(fall).size() < size_t(0.3 * kSynthRate), "sfx: a falling slide stops at freq_min");
+
+        // notes and cells
+        check(note_from_text("A-4") == 57 && note_from_text("C#4") == 49 && note_from_text("c-0") == 0 &&
+              note_from_text("B-7") == 95 && note_from_text("H-4") < 0 && note_text(49) == "C#4" &&
+              std::fabs(note_freq(57) - 440.0) < 1e-9, "song: note names <-> numbers (A-4 = 440 Hz)");
+        Song s = song_starter();
+        SongCell c;
+        check(cell_from_text(s, "E-3 bass", c) && c.note == 40 && c.inst == 1 && cell_text(s, c) == "E-3 bass" &&
+              cell_from_text(s, "off", c) && c.note == kCellOff && cell_from_text(s, "", c) && c.note == kCellEmpty &&
+              !cell_from_text(s, "E-3 tuba", c, &err) && !cell_from_text(s, "X-9", c), "song: cell text");
+
+        // songs: length is rows x row frames; JSON round trip keeps every cell
+        const std::vector<int16_t> pcm = render_song(s);
+        check(s.total_rows() == 32 && pcm.size() == size_t(s.total_rows()) * s.row_frames() && pcm == render_song(s),
+              "song: the render is deterministic and exactly rows x row length");
+        int speak = 0;
+        for (int16_t v : pcm) speak = std::max(speak, v < 0 ? -int(v) : int(v));
+        check(speak > 3000 && speak < 20000, "song: audible, with headroom for the sound effects over it");
+        Song t;
+        check(song_from_json(song_to_json(s), t) && t.patterns.size() == 2 && t.order == s.order &&
+              t.patterns[0].rows == s.patterns[0].rows && t.instruments.size() == 4 && t.instruments[2] == s.instruments[2],
+              "song: JSON round trip");
+        check(!song_from_json("{ \"patterns\": [], \"order\": [\"Z\"] }", t, &err) && err.find("Z") != std::string::npos,
+              "song: the order naming an unknown pattern is an error");
+        int oi = -1, row = -1;
+        check(s.position_at(s.row_seconds() * 17.5, oi, row) && oi == 1 && row == 1 && !s.position_at(s.seconds() + 1, oi, row),
+              "song: position_at maps a time to the playing pattern row");
+
+        // editing keeps indices consistent
+        Song e = s;
+        const int d = e.duplicate_pattern(0);
+        e.order.push_back(d);
+        e.remove_pattern(0);
+        check(e.patterns.size() == 2 && e.patterns[0].name == "B" && e.order == std::vector<int>({ 0, 1 }),
+              "song: removing a pattern drops it from the order and renumbers the rest");
+        e.remove_instrument(0);                                    // "lead": its notes fall back
+        check(e.instruments.size() == 3 && e.patterns[1].rows[0][0].inst == -1 && e.patterns[1].rows[0][1].inst == 0,
+              "song: removing an instrument renumbers the cells that name later ones");
+        check(e.rename_instrument(0, "sub") && !e.rename_instrument(0, "kick") && !e.rename_instrument(0, "a b"),
+              "song: instrument names stay unique, without spaces");
+        e.set_channels(2);
+        check(e.channels == 2 && e.patterns[0].rows[0].size() == 2, "song: channel count resizes every row");
+        e.resize_pattern(0, 8);
+        check(e.patterns[0].rows.size() == 8 && e.add_pattern(4) == 2 && e.patterns[2].name == "A",
+              "song: resize a pattern, add one with a fresh name");
+        check(!render_note(s.instruments[0], 48).empty(), "song: a single instrument note renders (the editor's audition)");
+        check(song_problems(Song{}).size() == 2 && song_problems(s).empty(), "song: problems (no instruments, empty order)");
+
+        // the bake: .sfx / .song -> Sound assets, read back from a mounted bundle
+        write_file("build/p_coin.sfx", sfx_to_json(p).data(), sfx_to_json(p).size());
+        const std::string sj = song_to_json(s);
+        write_file("build/p_theme.song", sj.data(), sj.size());
+        BundleWriter w(2);
+        check(build_from_source(w, "build/p_coin.sfx") && build_from_source(w, "build/p_theme.song") &&
+              w.write("build/p_synth.phxp"), "sfx/song: the bake dispatches them to Sound assets");
+        ResourceCache* cs = ResourceCache::create(arena).unwrap();
+        check(cs->mount(plat, "build/p_synth.phxp") == Status::Ok, "sfx/song: mount");
+        auto cv = cs->sound("p_coin"_hash);
+        auto tv = cs->sound("p_theme"_hash);
+        check(cv.ok() && cv.unwrap().rate == kSynthRate && cv.unwrap().frames == a.size() &&
+              std::memcmp(cv.unwrap().samples, a.data(), a.size() * 2) == 0, "sfx: the baked sound is the editor's render");
+        check(tv.ok() && tv.unwrap().frames == pcm.size(), "song: the baked music is the whole song");
+        BundleWriter w0(0);                                        // tier 0: resampled to the GBA rate
+        check(build_song(w0, "build/p_theme.song", "theme") && w0.write("build/p_synth.t0.phxp"), "song: tier-0 bake");
+        ResourceCache* c0 = ResourceCache::create(arena).unwrap();
+        check(c0->mount(plat, "build/p_synth.t0.phxp") == Status::Ok && c0->sound("theme"_hash).ok() &&
+              c0->sound("theme"_hash).unwrap().rate == 18157, "song: the tier-0 bake is at the GBA device rate");
+        check(!build_sfx(w, "build/nope.sfx"), "sfx: a missing file fails the bake");
+    }
+
+    // ---- fonts: a .font grid sheet (proportional / fixed) and a BMFont .fnt -> Texture + Font ----
+    {
+        using namespace phxtool;
+        std::vector<uint32_t> atlas(size_t(kAsciiFontW) * kAsciiFontH);
+        build_ascii_font(atlas.data());
+        check(png_write_file("build/p_font.png", atlas.data(), kAsciiFontW, kAsciiFontH), "font: write the ASCII sheet");
+        const std::string fj = "{ \"font\": 1, \"image\": \"p_font.png\", \"cell_w\": 8, \"cell_h\": 8, \"space\": 3, \"line_h\": 9 }";
+        write_file("build/p_font.font", fj.data(), fj.size());
+        FontDef fd;
+        std::string err;
+        check(load_fontdef(fj, "build/p_font.font", fd, &err) && fd.proportional && fd.spacing == 1 && fd.image == "p_font.png" &&
+              font_image_path("build/p_font.font", fd.image) == "build/p_font.png", "font: .font defaults and the sheet path");
+        FontDef rt;
+        check(load_fontdef(fontdef_to_json(fd), "x.font", rt) && rt.space == 3 && rt.line_h == 9 && rt.cell_w == 8,
+              "font: .font JSON round trip");
+        phx::FontBlobHeader hdr{};
+        std::vector<phx::FontGlyphDef> gl;
+        check(font_glyphs_from_grid(fd, atlas, kAsciiFontW, kAsciiFontH, hdr, gl) && gl.size() == 96 && hdr.first_char == 32 &&
+              hdr.line_h == 9 && (hdr.flags & phx::kFontProportional), "font: 96 glyphs from the grid");
+        const auto& gi = gl['i' - 32]; const auto& gm = gl['M' - 32]; const auto& gs = gl[0];
+        check(gs.w == 0 && gs.advance == 3 && gi.w > 0 && gi.w < gm.w && gi.advance == gi.w + 1 && gm.advance == gm.w + 1 &&
+              gm.sx >= ('M' - 32) % 16 * 8 && gm.sx + gm.w <= ('M' - 32) % 16 * 8 + 8 && hdr.advance == gm.advance,
+              "font: proportional widths are measured from the pixels (i narrower than M, space = 3)");
+        FontDef fx = fd; fx.proportional = false; fx.advance = 6;
+        check(font_glyphs_from_grid(fx, atlas, kAsciiFontW, kAsciiFontH, hdr, gl) && gl['i' - 32].advance == 6 &&
+              gl['i' - 32].w == 8 && gl[0].w == 0 && !(hdr.flags & phx::kFontProportional) && hdr.advance == 6,
+              "font: fixed-width fonts keep whole cells and one advance");
+        FontDef few = fd; few.first = 65; few.count = 3;
+        check(font_glyphs_from_grid(few, atlas, kAsciiFontW, kAsciiFontH, hdr, gl) && gl.size() == 3 && hdr.first_char == 65,
+              "font: first / count pick a range");
+        FontDef bad;
+        check(!load_fontdef("{ \"font\": 1 }", "x.font", bad, &err) && err.find("image") != std::string::npos &&
+              !load_fontdef("{ \"image\": \"a.png\", \"cell_w\": 0 }", "x.font", bad), "font: a .font without a sheet or cells fails");
+
+        // a BMFont text export (two characters, one page)
+        const std::string fnt =
+            "info face=\"Tiny\" size=8\ncommon lineHeight=10 base=8 scaleW=128 scaleH=48 pages=1\n"
+            "page id=0 file=\"p_font.png\"\nchars count=2\n"
+            "char id=65 x=8 y=16 width=5 height=7 xoffset=1 yoffset=1 xadvance=7 page=0 chnl=15\n"
+            "char id=67 x=24 y=16 width=4 height=7 xoffset=0 yoffset=-1 xadvance=5 page=0 chnl=15\n";
+        write_file("build/p_bm.fnt", fnt.data(), fnt.size());
+        BmFont bm;
+        check(load_bmfont(fnt, "build/p_bm.fnt", bm) && bm.page == "p_font.png" && bm.line_h == 10 && bm.chars.size() == 2,
+              "font: BMFont text is parsed");
+        check(font_glyphs_from_bmfont(bm, hdr, gl) && hdr.first_char == 65 && gl.size() == 3 && gl[0].advance == 7 &&
+              gl[0].xoff == 1 && gl[2].yoff == -1 && gl[1].w == 0 && hdr.line_h == 10, "font: BMFont chars become the glyph table");
+        check(!load_bmfont("BMF\x03", "x.fnt", bm, &err), "font: a binary BMFont is refused with a reason");
+
+        // bake + mount: Texture (the sheet) + Font (the table), by the def's name
+        BundleWriter w(2);
+        check(build_from_source(w, "build/p_font.font") && build_font(w, "build/p_bm.fnt", "p_bm") &&
+              w.write("build/p_font.phxp"), "font: .font / .fnt bake");
+        ResourceCache* cf = ResourceCache::create(arena).unwrap();
+        check(cf->mount(plat, "build/p_font.phxp") == Status::Ok, "font: mount");
+        auto fv = cf->font("p_font"_hash);
+        check(fv.ok() && fv.unwrap().texture == "p_font"_hash && fv.unwrap().glyph_count == 96 && fv.unwrap().line_h == 9 &&
+              fv.unwrap().glyphs[0].advance == 3 && cf->texture("p_font"_hash).ok(),
+              "font: the Font asset names its sheet texture; glyphs read in place");
+        auto bv = cf->font("p_bm"_hash);
+        check(bv.ok() && bv.unwrap().first_char == 65 && bv.unwrap().glyphs[0].xoff == 1, "font: the BMFont import mounts");
+        const std::string oob = "common lineHeight=10\npage id=0 file=\"p_font.png\"\nchar id=65 x=200 y=0 width=8 height=8 xadvance=8\n";
+        write_file("build/p_oob.fnt", oob.data(), oob.size());
+        check(!build_font(w, "build/p_oob.fnt"), "font: a glyph outside the sheet fails the bake");
     }
 
     plat->shutdown();

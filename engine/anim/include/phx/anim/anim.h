@@ -32,11 +32,24 @@ struct SpriteSheet {
     uint16_t cols    = 1;
 };
 
+// A data-driven transition: while the animator is in clip `from` (kAnyClip: in any clip) and
+// receives `trigger`, it switches to clip `to`. Edges are authored data (a sprite's `trans` lines,
+// baked by phxsprite), not code. The trigger kAnimDone fires by itself when a non-looping clip
+// reaches its end, so `trans attack idle done` returns to idle after one swing.
+struct AnimEdge {
+    uint8_t  from;       // clip index, or kAnyClip
+    uint8_t  to;         // clip index
+    NameHash trigger;    // "jump"_hash, kAnimDone, ...   (offset 4: the baked SpriteTransDef's layout)
+};
+constexpr uint8_t  kAnyClip  = 0xFF;
+constexpr NameHash kAnimDone = "done"_hash;
+
 // ECS component. Holds the clip table + sheet (data), the playback cursor, AND the computed
 // output rect (cur_*) the renderer reads. State id == clip index (the state machine drives
 // both together); `finished` latches when a non-looping clip reaches its last frame.
 struct Animator {
     Span<const AnimClip> clips;       // the authored clip table
+    Span<const AnimEdge> edges;       // its transitions (optional; see trigger())
     SpriteSheet          sheet;
     uint16_t clip   = 0;              // current clip / state id
     uint16_t frame  = 0;             // frame WITHIN the current clip (0..count-1)
@@ -52,27 +65,31 @@ struct Animator {
     void play(uint16_t clip_id) {    // switch clip and restart from frame 0
         clip = clip_id; frame = 0; timer = scalar{}; finished = false;
     }
-};
-
-// Data-driven transitions: an edge fires when the machine is in `from` and receives
-// `trigger`, switching to `to`. Edges are authored data (a sidecar), not code.
-struct AnimStateMachine {
-    struct Edge { uint8_t from; uint8_t to; uint16_t trigger; };
-    Span<const Edge> edges;
-
-    // Request a transition. If an edge matches (animator.clip, trig), switch clips.
-    // Returns true if a transition fired.
-    bool set_trigger(Animator& a, uint16_t trig) const {
-        for (size_t i = 0; i < edges.size(); ++i)
-            if (edges[i].from == a.clip && edges[i].trigger == trig) {
-                a.play(edges[i].to);
-                return true;
-            }
+    // Fire a transition trigger. An edge from the current clip wins over a kAnyClip edge; an
+    // any-clip edge into the clip already playing does nothing (so a trigger can be sent every
+    // step). True when a transition fired.
+    bool trigger(NameHash trig) { return fire(edges, trig); }
+    bool fire(Span<const AnimEdge> es, NameHash trig) {
+        for (size_t i = 0; i < es.size(); ++i)
+            if (es[i].from == clip && es[i].trigger == trig) { play(es[i].to); return true; }
+        for (size_t i = 0; i < es.size(); ++i)
+            if (es[i].from == kAnyClip && es[i].trigger == trig && es[i].to != clip) { play(es[i].to); return true; }
         return false;
     }
 };
 
-// Advances every Animator in the world by one fixed step and refreshes its output rect.
+// A standalone edge table (the Animator carries its own in `edges`; this drives any animator).
+struct AnimStateMachine {
+    using Edge = AnimEdge;
+    Span<const Edge> edges;
+
+    // Request a transition. If an edge matches (animator.clip, trig), switch clips.
+    // Returns true if a transition fired.
+    bool set_trigger(Animator& a, NameHash trig) const { return a.fire(edges, trig); }
+};
+
+// Advances every Animator in the world by one fixed step and refreshes its output rect. When a
+// non-looping clip finishes, the animator's own edges receive kAnimDone.
 class AnimationSystem {
 public:
     void tick(ecs::World&, scalar dt) const;

@@ -24,6 +24,19 @@ struct TextureView {
     PixelFormat format = PixelFormat::RGBA8;
 };
 
+// A baked font's glyph table (FontBlobHeader + glyphs); its atlas is the texture `texture`.
+// phx/runtime/font.h turns it into a ui BitmapFont.
+struct FontView {
+    NameHash            texture     = 0;
+    uint16_t            glyph_count = 0;
+    uint8_t             first_char  = 32;
+    uint8_t             line_h      = 8;
+    uint8_t             cell_w = 8, cell_h = 8;
+    uint8_t             advance     = 8;
+    uint8_t             flags       = 0;
+    const FontGlyphDef* glyphs      = nullptr;
+};
+
 struct TilemapView {
     const uint16_t* indices = nullptr;
     uint16_t        width   = 0;     // in tiles
@@ -136,6 +149,8 @@ struct SpriteView {
     uint16_t             cols       = 0;
     uint16_t             clip_count = 0;
     const SpriteClipDef* clips      = nullptr;   // clip_count entries
+    uint32_t              trans_count = 0;        // the transitions trailer (0 when absent)
+    const SpriteTransDef* trans       = nullptr;
 };
 
 // Compile-time name hashing so call sites cost nothing: cache.texture("hero"_hash)
@@ -174,6 +189,7 @@ public:
     Result<TextureView> texture(NameHash);
     Result<TilemapView> tilemap(NameHash);
     Result<SpriteView>  sprite(NameHash);
+    Result<FontView>    font(NameHash);
     Result<SpawnsView>  spawns(NameHash);
     Result<SoundDataView> sound(NameHash);
     Result<BlobView>    blob(NameHash);

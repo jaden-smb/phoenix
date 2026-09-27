@@ -3,6 +3,7 @@
 #include "phx/runtime/flow.h"
 #include "phx/runtime/app.h"
 #include "phx/runtime/audio.h"
+#include "phx/runtime/font.h"
 #include "phx/core/log.h"
 
 #include <cstring>
@@ -30,17 +31,9 @@ Status GameFlow::start(App& app, ResourceCache& res, const FlowOptions& opt) {
         PHX_LOG_ERROR("flow: no flow table in the bundle (assets/flow.json)");
         return Status::NotFound;
     }
-    if (auto t = res.texture(opt.font)) {
-        const TextureView v = t.unwrap();
-        TextureDesc d{};
-        d.pixels = v.pixels; d.width = v.width; d.height = v.height; d.format = v.format;
-        font_ = BitmapFont{};
-        font_.tex = app.render().load_texture(d);
-        font_.glyph_w = 8; font_.glyph_h = 8; font_.cols = 16; font_.first_char = 32;
-        font_.advance = 6; font_.line_h = 9;
-    } else {
-        PHX_LOG_WARN("flow: no font texture (assets/font.png): screens show no text");
-    }
+    font_ = BitmapFont{};
+    if (!load_font(app.render(), res, opt.font, font_))
+        PHX_LOG_WARN("flow: no font (assets/font.font or font.png): screens show no text");
     for (uint32_t i = 0; i < kMaxTotals; ++i) { total_names_[i] = 0; total_vals_[i] = 0; }
     enter(app, 0);
     return Status::Ok;
@@ -80,7 +73,10 @@ bool GameFlow::go(App& app, NameHash name) {
 void GameFlow::enter(App& app, int32_t row) {
     row_ = row; ticks_ = 0; paused_ = false; in_level_ = false;
     if (const NameHash m = table_.get_hash(row, "music"_hash))
-        if (auto s = res_->sound(m)) app.audio().play_music(to_sound(s.unwrap()));
+        if (auto s = res_->sound(m)) {
+            const int32_t vol = table_.get_int(row, "music_vol"_hash, 60);
+            app.audio().play_music(to_sound(s.unwrap()), float(vol < 0 ? 0 : vol > 100 ? 100 : vol) / 100.0f);
+        }
     if (table_.get_hash(row, "kind"_hash) != "level"_hash) return;
     const NameHash map = table_.get_hash(row, "map"_hash);
     LevelOptions lo;
@@ -146,7 +142,7 @@ void GameFlow::text_lines(App& app, const char* s, int y, bool centred) {
         int n = 0;
         while (s[n] && s[n] != '|' && n < 71) { line[n] = s[n]; ++n; }
         line[n] = 0;
-        const int x = centred ? (w - n * font_.advance) / 2 : 4;
+        const int x = centred ? (w - UI::text_width(font_, line)) / 2 : 4;
         ui_.text(vec2{ cam.pos.x + s_from_int(x), cam.pos.y + s_from_int(y) }, font_, line, kText);
         y += font_.line_h;
         s += n;
@@ -180,14 +176,14 @@ void GameFlow::render(App& app) {
                 int_text(lives - beh_.counter("deaths"_hash), num);
                 std::strcpy(buf, "LIVES ");
                 std::strcat(buf, num);
-                ui_.text(at(w - 4 - int(std::strlen(buf)) * font_.advance, 4), font_, buf, kAccent);
+                ui_.text(at(w - 4 - UI::text_width(font_, buf), 4), font_, buf, kAccent);
             }
             if (ticks_ < 120) text_lines(app, table_.get_str(row_, "text"_hash), h / 3, true);   // the banner
-            if (paused_) ui_.text(at((w - 6 * font_.advance) / 2, h / 2 - 4), font_, "PAUSED", kText);
+            if (paused_) ui_.text(at((w - UI::text_width(font_, "PAUSED")) / 2, h / 2 - 4), font_, "PAUSED", kText);
         } else {
             text_lines(app, table_.get_str(row_, "text"_hash), h / 3, true);
             if ((ticks_ / 30) % 2 == 0)
-                ui_.text(at((w - 11 * font_.advance) / 2, h - 24), font_, "PRESS START", kDim);
+                ui_.text(at((w - UI::text_width(font_, "PRESS START")) / 2, h - 24), font_, "PRESS START", kDim);
         }
     }
     ui_.end();

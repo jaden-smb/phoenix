@@ -12,14 +12,17 @@
 //   | next    | str   | the screen after this one (default: the next row)                      |
 //   | lives   | int   | level: deaths before "gameover" (0 = no limit)                         |
 //   | counter | str   | level: the counter the HUD shows (default "coins"); `label` its caption |
-//   | music   | str   | a sound asset to loop from this screen on (empty: keep what plays)      |
+//   | music   | str   | a sound asset to loop from this screen on (empty: keep what plays):    |
+//   |         |       | a .song from the Studio's song editor, or any sound                   |
+//   | music_vol | int | its volume in percent (default 60: headroom for the sound effects)     |
 //
 // Flow: the first row starts. START leaves a title (and pauses / resumes a level). A level ends
 // when the player touches an Exit (to its `target` screen if one is named so, else `next`), or
 // runs out of lives (to the screen called "gameover", else the level restarts). An end screen's
 // START goes back to the first row and clears the totals. Counters add up across levels
-// (total()). Text uses a font sheet (FlowOptions::font: a 16-column 8x8 ASCII texture), drawn
-// with phx::UI, so it shows on every target.
+// (total()). Text uses the font FlowOptions::font (phx/runtime/font.h: a baked `.font`, which may
+// be proportional, or a plain 16-column 8x8 ASCII texture), drawn with phx::UI, so it shows on
+// every target.
 //
 //     flow.start(app, *res);        // on_start, after mounting the bundle
 //     flow.update(app, dt);         // on_fixed_update
@@ -34,7 +37,7 @@ namespace phx {
 
 struct FlowOptions {
     NameHash table   = "flow"_hash;          // the flow table asset
-    NameHash font    = "font"_hash;          // the font sheet (a texture)
+    NameHash font    = "font"_hash;          // the font (a Font asset, else a texture of that name)
     int32_t  gravity = 420;                  // px/s², for every level
 };
 

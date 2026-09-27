@@ -8,9 +8,9 @@
 
 | Tool        | Input → Output                         | Role                                  |
 |-------------|----------------------------------------|---------------------------------------|
-| `phxsprite` | PNG (+ slice json) → `.phxspr`         | sprite/atlas + animation slicing      |
+| `phxsprite` | PNG (+ slice json) / `.font` / `.fnt` → `.phxspr` | sprite/atlas + animation slicing; fonts |
 | `phxtile`   | Tiled `.tmj` → `.phxtmap`               | tilemap + layers + collision baking   |
-| `phxsnd`    | WAV → `.phxsnd`                        | audio: mono 16-bit PCM (GBA resampled at bake, see §5) |
+| `phxsnd`    | WAV / `.sfx` / `.song` → `.phxsnd`     | audio: mono 16-bit PCM (GBA resampled at bake, see §5) |
 | `phxbin`    | JSON → `.phxbin`                       | data tables → optimized binary         |
 | `phxpack`   | the above `+` → `assets.phxp`          | bundle assembler (sorted TOC, optional LZ77; see §2 for what's actually per-target) |
 | `phxtmap`   | GUI tilemap editor → `.tmj`            | authoring (wraps Tiled-compatible fmt); the Studio's map panel standalone |
@@ -56,7 +56,19 @@ Responsibilities:
 - **Manifest** (`--manifest` → `<out>.manifest.txt`): human-readable
   hash ↔ name ↔ source-path table for dev builds (hashes are one-way; this is the map).
 
-## 3. `phxsprite` — sprites, atlases, animation
+## 3. `phxsprite` — sprites, atlases, animation, fonts
+
+**Fonts** are atlases too. `phxsprite` bakes a `.font` or a BMFont `.fnt` to the sheet Texture
+plus a Font asset: the glyph table in `phx/resource/bundle.h`, read in place by
+`phx/runtime/font.h`.
+- A `.font` is JSON over a grid sheet. It sets the cell size and the first character, plus
+  `proportional` / `spacing` / `space` or a fixed `advance`, and `line_h`. Proportional widths
+  are measured from each glyph's opaque columns at bake (`tools/phxpack/font.h`, shared with
+  Phoenix Studio's font editor).
+- A `.fnt` is BMFont's text export (BMFont, Hiero, Littera...): each character's rect, offset
+  and advance, from one page.
+- TrueType is not rasterized: export a pixel font to `.fnt` (or draw one in the Studio) first.
+
 
 Input: a PNG plus an optional sidecar describing slices/animations:
 
@@ -69,13 +81,22 @@ Input: a PNG plus an optional sidecar describing slices/animations:
     "idle": { "frames": [0,1],       "fps": 4,  "loop": true },
     "run":  { "frames": [2,3,4,5],   "fps": 12, "loop": true },
     "jump": { "frames": [6],         "fps": 1,  "loop": false }
-  }
+  },
+  "transitions": [                   // the animation state machine (optional)
+    { "from": "idle", "to": "run",  "on": "move" },
+    { "from": "*",    "to": "jump", "on": "jump" },
+    { "from": "jump", "to": "idle", "on": "land" }
+  ]
 }
 ```
 
+(The line-based `.sprdef` says the same with `clip` and `trans <from|*> <to> <trigger>` lines;
+tools/phxsprite/instructions.md.)
+
 Output `.phxspr` blob: the atlas texture **per-target encoded** (shared `BundleWriter`
 path, so `--target 0` emits 4bpp paletted tiles, `--target 1` swizzled RGBA8 — see §2 and
-docs/06 §4) + a frame table + an animation table consumed directly by `engine/anim`.
+docs/06 §4) + a frame table + an animation table consumed directly by `engine/anim`, and
+(when authored) a transitions trailer whose clip names were resolved to indices at bake time.
 
 **Bake-time GBA palette quantization is implemented** (`tools/phxpack/tex_encode.h`): the
 tier-0 encoder runs the same quantizer as the GBA PPU upload path (≤15 opaque colours per
@@ -134,6 +155,14 @@ as before. (`.tmx`/XML input remains unbuilt — export `.tmj` from Tiled.)
 
 Output `.phxsnd`: header (rate, frames) + samples. Music can be streamed by the
 runtime instead of fully residing (`docs/06` §5).
+
+**Synthesized sources.** Besides WAV, `phxsnd` bakes a **sound effect** (`.sfx`: an sfxr-style
+parameter set) and a **song** (`.song`: a small pattern tracker with instruments, patterns and an
+order list). `tools/phxpack/synth.h` renders them to PCM at 22050 Hz, and they then take exactly
+the WAV path: the same Sound asset and the same tier-0 resample. Nothing is synthesized at
+runtime. A song is one rendered loop, which the music bus loops, as Emberwing's baked theme does.
+The renders are deterministic (an LFSR for noise, seeded presets). Phoenix Studio's sound effect
+and song editors play the exact PCM the bake produces.
 
 ## 6. `phxbin` — JSON → binary tables
 

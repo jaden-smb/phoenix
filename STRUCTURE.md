@@ -43,6 +43,8 @@ phoenix/
 │   │   │                         device, started on first play; headless mix where there's none)
 │   │   │                         · flow.h (GameFlow: the flow table's screens — title, levels,
 │   │   │                         lives, pause, HUD, end — run from data)
+│   │   │                         · font.h (load_font: a baked Font asset -> a ui BitmapFont,
+│   │   │                         proportional glyph table read in place)
 │   │   │                         · devtools.h (desktop: F1 overlay, F5 pause, F6 step, live
 │   │   │                         entity inspector over the reflected components)
 │   │   │                         · behaviours.h (stock components: PlatformerController, Patrol,
@@ -78,12 +80,15 @@ phoenix/
 │   │                             Every tool folder has an instructions.md (usage/formats/controls).
 │   ├── phxpack/                  Bundle ASSEMBLER: bakes sources directly OR merges .phx* intermediates -> assets.phxp.
 │   │                             builders.h = the ONE shared bake path (DEFLATE/PNG/JSON/Tiled/WAV importers);
+│   │                             synth.h = .sfx (sound-effect generator) / .song (tracker) -> PCM;
+│   │                             font.h = .font grid sheets / BMFont .fnt -> a Font glyph table;
 │   │                             bundle_writer.h does the per-target encode; bundle_reader.h merges.
-│   ├── phxsprite/                CONVERTER: PNG + .sprdef/json sidecar -> .phxspr (atlas + animation clips)
+│   ├── phxsprite/                CONVERTER: PNG + .sprdef/json sidecar -> .phxspr (atlas + animation clips);
+│   │                             also fonts: .font / .fnt -> the sheet + a Font asset
 │   ├── phxtile/                  CONVERTER: Tiled .tmj -> .phxtmap (layers + parallax + spawns +
 │   │                             per-tile collision flags from tileset properties; flag-less
 │   │                             maps: non-empty tiles on the gameplay layer = solid)
-│   ├── phxsnd/                   CONVERTER: WAV -> .phxsnd (mono16; tier 0 resamples to the GBA device
+│   ├── phxsnd/                   CONVERTER: WAV / .sfx / .song -> .phxsnd (mono16; tier 0 resamples to the GBA device
 │   │                             rate at bake time — ADPCM is future)
 │   ├── phxbin/                   CONVERTER: JSON -> .phxbin flat table (+ generated .gen.h accessor)
 │   ├── phxtmap/                  GUI tilemap editor: the Studio's map panel (ed_map.cpp) in a one-document
@@ -91,7 +96,8 @@ phoenix/
 │   ├── phxentity/                GUI data-table editor: the Studio's table panel (ed_table.cpp) standalone.
 │   │                             editor.h = the headlessly-tested phxbin JSON document model
 │   ├── phxstudio/                Phoenix Studio — THE editor: Explorer + tabs of documents in the CODE,
-│   │                             SPRITE/PIXEL, TILEMAP and DATA-TABLE editors (ed_*.cpp; workspace.cpp),
+│   │                             SPRITE/PIXEL, TILEMAP, DATA-TABLE, SOUND-EFFECT, SONG and FONT editors
+│   │                             (ed_*.cpp; workspace.cpp),
 │   │                             plus the module graph + caps tiers, the bundle browser with per-render-
 │   │                             tier previews, and one-click games/editors/gates/suites/console builds.
 │   │                             Headless models (editors + pipeline suites): textdoc.h · syntax.h ·

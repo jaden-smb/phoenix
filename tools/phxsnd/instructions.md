@@ -2,9 +2,20 @@
 
 ## What it is for
 
-Bakes a **WAV file** into a `.phxsnd` intermediate holding one Sound asset — mono 16-bit PCM
-the runtime wraps as a `SoundView` and plays through the software mixer. `phxpack` merges the
-`.phxsnd` into the final bundle.
+Bakes a **WAV file**, a **sound effect** (`.sfx`) or a **song** (`.song`) into a `.phxsnd`
+intermediate holding one Sound asset — mono 16-bit PCM the runtime wraps as a `SoundView` and
+plays through the software mixer. `phxpack` merges the `.phxsnd` into the final bundle.
+
+`.sfx` and `.song` are synthesized first, by `tools/phxpack/synth.h` (the same code Phoenix
+Studio's sound effect and song editors play), at 22050 Hz:
+
+- **`.sfx`** is JSON: the parameters of an sfxr-style generator. It holds `wave` (square, saw,
+  triangle, sine, noise) plus pitch, slide, vibrato, arpeggio, duty, envelope, filter and volume
+  values; every key is optional. See the header comment in `synth.h` for the full list.
+- **`.song`** is JSON for a pattern tracker. It holds `bpm`, `rows_per_beat`, `channels`,
+  `instruments` (a wave and an envelope each), `patterns` (rows of cells such as `"C-4 lead"`,
+  `"off"` or `""`) and an `order` of pattern names. The song renders once through its order
+  list; `play_music` loops it.
 
 ## How it works
 
@@ -26,10 +37,10 @@ downmixed to mono, 8-bit is converted to signed 16. Then the **per-target encode
 ```bash
 make check              # builds build/phxsnd along the way (or: make tools)
 
-./build/phxsnd --out FILE.phxsnd [--name N] [--target 0|1|2] <sound.wav>
+./build/phxsnd --out FILE.phxsnd [--name N] [--target 0|1|2] <sound.wav | effect.sfx | music.song>
 ```
 
-The asset name defaults to the WAV's stem; the game looks it up by that name
+The asset name defaults to the input's stem; the game looks it up by that name
 (`res->sound("jump"_hash)`) and plays it via the mixer / command queue.
 
 ## Example

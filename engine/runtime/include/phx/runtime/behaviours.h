@@ -5,7 +5,8 @@
 //   | component            | what it does                                                        |
 //   |----------------------|---------------------------------------------------------------------|
 //   | PlatformerController | run (Left/Right) and jump (A) on its Body; walk/idle/jump clips by  |
-//   |                      | name; a jump sound; hazard TILES send it back to the respawn point |
+//   |                      | name (or events into the sprite's transitions, below); a jump      |
+//   |                      | sound; hazard TILES send it back to the respawn point              |
 //   | Patrol               | walk back and forth `range` px around where it spawned, turning at  |
 //   |                      | walls; needs a Body                                                 |
 //   | Pickup               | touched by the player: add `value` to the `counter` counter, play   |
@@ -22,6 +23,22 @@
 //     behaviours.update(app, dt);                            // on_fixed_update: control -> patrol
 //                                                            //   -> physics -> contacts -> anim
 //     r.begin_frame(behaviours.camera());                   // on_render
+//
+// ANIMATION. A sprite without transitions is driven by clip name (idle_clip/walk_clip/jump_clip).
+// A sprite WITH transitions (`trans` lines in its .sprdef; the sprite editor's Transitions list)
+// is a state machine, and the controller only sends it events, every step:
+//
+//   | trigger | when                                        | e.g. in hero.sprdef          |
+//   |---------|---------------------------------------------|------------------------------|
+//   | jump    | the step it jumps                           | trans * jump jump            |
+//   | fall    | in the air, moving down                     | trans jump fall fall         |
+//   | land    | the step it touches ground again            | trans * land land            |
+//   | move    | on the ground, running                      | trans idle walk move         |
+//   | stop    | on the ground, standing                     | trans walk idle stop         |
+//   | hurt    | sent back to the respawn point (respawn())  | trans * hurt hurt            |
+//   | done    | a non-looping clip ended (the anim system)  | trans land idle done         |
+//
+// A game fires its own the same way: anim_trigger(world, e, "attack"_hash).
 //
 // A game adds its own rules around update(): hits() are this step's contacts, counter("coins")
 // the tallies, exit() the level exit reached. Everything is fixed-step and scalar-typed, so it
@@ -42,6 +59,8 @@ struct PlatformerController {
     NameHash idle_clip  = "idle"_hash;     // clips by name (a missing one is skipped)
     NameHash walk_clip  = "walk"_hash;
     NameHash jump_clip  = "jump"_hash;
+    // state (not authored)
+    bool     airborne = false;             // in the air last step (for the `land` trigger)
 };
 
 struct Patrol {
@@ -120,6 +139,10 @@ private:
 // Play a clip of an entity's sprite by name (the level keeps each sprite's clip names). False when
 // the entity has no such clip; playing the clip it is already in does not restart it.
 bool play_clip(ecs::World& w, ecs::Entity e, NameHash clip);
+
+// Send an animation trigger to an entity's sprite state machine (Animator::trigger): "attack"_hash,
+// "hurt"_hash. False when no transition fired (no Animator, or no edge for it from this clip).
+bool anim_trigger(ecs::World& w, ecs::Entity e, NameHash trigger);
 
 // "Play from here": the next Behaviours::start puts the player (and its respawn point) at (x, y)
 // instead of its spawn, once. The desktop entry sets it from PHX_PLAY_FROM="x,y", which Phoenix

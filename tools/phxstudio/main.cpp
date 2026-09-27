@@ -265,6 +265,8 @@ struct StudioHost final : Host {
     bool play_from(int x, int y) override;
     void file_saved(const std::string& path_abs) override;
     std::vector<Diag> diagnostics_for(const std::string& path_abs) override;
+    bool play_pcm(const std::vector<int16_t>& pcm, uint32_t rate, bool loop) override;
+    void stop_pcm() override;
 };
 
 // ============================================================================================
@@ -386,6 +388,9 @@ struct StudioGame final : Game {
     int snd_asset = -1;
     uint64_t snd_t0 = 0;
     bool snd_playing = false;
+    // Editor auditions (Host::play_pcm): the last few buffers stay alive, so the audio thread never
+    // reads a buffer that was replaced before its stop intent was drained.
+    std::vector<std::shared_ptr<std::vector<int16_t>>> audition_bufs;
     std::vector<int16_t> wave_mn, wave_mx;
     int wave_asset = -1, wave_cols = 0;
 
@@ -908,7 +913,8 @@ struct StudioGame final : Game {
         if (!nm) return src_cache_;
         FileKind want = FileKind::Image;
         switch (a.type) {
-        case AssetType::Texture: case AssetType::Font: want = FileKind::Image; break;
+        case AssetType::Texture: want = FileKind::Image; break;
+        case AssetType::Font:    want = FileKind::Font; break;
         case AssetType::Sprite:  want = FileKind::Sprite; break;
         case AssetType::Tilemap: case AssetType::Spawns: want = FileKind::Map; break;
         case AssetType::Blob:    want = FileKind::Table; break;
@@ -2009,8 +2015,8 @@ struct StudioGame final : Game {
         const int idx = current_index();
         const Rect body = preview_header(p, *a);
         switch (a->type) {
-        case AssetType::Texture:
-        case AssetType::Font:    preview_texture(r, idx, p, body); break;
+        case AssetType::Texture: preview_texture(r, idx, p, body); break;
+        case AssetType::Font:    preview_font(*a, body); break;
         case AssetType::Sprite:  preview_sprite(r, idx, p, body); break;
         case AssetType::Tilemap: preview_tilemap(in, p, body); break;
         case AssetType::Sound:   preview_sound(idx, p, body); break;
@@ -2027,6 +2033,37 @@ struct StudioGame final : Game {
                 gui.rect(Rect{ x, y, std::min(c, r.x + r.w - x), std::min(c, r.y + r.h - y) },
                          odd ? rgba(58, 58, 74) : rgba(48, 48, 62), kLyWidget);
             }
+    }
+
+    // A Font asset: its metrics and glyph table (the atlas is the Texture asset it names).
+    void preview_font(const AssetEntry& a, const Rect& body) {
+        FontInfo f;
+        if (!view_font(a, f)) { gui.text(body.x + 4, body.y + 4, "malformed font", pal::bad); return; }
+        const std::string* tn = names.find(f.hdr.texture);
+        int y = body.y + 4;
+        gui.text(body.x + 4, y, fmt("atlas: texture '%s'   cell %ux%u   line height %u   widest advance %u",
+                                   tn ? tn->c_str() : fmt("%08x", unsigned(f.hdr.texture)).c_str(), unsigned(f.hdr.cell_w),
+                                   unsigned(f.hdr.cell_h), unsigned(f.hdr.line_h), unsigned(f.hdr.advance)),
+                 pal::text, kLyText, body.w - 8);
+        y += 12;
+        const std::string sample = "The quick brown fox jumps over the lazy dog";
+        gui.text(body.x + 4, y, fmt("\"%s\" is %d px wide", sample.c_str(), font_text_width(f, sample)), pal::dim, kLyText, body.w - 8);
+        y += 16;
+        gui.text(body.x + 4, y, "char   x    y    w  h  adv  xoff yoff", pal::dim);
+        y += 11;
+        const int rows = std::max(1, (body.bottom() - y) / 10);
+        const int per_col = rows, col_w = 230;
+        for (size_t i = 0; i < f.glyphs.size(); ++i) {
+            const int col = int(i) / per_col, row = int(i) % per_col;
+            const int x = body.x + 4 + col * col_w;
+            if (x + col_w > body.right() + col_w / 2) break;
+            const phx::FontGlyphDef& g = f.glyphs[i];
+            const int c = int(f.hdr.first_char) + int(i);
+            gui.text(x, y + row * 10, fmt("%c %3d %4u %4u %3u %2u %3u %4d %4d", c >= 33 && c < 127 ? char(c) : ' ', c,
+                                          unsigned(g.sx), unsigned(g.sy), unsigned(g.w), unsigned(g.h), unsigned(g.advance),
+                                          int(g.xoff), int(g.yoff)),
+                     g.w ? pal::text : pal::faint);
+        }
     }
 
     void preview_texture(Renderer& r, int idx, const Rect& p, const Rect& body) {
@@ -2678,6 +2715,18 @@ std::vector<Diag> StudioHost::diagnostics_for(const std::string& path_abs) {
     const std::string want = canon_path(path_abs);
     for (const Diag& d : s->diags) if (d.file == want) out.push_back(d);
     return out;
+}
+bool StudioHost::play_pcm(const std::vector<int16_t>& pcm, uint32_t rate, bool loop) {
+    if (pcm.empty() || !s->ensure_audio()) return false;
+    s->queue.stop_all();
+    s->snd_playing = false;
+    auto buf = std::make_shared<std::vector<int16_t>>(pcm);
+    s->audition_bufs.push_back(buf);
+    if (s->audition_bufs.size() > 4) s->audition_bufs.erase(s->audition_bufs.begin());
+    return s->queue.play_sfx(SoundView{ buf->data(), uint32_t(buf->size()), rate }, 1.0f, 0.0f, loop);
+}
+void StudioHost::stop_pcm() {
+    if (s->audio_state == 1) s->queue.stop_all();
 }
 
 void usage() {

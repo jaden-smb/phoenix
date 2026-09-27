@@ -11,6 +11,8 @@
 #include "tiled.h"
 #include "wav.h"
 #include "json.h"
+#include "synth.h"
+#include "font.h"          // .font / .fnt -> a glyph table (also Phoenix Studio's font editor)         // .sfx / .song -> PCM (the SFX generator and the tracker)
 #include "analyze.h"       // tools/phxviz — offline visualization-track analysis (build_viz)
 
 #include <cctype>
@@ -231,6 +233,41 @@ inline bool build_wav(BundleWriter& w, const std::string& in, const std::string&
     return true;
 }
 
+// ---- synthesized audio: .sfx (sound-effect parameters) / .song (tracker) -> a Sound asset ----
+// Rendered at kSynthRate by synth.h (the same code Phoenix Studio auditions), then baked exactly like
+// a WAV: add_sound() resamples it for tier 0.
+inline bool build_sfx(BundleWriter& w, const std::string& in, const std::string& name = "") {
+    std::vector<uint8_t> bytes;
+    if (!read_file(in, bytes)) { std::fprintf(stderr, "phx: cannot read '%s'\n", in.c_str()); return false; }
+    SfxParams p;
+    std::string err;
+    if (!sfx_from_json(std::string(bytes.begin(), bytes.end()), p, &err)) {
+        std::fprintf(stderr, "phx: bad sound effect '%s': %s\n", in.c_str(), err.c_str()); return false; }
+    const std::vector<int16_t> pcm = render_sfx(p);
+    if (pcm.empty()) { std::fprintf(stderr, "phx: sound effect '%s' is silent (zero length)\n", in.c_str()); return false; }
+    const std::string nm = name.empty() ? stem(in) : name;
+    w.add_sound(nm, pcm.data(), uint32_t(pcm.size()), kSynthRate);
+    std::printf("  + sound   %-12s %u frames @ %u Hz  (%s, sfx %s)\n",
+                nm.c_str(), unsigned(pcm.size()), kSynthRate, in.c_str(), wave_name(p.wave));
+    return true;
+}
+
+inline bool build_song(BundleWriter& w, const std::string& in, const std::string& name = "") {
+    std::vector<uint8_t> bytes;
+    if (!read_file(in, bytes)) { std::fprintf(stderr, "phx: cannot read '%s'\n", in.c_str()); return false; }
+    Song song;
+    std::string err;
+    if (!song_from_json(std::string(bytes.begin(), bytes.end()), song, &err)) {
+        std::fprintf(stderr, "phx: bad song '%s': %s\n", in.c_str(), err.c_str()); return false; }
+    const std::vector<int16_t> pcm = render_song(song);
+    if (pcm.empty()) { std::fprintf(stderr, "phx: song '%s' renders nothing (empty order list?)\n", in.c_str()); return false; }
+    const std::string nm = name.empty() ? stem(in) : name;
+    w.add_sound(nm, pcm.data(), uint32_t(pcm.size()), kSynthRate);
+    std::printf("  + sound   %-12s %u frames @ %u Hz  (%s, song: %d rows, %.1f s)\n",
+                nm.c_str(), unsigned(pcm.size()), kSynthRate, in.c_str(), song.total_rows(), song.seconds());
+    return true;
+}
+
 // ---- visualization track: WAV -> per-video-frame .phxviz analysis blob ----
 // Analyses the song offline (FFT bands / RMS / onset) at the target's audio device rate and
 // stores the result as a generic Blob asset the ROM reads zero-copy (examples/miracle-player).
@@ -253,11 +290,42 @@ inline bool build_viz(BundleWriter& w, const std::string& in, const std::string&
 }
 
 // ---- sprite sheets: .sprdef text OR a JSON sidecar ------------------------
+// A transition as authored: clip NAMES ("*" = from any clip) and the trigger's name. Resolved to
+// clip indices by sprite_transitions() at bake time, so a typo is a bake error, not a dead edge.
+struct SprTrans { std::string from, to, trigger; };
+
 struct SprDef {
     std::string sheet;                 // PNG path (resolved relative to the def's dir)
     int fw = 0, fh = 0;
     std::vector<phx::SpriteClipDef> clips;
+    std::vector<std::string> clip_names;   // parallel to clips
+    std::vector<SprTrans> trans;
 };
+
+// The baked transitions of `sd`, or false (with `err`) when an edge names a clip the sprite lacks.
+inline bool sprite_transitions(const SprDef& sd, std::vector<phx::SpriteTransDef>& out, std::string* err = nullptr) {
+    auto fail = [&](const std::string& why) { if (err) *err = why; return false; };
+    auto clip_index = [&](const std::string& n) -> int {
+        for (size_t i = 0; i < sd.clip_names.size(); ++i) if (sd.clip_names[i] == n) return int(i);
+        return -1;
+    };
+    out.clear();
+    for (const SprTrans& t : sd.trans) {
+        if (t.trigger.empty()) return fail("transition " + t.from + " -> " + t.to + " has no trigger");
+        const int to = clip_index(t.to);
+        const int from = t.from == "*" ? int(phx::kSpriteTransAny) : clip_index(t.from);
+        if (from < 0) return fail("transition from unknown clip '" + t.from + "'");
+        if (to < 0) return fail("transition to unknown clip '" + t.to + "'");
+        if (to >= int(phx::kSpriteTransAny) || (from != int(phx::kSpriteTransAny) && from >= int(phx::kSpriteTransAny)))
+            return fail("transitions address at most 255 clips");
+        phx::SpriteTransDef d{};
+        d.trigger = phx::fnv1a(t.trigger.c_str());
+        d.from = uint8_t(from);
+        d.to   = uint8_t(to);
+        out.push_back(d);
+    }
+    return true;
+}
 
 inline bool load_sprdef(const std::string& path, SprDef& out) {
     FILE* f = std::fopen(path.c_str(), "rb");
@@ -265,7 +333,7 @@ inline bool load_sprdef(const std::string& path, SprDef& out) {
     char line[1024];
     while (std::fgets(line, sizeof(line), f)) {
         if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
-        char a[256], b[256]; int v1, v2, v3, v4;
+        char a[256], b[256], c3[256]; int v1, v2, v3, v4;
         if (std::sscanf(line, "sheet %255s %d %d", a, &v1, &v2) == 3) {
             out.sheet = a; out.fw = v1; out.fh = v2;
         } else if (std::sscanf(line, "clip %255s %d %d %d %d", b, &v1, &v2, &v3, &v4) == 5) {
@@ -274,6 +342,9 @@ inline bool load_sprdef(const std::string& path, SprDef& out) {
             c.first = uint16_t(v1); c.count = uint16_t(v2);
             c.fps   = uint8_t(v3);  c.loop  = uint8_t(v4 ? 1 : 0);
             out.clips.push_back(c);
+            out.clip_names.push_back(b);
+        } else if (std::sscanf(line, "trans %255s %255s %255s", a, b, c3) == 3) {
+            out.trans.push_back(SprTrans{ a, b, c3 });
         }
     }
     std::fclose(f);
@@ -318,8 +389,15 @@ inline bool load_sprjson(const std::string& path, SprDef& out, std::string* err 
             c.fps   = uint8_t(a.int_at("fps", 0));
             c.loop  = uint8_t(a.find("loop") && a.find("loop")->boolean ? 1 : 0);
             out.clips.push_back(c);
+            out.clip_names.push_back(kv.first);
         }
     }
+    // "transitions": [ { "from": "idle" | "*", "to": "walk", "on": "move" } ]
+    if (const JsonValue* tr = root.find("transitions"); tr && tr->is_arr())
+        for (const JsonValue& t : tr->arr) {
+            const std::string from = t.str_at("from").empty() ? std::string("*") : t.str_at("from");
+            out.trans.push_back(SprTrans{ from, t.str_at("to"), t.str_at("on") });
+        }
     if (!out.sheet.empty() && out.sheet[0] != '/' && out.sheet.find('/') == std::string::npos)
         out.sheet = dir_of(path) + out.sheet;
     if (out.fw <= 0 || out.fh <= 0)
@@ -346,10 +424,59 @@ inline bool build_sprite(BundleWriter& w, const std::string& in, const std::stri
     const std::string texname = stem(sd.sheet);
     const std::string nm = name.empty() ? stem(in) : name;
     w.add_texture(texname, px.data(), iw, ih);
+    std::vector<phx::SpriteTransDef> trans;
+    if (!sprite_transitions(sd, trans, &serr)) {
+        std::fprintf(stderr, "phx: sprite def '%s': %s\n", in.c_str(), serr.c_str());
+        return false;
+    }
     const uint16_t cols = uint16_t(iw / uint16_t(sd.fw));
-    w.add_sprite(nm, texname, uint16_t(sd.fw), uint16_t(sd.fh), cols, sd.clips);
-    std::printf("  + sprite  %-12s sheet '%s' %dx%d, %u clips  (%s)\n",
-                nm.c_str(), texname.c_str(), sd.fw, sd.fh, unsigned(sd.clips.size()), in.c_str());
+    w.add_sprite(nm, texname, uint16_t(sd.fw), uint16_t(sd.fh), cols, sd.clips, trans);
+    std::printf("  + sprite  %-12s sheet '%s' %dx%d, %u clips", nm.c_str(), texname.c_str(), sd.fw, sd.fh,
+                unsigned(sd.clips.size()));
+    if (!trans.empty()) std::printf(", %u transitions", unsigned(trans.size()));
+    std::printf("  (%s)\n", in.c_str());
+    return true;
+}
+
+// Bakes the font's sheet (a Texture named after the PNG) + the Font asset (named `name`, default
+// the def's stem): res->font("font"_hash) / phx::load_font.
+inline bool build_font(BundleWriter& w, const std::string& in, const std::string& name = "") {
+    std::vector<uint8_t> bytes;
+    if (!read_file(in, bytes)) { std::fprintf(stderr, "phx: cannot read '%s'\n", in.c_str()); return false; }
+    const std::string text(bytes.begin(), bytes.end());
+    std::string err, image;
+    FontDef fd;
+    BmFont bm;
+    const bool is_fnt = ends_with(in, ".fnt");
+    if (is_fnt ? !load_bmfont(text, in, bm, &err) : !load_fontdef(text, in, fd, &err)) {
+        std::fprintf(stderr, "phx: bad font '%s': %s\n", in.c_str(), err.c_str());
+        return false;
+    }
+    image = font_image_path(in, is_fnt ? bm.page : fd.image);
+    std::vector<uint8_t> png;
+    if (!read_file(image, png)) { std::fprintf(stderr, "phx: font '%s' cannot read its sheet '%s'\n", in.c_str(), image.c_str()); return false; }
+    std::vector<uint32_t> px; uint16_t iw, ih;
+    if (!png_decode(png.data(), png.size(), px, iw, ih)) {
+        std::fprintf(stderr, "phx: font '%s' bad sheet PNG '%s'\n", in.c_str(), image.c_str()); return false; }
+    phx::FontBlobHeader hdr{};
+    std::vector<phx::FontGlyphDef> glyphs;
+    if (is_fnt ? !font_glyphs_from_bmfont(bm, hdr, glyphs, &err) : !font_glyphs_from_grid(fd, px, iw, ih, hdr, glyphs, &err)) {
+        std::fprintf(stderr, "phx: font '%s': %s\n", in.c_str(), err.c_str());
+        return false;
+    }
+    for (const phx::FontGlyphDef& g : glyphs)
+        if (g.w && (g.sx + g.w > iw || g.sy + g.h > ih)) {
+            std::fprintf(stderr, "phx: font '%s': a glyph lies outside the %ux%u sheet\n", in.c_str(), unsigned(iw), unsigned(ih));
+            return false;
+        }
+    const std::string texname = stem(image);
+    const std::string nm = name.empty() ? stem(in) : name;
+    w.add_texture(texname, px.data(), iw, ih);
+    hdr.texture = phx::fnv1a(texname.c_str());
+    w.add_font(nm, hdr, glyphs);
+    std::printf("  + font    %-12s sheet '%s', %u glyphs from '%c', %s, line %u  (%s)\n", nm.c_str(), texname.c_str(),
+                unsigned(glyphs.size()), char(hdr.first_char), (hdr.flags & phx::kFontProportional) ? "proportional" : "fixed",
+                unsigned(hdr.line_h), in.c_str());
     return true;
 }
 
@@ -495,7 +622,10 @@ inline bool build_from_source(BundleWriter& w, const std::string& in) {
     if (ends_with(in, ".tmcsv"))  return build_tmcsv(w, in);
     if (ends_with(in, ".tmj"))    return build_tmj(w, in);
     if (ends_with(in, ".wav"))    return build_wav(w, in);
+    if (ends_with(in, ".sfx"))    return build_sfx(w, in);
+    if (ends_with(in, ".song"))   return build_song(w, in);
     if (ends_with(in, ".sprdef")) return build_sprite(w, in);
+    if (ends_with(in, ".font") || ends_with(in, ".fnt")) return build_font(w, in);
     std::fprintf(stderr, "phx: unknown source type '%s'\n", in.c_str());
     return false;
 }

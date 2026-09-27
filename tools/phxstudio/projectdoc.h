@@ -23,6 +23,8 @@
 #define PHX_TOOLS_PHXSTUDIO_PROJECTDOC_H
 
 #include "json.h"                  // tools/phxpack — the one JSON parser
+#include "synth.h"                 // tools/phxpack — the template's .sfx sounds and .song music
+#include "font.h"                  // tools/phxpack — the template's .font
 #include "project.h"
 #include "pixeldoc.h"
 #include "../phxtmap/editor.h"     // TmapDoc (the template level)
@@ -365,9 +367,10 @@ inline PixelDoc tileset() {
     return t;
 }
 
-// The hero: 4 frames of 16x16 (a walk cycle; frame 0 doubles as the idle pose).
+// The hero: 6 frames of 16x16 — a walk cycle (frame 0 doubles as the idle pose), a jump pose
+// (stretched, feet tucked) and a landing squash.
 inline PixelDoc hero() {
-    PixelDoc h = PixelDoc::blank(64, 16, 0);
+    PixelDoc h = PixelDoc::blank(96, 16, 0);
     const uint32_t body = px_rgba(255, 138, 48), dark = px_rgba(170, 70, 30), eye = px_rgba(250, 250, 250),
                    pupil = px_rgba(30, 20, 30), foot = px_rgba(120, 50, 30);
     for (int f = 0; f < 4; ++f) {
@@ -380,6 +383,24 @@ inline PixelDoc hero() {
         const int step = (f == 1) ? 2 : (f == 3) ? -2 : 0;
         h.rect(x + 5 + step, 13, x + 6 + step, 15, foot, true);
         h.rect(x + 9 - step, 13, x + 10 - step, 15, foot, true);
+    }
+    {                                                       // frame 4: jump
+        const int x = 64;
+        h.ellipse(x + 4, 0, x + 11, 11, body, true);
+        h.ellipse(x + 4, 0, x + 11, 11, dark, false);
+        h.rect(x + 8, 3, x + 10, 5, eye, true);
+        h.set(x + 10, 4, pupil);
+        h.rect(x + 4, 12, x + 5, 13, foot, true);
+        h.rect(x + 10, 12, x + 11, 13, foot, true);
+    }
+    {                                                       // frame 5: land
+        const int x = 80;
+        h.ellipse(x + 1, 6, x + 14, 14, body, true);
+        h.ellipse(x + 1, 6, x + 14, 14, dark, false);
+        h.rect(x + 9, 8, x + 11, 10, eye, true);
+        h.set(x + 11, 9, pupil);
+        h.rect(x + 3, 14, x + 5, 15, foot, true);
+        h.rect(x + 10, 14, x + 12, 15, foot, true);
     }
     return h;
 }
@@ -427,8 +448,19 @@ inline PixelDoc font() {
     return f;
 }
 
+// The font the flow's screens and HUD use: assets/font.png (a 5x7 ASCII sheet in 8x8 cells) as a
+// PROPORTIONAL font (each glyph advances by its width + 1; the Studio's font editor measures it).
+inline phxtool::FontDef font_def() {
+    phxtool::FontDef d;
+    d.image = "font.png";
+    d.cell_w = 8; d.cell_h = 8; d.first = 32;
+    d.proportional = true; d.spacing = 1; d.space = 3; d.line_h = 9;
+    return d;
+}
+
 // The game flow (a phxbin table, phx/runtime/flow.h): the screens in order. `name` is the game's
-// title line. Add a level: a row of kind "level" with its own `map` (a new .tmj).
+// title line. Add a level: a row of kind "level" with its own `map` (a new .tmj). The title screen
+// starts assets/theme.song (the Studio's song editor); screens with no `music` keep it playing.
 inline std::string flow_json(const std::string& name) {
     std::string title;
     for (char c : name) if (c != '"' && c != '\\' && c != '|') title += c;
@@ -436,9 +468,10 @@ inline std::string flow_json(const std::string& name) {
     return "{ \"struct\":\"Screen\",\n"
            "  \"fields\":[{\"name\":\"name\",\"type\":\"str16\"}, {\"name\":\"kind\",\"type\":\"str16\"},"
            " {\"name\":\"map\",\"type\":\"str16\"}, {\"name\":\"text\",\"type\":\"str64\"}, {\"name\":\"next\",\"type\":\"str16\"},"
-           " {\"name\":\"lives\",\"type\":\"u8\"}, {\"name\":\"counter\",\"type\":\"str16\"}, {\"name\":\"label\",\"type\":\"str16\"}],\n"
+           " {\"name\":\"lives\",\"type\":\"u8\"}, {\"name\":\"counter\",\"type\":\"str16\"}, {\"name\":\"label\",\"type\":\"str16\"},"
+           " {\"name\":\"music\",\"type\":\"str16\"}],\n"
            "  \"records\":[\n"
-           "    {\"name\":\"title\", \"kind\":\"title\", \"text\":\"" + title + "|a Phoenix game\"},\n"
+           "    {\"name\":\"title\", \"kind\":\"title\", \"text\":\"" + title + "|a Phoenix game\", \"music\":\"theme\"},\n"
            "    {\"name\":\"level1\", \"kind\":\"level\", \"map\":\"level\", \"text\":\"LEVEL 1\", \"lives\":3,"
            " \"counter\":\"coins\", \"label\":\"COINS\"},\n"
            "    {\"name\":\"end\", \"kind\":\"end\", \"text\":\"YOU WIN!|thanks for playing\"},\n"
@@ -470,29 +503,20 @@ inline const char* prefabs_json() {
            "  ] }\n";
 }
 
-// A square-wave blip as a WAV file: 16-bit mono PCM at 22050 Hz (the bake resamples it for each
-// target: 18157 Hz on the GBA), sliding from hz0 to hz1 over `ms` while it fades out. With `step`
-// the pitch jumps from hz0 to hz1 halfway instead (a coin's two notes). Integer math: every
-// project gets the same bytes.
-inline std::string blip_wav(uint32_t hz0, uint32_t hz1, uint32_t ms, bool step = false) {
-    const uint32_t rate = 22050, n = rate * ms / 1000;
-    std::string pcm;
-    uint32_t phase = 0;                                              // Q16 cycles
-    for (uint32_t i = 0; i < n; ++i) {
-        const uint32_t hz = step ? (i < n / 2 ? hz0 : hz1) : hz0 + (hz1 - hz0) * i / n;
-        phase += (hz << 16) / rate;
-        const int32_t amp = 9000 * int32_t(n - i) / int32_t(n);     // ...and fades out
-        const int32_t s = (phase & 0x8000) ? amp : -amp;
-        pcm += char(s & 0xFF);
-        pcm += char((s >> 8) & 0xFF);
-    }
-    auto u32 = [](uint32_t v) { std::string o; for (int k = 0; k < 4; ++k) o += char((v >> (8 * k)) & 0xFF); return o; };
-    auto u16 = [](uint32_t v) { std::string o; o += char(v & 0xFF); o += char((v >> 8) & 0xFF); return o; };
-    return std::string("RIFF") + u32(36 + uint32_t(pcm.size())) + "WAVE" + "fmt " + u32(16) + u16(1) + u16(1) +
-           u32(rate) + u32(rate * 2) + u16(2) + u16(16) + "data" + u32(uint32_t(pcm.size())) + pcm;
+// The template's sound effects, as .sfx documents (tools/phxpack/synth.h; the Studio's SFX editor):
+// the bake renders them exactly as the editor plays them. A rising jump and a coin's two notes.
+inline phxtool::SfxParams jump_sfx() {
+    phxtool::SfxParams p;
+    p.wave = phxtool::Wave::Square; p.duty = 0.4; p.freq = 300; p.slide = 5;
+    p.sustain = 0.08; p.decay = 0.1; p.volume = 0.45;
+    return p;
 }
-inline std::string jump_wav() { return blip_wav(280, 880, 180); }         // rising
-inline std::string coin_wav() { return blip_wav(988, 1319, 160, true); }  // B5 -> E6
+inline phxtool::SfxParams coin_sfx() {
+    phxtool::SfxParams p;
+    p.wave = phxtool::Wave::Square; p.duty = 0.5; p.freq = 988; p.arp_mult = 1.335; p.arp_time = 0.07;
+    p.sustain = 0.06; p.punch = 0.3; p.decay = 0.12; p.volume = 0.45;
+    return p;
+}
 
 // The level: 30x20 tiles of 8x8 (one 240x160 screen), a backdrop layer + the gameplay layer.
 inline phxtool::TmapDoc level() {
@@ -569,12 +593,18 @@ inline bool create_project(const std::string& dir, const std::string& name, std:
     if (!hero.save_png(dir + "/assets/hero.png", &e)) return fail(e);
     SprDoc spr;
     spr.sheet = "hero.png"; spr.frame_w = 16; spr.frame_h = 16;
-    spr.clips = { SprClip{ "idle", 0, 1, 1, true }, SprClip{ "walk", 0, 4, 8, true } };
+    spr.clips = { SprClip{ "idle", 0, 1, 1, true }, SprClip{ "walk", 0, 4, 8, true },
+                  SprClip{ "jump", 4, 1, 0, false }, SprClip{ "land", 5, 1, 12, false } };
+    // its state machine: PlatformerController sends move/stop/jump/fall/land; "done" ends the landing
+    spr.trans = { SprEdge{ "idle", "walk", "move" }, SprEdge{ "walk", "idle", "stop" },
+                  SprEdge{ "*", "jump", "jump" },    SprEdge{ "*", "jump", "fall" },
+                  SprEdge{ "jump", "land", "land" }, SprEdge{ "land", "idle", "done" } };
     if (!spr.save(dir + "/assets/hero.sprdef", &e)) return fail(e);
     phxtool::TmapDoc lvl = tmpl::level();
     if (!lvl.save_file(dir + "/assets/level.tmj")) return fail("cannot write assets/level.tmj");
-    if (!write("assets/jump.wav", tmpl::jump_wav())) return fail("cannot write assets/jump.wav");
-    if (!write("assets/coin.wav", tmpl::coin_wav())) return fail("cannot write assets/coin.wav");
+    if (!write("assets/jump.sfx", phxtool::sfx_to_json(tmpl::jump_sfx()))) return fail("cannot write assets/jump.sfx");
+    if (!write("assets/coin.sfx", phxtool::sfx_to_json(tmpl::coin_sfx()))) return fail("cannot write assets/coin.sfx");
+    if (!write("assets/theme.song", phxtool::song_to_json(phxtool::song_starter()))) return fail("cannot write assets/theme.song");
     PixelDoc coin = tmpl::coin();
     if (!coin.save_png(dir + "/assets/coin.png", &e)) return fail(e);
     SprDoc coin_spr;
@@ -591,6 +621,7 @@ inline bool create_project(const std::string& dir, const std::string& name, std:
     if (!door.save_png(dir + "/assets/door.png", &e)) return fail(e);
     PixelDoc font = tmpl::font();
     if (!font.save_png(dir + "/assets/font.png", &e)) return fail(e);
+    if (!write("assets/font.font", phxtool::fontdef_to_json(tmpl::font_def()))) return fail("cannot write assets/font.font");
     if (!write("assets/flow.json", tmpl::flow_json(name.empty() ? slug : name))) return fail("cannot write assets/flow.json");
     if (!write("assets/prefabs.json", tmpl::prefabs_json())) return fail("cannot write assets/prefabs.json");
 
@@ -606,7 +637,7 @@ inline bool create_project(const std::string& dir, const std::string& name, std:
         "A Phoenix game project (open it in Phoenix Studio: `phxstudio --project " + dir + "`).\n\n"
         "| Folder | What lives there |\n|---|---|\n"
         "| `src/` | the game's C++ (it uses the engine's public API, `phx/...`, only) |\n"
-        "| `assets/` | author files: sprites (`.png` + `.sprdef`), maps (`.tmj`), sounds (`.wav`), data tables (`.json`) |\n"
+        "| `assets/` | author files: sprites (`.png` + `.sprdef`), maps (`.tmj`), sound effects (`.sfx`), music (`.song`), sounds (`.wav`), fonts (`.font`), data tables (`.json`) |\n"
         "| `build/` | what the build makes: the game (`build/" + slug + "`) and its bundle (`build/" + slug + ".phxp`) |\n\n"
         "From the Phoenix checkout: `make play PROJECT=" + dir + "` builds, bakes and runs it;\n"
         "`make game` / `make game-assets` do one step each.\n";

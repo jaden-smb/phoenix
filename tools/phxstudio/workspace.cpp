@@ -3,6 +3,9 @@
 #include "pixeldoc.h"
 #include "../phxtmap/editor.h"
 #include "../phxentity/editor.h"
+#include "font.h"                  // tools/phxpack: New font
+#include "synth.h"                 // tools/phxpack: New sound effect / New song
+#include "ascii_font.h"            // tools/common: the new font's starting glyphs
 
 #include <algorithm>
 #include <cstdio>
@@ -148,7 +151,7 @@ const std::vector<std::string>& Workspace::all_files() {
 
 bool Workspace::open(Host& h, const std::string& abs0, bool as_text, int line, int col) {
     std::error_code ec;
-    std::string abs = pfs::weakly_canonical(abs0, ec).string();
+    std::string abs = pfs::weakly_canonical(abs0, ec).generic_string();   // "/" on Windows too
     if (ec || abs.empty()) abs = abs0;
     // The project boundary: every open (Explorer, quick open, error links, drops, --open) passes here.
     const Access acc = h.access(abs);
@@ -526,6 +529,9 @@ void Workspace::explorer_context(Host& h) {
     items.push_back(MenuItem{ "New image here...", "", true, false, false, kIconFileImage });
     items.push_back(MenuItem{ "New tilemap here...", "", true, false, false, kIconFileMap });
     items.push_back(MenuItem{ "New table here...", "", true, false, false, kIconFileTable });
+    items.push_back(MenuItem{ "New font here...", "", true, false, false, kIconFileImage });
+    items.push_back(MenuItem{ "New sound effect here...", "", true, false, false, kIconFileSound });
+    items.push_back(MenuItem{ "New song here...", "", true, false, false, kIconFileSound });
     items.push_back(MenuItem{ "New file here...", "", true, false, false, kIconFileCode });
     items.push_back(MenuItem::sep());
     items.push_back(MenuItem{ "Copy path", "", true, false, false, kIconCopy });
@@ -543,8 +549,11 @@ void Workspace::explorer_context(Host& h) {
     case 4: new_image(h, dir); break;
     case 5: new_map(h, dir); break;
     case 6: new_table(h, dir); break;
-    case 7: new_code(h, dir); break;
-    case 9: phx_desktop_clipboard_set(ctx_path_.c_str()); h.toast("copied " + ctx_path_); break;
+    case 7: new_font(h, dir); break;
+    case 8: new_sfx(h, dir); break;
+    case 9: new_song(h, dir); break;
+    case 10: new_code(h, dir); break;
+    case 12: phx_desktop_clipboard_set(ctx_path_.c_str()); h.toast("copied " + ctx_path_); break;
     default: break;
     }
 }
@@ -576,6 +585,9 @@ void Workspace::draw_welcome(Host& h, const Rect& r) {
         { "New tilemap", kIconFileMap, "A Tiled .tmj map: tile layers, collision, spawns", 1 },
         { "New data table", kIconFileTable, "A phxbin record table (stats, prefabs, dialogue...)", 2 },
         { "New image / tileset", kIconFileImage, "A blank PNG to paint tiles or a portrait in", 3 },
+        { "New font", kIconFileImage, "A .font over a glyph sheet PNG (starts as a 5x7 ASCII font)", 5 },
+        { "New sound effect", kIconFileSound, "A .sfx: a jump, coin, laser... from presets", 6 },
+        { "New song", kIconFileSound, "A .song: a small tracker for the game's music", 7 },
         { "New code file", kIconFileCode, "C++, Markdown, a script...", 4 },
     };
     for (const Item& it : create) {
@@ -583,7 +595,9 @@ void Workspace::draw_welcome(Host& h, const Rect& r) {
         Btn b; b.icon = it.icon; b.help = it.help; b.flat = true; b.left = true;
         if (g.button(br, it.label, b)) {
             if (it.what == 0) new_sprite(h, dir); else if (it.what == 1) new_map(h, dir);
-            else if (it.what == 2) new_table(h, dir); else if (it.what == 3) new_image(h, dir); else new_code(h, dir);
+            else if (it.what == 2) new_table(h, dir); else if (it.what == 3) new_image(h, dir);
+            else if (it.what == 5) new_font(h, dir); else if (it.what == 6) new_sfx(h, dir);
+            else if (it.what == 7) new_song(h, dir); else new_code(h, dir);
         }
         yy += 16;
     }
@@ -610,7 +624,7 @@ void Workspace::draw_welcome(Host& h, const Rect& r) {
             yy += 12;
         }
     }
-    y = std::max(yy, y + 13 + 5 * 16) + 14;
+    y = std::max(yy, y + 13 + int(sizeof(create) / sizeof(create[0])) * 16) + 14;   // below both columns
     g.section(cx, y, 416, "HANDY KEYS", g.th.faint);
     y += 13;
     const char* keys[][2] = {
@@ -751,6 +765,113 @@ void Workspace::new_image(Host& h, const std::string& dir0) {
             open(h, png);
             h.file_saved(png);
             h.toast("created " + rel(h, png), Toast::Good);
+            return false;
+        }
+        return true;
+    });
+}
+
+// A text file at `path` (fails if it exists or is outside the project).
+static bool create_text(Host& h, const std::string& path, const std::string& text, std::string& err) {
+    if (h.access(path) != Access::Write) { err = "that folder is outside the project"; return false; }
+    if (pfs::exists(path)) { err = "that file already exists"; return false; }
+    std::error_code ec;
+    pfs::create_directories(pfs::path(path).parent_path(), ec);
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) { err = "cannot write " + path; return false; }
+    const bool ok = std::fwrite(text.data(), 1, text.size(), f) == text.size();
+    std::fclose(f);
+    if (!ok) err = "short write to " + path;
+    return ok;
+}
+
+void Workspace::new_font(Host& h, const std::string& dir0) {
+    struct St { std::string name = "font", dir; std::string err; };
+    auto st = std::make_shared<St>();
+    st->dir = dir0;
+    h.modal("New font", 330, 120, [this, &h, st](Gui& g, Rect body) {
+        Form f(g, body);
+        g.text_field(g.id("nf-name"), f.row("name"), st->name, "e.g. font");
+        g.text_field(g.id("nf-dir"), f.row("folder"), st->dir, "(repo root)");
+        const std::string stem = clean_stem(st->name);
+        f.note("A 128x48 sheet of 8x8 cells (ASCII 32..127, a 5x7 font to repaint) + " + stem + ".font.", g.th.faint);
+        if (!st->err.empty()) f.note(st->err, g.th.bad);
+        const int b = f.buttons("Create", !stem.empty());
+        if (b < 0) return false;
+        if (b > 0) {
+            const std::string png = join_path(h.root(), join_path(st->dir, stem + ".png"));
+            const std::string def = join_path(h.root(), join_path(st->dir, stem + ".font"));
+            if (h.access(png) != Access::Write) { st->err = "that folder is outside the project"; return true; }
+            if (exists(png) || exists(def)) { st->err = "that file already exists"; return true; }
+            std::error_code ec;
+            pfs::create_directories(pfs::path(png).parent_path(), ec);
+            PixelDoc img = PixelDoc::blank(phxtool::kAsciiFontW, phxtool::kAsciiFontH, 0);
+            phxtool::build_ascii_font(img.px.data());
+            std::string err;
+            if (!img.save_png(png, &err)) { st->err = err; return true; }
+            phxtool::FontDef fd;
+            fd.image = stem + ".png";
+            if (!create_text(h, def, phxtool::fontdef_to_json(fd), st->err)) return true;
+            refresh_tree();
+            tree.reveal(rel(h, def));
+            open(h, def);
+            h.file_saved(def);
+            h.toast("created " + rel(h, def), Toast::Good);
+            return false;
+        }
+        return true;
+    });
+}
+
+void Workspace::new_sfx(Host& h, const std::string& dir0) {
+    struct St { std::string name = "blip", dir; int kind = 6; std::string err; };
+    auto st = std::make_shared<St>();
+    st->dir = dir0;
+    h.modal("New sound effect", 330, 120, [this, &h, st](Gui& g, Rect body) {
+        Form f(g, body);
+        g.text_field(g.id("ns-name"), f.row("name"), st->name, "e.g. coin");
+        g.text_field(g.id("ns-dir"), f.row("folder"), st->dir, "(repo root)");
+        g.dropdown(g.id("ns-kind"), f.row("start as"), phxtool::sfx_preset_names(), st->kind, "A preset to start from");
+        const std::string stem = clean_stem(st->name);
+        if (!st->err.empty()) f.note(st->err, g.th.bad);
+        const int b = f.buttons("Create", !stem.empty());
+        if (b < 0) return false;
+        if (b > 0) {
+            const std::string p = join_path(h.root(), join_path(st->dir, stem + ".sfx"));
+            const phxtool::SfxParams sp = phxtool::sfx_preset(phxtool::sfx_preset_names()[size_t(st->kind)], 1);
+            if (!create_text(h, p, phxtool::sfx_to_json(sp), st->err)) return true;
+            refresh_tree();
+            tree.reveal(rel(h, p));
+            open(h, p);
+            h.file_saved(p);
+            h.toast("created " + rel(h, p) + " - res->sound(\"" + stem + "\"_hash)", Toast::Good);
+            return false;
+        }
+        return true;
+    });
+}
+
+void Workspace::new_song(Host& h, const std::string& dir0) {
+    struct St { std::string name = "music", dir; std::string err; };
+    auto st = std::make_shared<St>();
+    st->dir = dir0;
+    h.modal("New song", 330, 110, [this, &h, st](Gui& g, Rect body) {
+        Form f(g, body);
+        g.text_field(g.id("ng-name"), f.row("name"), st->name, "e.g. level1");
+        g.text_field(g.id("ng-dir"), f.row("folder"), st->dir, "(repo root)");
+        const std::string stem = clean_stem(st->name);
+        f.note("Starts with 4 instruments and two 16-row patterns.", g.th.faint);
+        if (!st->err.empty()) f.note(st->err, g.th.bad);
+        const int b = f.buttons("Create", !stem.empty());
+        if (b < 0) return false;
+        if (b > 0) {
+            const std::string p = join_path(h.root(), join_path(st->dir, stem + ".song"));
+            if (!create_text(h, p, phxtool::song_to_json(phxtool::song_starter()), st->err)) return true;
+            refresh_tree();
+            tree.reveal(rel(h, p));
+            open(h, p);
+            h.file_saved(p);
+            h.toast("created " + rel(h, p) + " - the flow table's music column plays it", Toast::Good);
             return false;
         }
         return true;

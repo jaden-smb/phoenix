@@ -4,9 +4,17 @@
 #include "phx/runtime/app.h"
 #include "phx/core/log.h"
 
+#include <cstddef>
 #include <cstring>
 
 namespace phx {
+
+// Level runs an Animator on a sprite's baked transitions in place: the two layouts must agree.
+static_assert(sizeof(AnimEdge) == sizeof(SpriteTransDef) && offsetof(AnimEdge, from) == offsetof(SpriteTransDef, from) &&
+              offsetof(AnimEdge, to) == offsetof(SpriteTransDef, to) &&
+              offsetof(AnimEdge, trigger) == offsetof(SpriteTransDef, trigger) && kAnyClip == kSpriteTransAny,
+              "AnimEdge and the baked SpriteTransDef must share a layout");
+
 namespace {
 
 
@@ -45,6 +53,12 @@ const Level::SpriteSlot* Level::sprite(ResourceCache& res, Renderer& r, NameHash
             s.clips[s.clip_count] = AnimClip{ c.first, c.count, c.fps, c.loop != 0 };
             s.clip_names[s.clip_count] = c.name;
         }
+        if (v.clip_count > kMaxClips)
+            PHX_LOG_WARN("level: sprite %08x has %u clips; the first %u play", unsigned(name), unsigned(v.clip_count),
+                         unsigned(kMaxClips));
+        // its state machine, read in place: the baked SpriteTransDef IS an AnimEdge (an edge into a
+        // clip past kMaxClips is harmless: the animator keeps its last frame)
+        if (v.trans_count) s.edges = Span<const AnimEdge>{ reinterpret_cast<const AnimEdge*>(v.trans), v.trans_count };
     } else {                                                // a plain texture: one frame
         uint16_t w = 0, h = 0;
         s.tex = upload(res, r, name, &w, &h);
@@ -130,6 +144,7 @@ Status Level::load(App& app, ResourceCache& res, PhysicsWorld* physics, const Le
                     if (ss->clip_count) {
                         Animator an{};
                         an.clips = Span<const AnimClip>{ ss->clips, ss->clip_count };
+                        an.edges = ss->edges;
                         an.sheet = ss->sheet;
                         const NameHash want = get_hash(ref, "clip"_hash);
                         uint16_t start = 0;

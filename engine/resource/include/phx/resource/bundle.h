@@ -145,6 +145,42 @@ struct SpriteBlobHeader {
     // followed by clip_count * SpriteClipDef
 };
 
+// After the clips, an optional TRANSITIONS trailer (the sprite's animation state machine; `trans`
+// lines in a .sprdef): [u32 kSpriteTransMagic][u32 count][count * SpriteTransDef]. Clip names are
+// resolved to indices at bake time. Readers that use only the clips never see it. The layout is
+// the anim module's AnimEdge, so an Animator runs on the baked edges in place (zero-copy).
+constexpr uint32_t kSpriteTransMagic = 0x54415850u;   // 'PXAT' (little-endian)
+constexpr uint8_t  kSpriteTransAny   = 0xFF;          // `from` = any clip
+struct SpriteTransDef {
+    uint8_t  from;         // clip index, or kSpriteTransAny
+    uint8_t  to;           // clip index
+    uint16_t pad;
+    NameHash trigger;      // "jump"_hash; "done"_hash fires when a non-looping clip ends
+};
+
+// A font (a `.font` grid sheet or an imported BMFont `.fnt`): the glyph table of a separately
+// added texture. Glyph i is character first_char + i; a proportional font gives each its own
+// rect, offset and advance (a fixed-width grid font bakes the same table with equal advances).
+// The glyph layout is the ui module's FontGlyph, so text draws from the table in place.
+struct FontBlobHeader {
+    NameHash texture;      // name hash of the atlas texture asset
+    uint16_t glyph_count;
+    uint8_t  first_char;   // usually 32 (space)
+    uint8_t  line_h;       // px per line
+    uint8_t  cell_w, cell_h;   // the grid (for glyphs past the table, and tools)
+    uint8_t  advance;      // the widest advance (fixed-width fonts: every glyph's)
+    uint8_t  flags;        // kFontProportional
+    // followed by glyph_count * FontGlyphDef
+};
+constexpr uint8_t kFontProportional = 1;
+struct FontGlyphDef {
+    uint16_t sx, sy;       // source rect in the atlas
+    uint8_t  w, h;         // 0 x 0: nothing to draw
+    uint8_t  advance;      // pen step, px
+    int8_t   xoff, yoff;   // draw offset from the pen
+    uint8_t  pad;
+};
+
 // Spawn points authored in an object layer: a typed entity placement (the game switches on
 // `type` to spawn the right entity). Coordinates are in pixels (Tiled's object space).
 struct SpawnDef {
@@ -201,6 +237,9 @@ static_assert(sizeof(TextureBlobHeader) == 8,  "TextureBlobHeader layout changed
 static_assert(sizeof(TilemapBlobHeader) == 12, "TilemapBlobHeader layout changed");
 static_assert(sizeof(SpriteClipDef)     == 12, "SpriteClipDef layout changed");
 static_assert(sizeof(SpriteBlobHeader)  == 12, "SpriteBlobHeader layout changed");
+static_assert(sizeof(SpriteTransDef)    == 8,  "SpriteTransDef layout changed");
+static_assert(sizeof(FontBlobHeader)    == 12, "FontBlobHeader layout changed");
+static_assert(sizeof(FontGlyphDef)      == 10, "FontGlyphDef layout changed");
 static_assert(sizeof(SpawnDef)          == 12, "SpawnDef layout changed");
 static_assert(sizeof(SpawnBlobHeader)   == 4,  "SpawnBlobHeader layout changed");
 static_assert(sizeof(SoundBlobHeader)   == 8,  "SoundBlobHeader layout changed");

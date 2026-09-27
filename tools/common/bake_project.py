@@ -5,8 +5,9 @@ Reads <project>/phxproject.json (its "assets" folders, default ["assets"]) and r
 converters `make check` covers on every author file it finds, then the assembler:
 
     .sprdef / sprite .json  -> phxsprite  (the sheet PNG rides along inside the sprite)
+    .font / .fnt            -> phxsprite  (a font: its sheet PNG + the glyph table)
     .tmj                    -> phxtile
-    .wav                    -> phxsnd
+    .wav / .sfx / .song     -> phxsnd     (.sfx: a sound effect's parameters, .song: a tracker song)
     phxbin table .json      -> phxbin     (+ a generated header in build/gen/<name>.gen.h)
     any other .png          -> baked directly by phxpack (tilesets, portraits, UI art)
 
@@ -79,6 +80,22 @@ def main():
             out = os.path.join(inter, stem + ".phxspr")
             run([tool("phxsprite"), "--out", out, "--name", stem] + tier + [p])
             pack_inputs.append(out)
+        elif ext in (".font", ".fnt"):
+            with open(p, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            if ext == ".font":
+                try:
+                    img = json.loads(text).get("image", "")
+                except ValueError:
+                    img = ""
+            else:
+                m = re.search(r'page\s+id=0\s+file="([^"]+)"', text)
+                img = m.group(1) if m else ""
+            if img:
+                sheets.add(os.path.normpath(os.path.join(os.path.dirname(p), img)))
+            out = os.path.join(inter, stem + ".phxspr")
+            run([tool("phxsprite"), "--out", out, "--name", stem] + tier + [p])
+            pack_inputs.append(out)
         elif ext == ".json":
             try:
                 with open(p, encoding="utf-8") as f:
@@ -100,14 +117,14 @@ def main():
             out = os.path.join(inter, stem + ".phxtmap")
             run([tool("phxtile"), "--out", out, "--name", stem] + tier + [p])
             pack_inputs.append(out)
-        elif ext == ".wav":
+        elif ext in (".wav", ".sfx", ".song"):
             out = os.path.join(inter, stem + ".phxsnd")
             run([tool("phxsnd"), "--out", out, "--name", stem] + tier + [p])
             pack_inputs.append(out)
         elif ext == ".png":
             pngs.append(p)
 
-    # PNGs a sprite already carries as its sheet are not baked twice
+    # PNGs a sprite or font already carries as its sheet are not baked twice
     pack_inputs += [p for p in pngs if os.path.normpath(p) not in sheets]
     if not pack_inputs:
         print(f"bake_project: nothing to bake in {', '.join(folders)}", file=sys.stderr)

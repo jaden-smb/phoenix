@@ -16,6 +16,7 @@
 //   | type     | str  | the spawn type this row builds (what the map editor places)           |
 //   | sprite   | str  | a SpriteRenderer + Animator from that sprite asset (or a texture)      |
 //   | clip     | str  | the clip it starts in (default "idle", else the first)                 |
+//   |          |      | (the Animator also gets the sprite's transitions: anim_trigger())     |
 //   | w, h     | int  | collider size in px (default: the sprite's frame, else the spawn's)    |
 //   | collide  | int  | 0 = no collider (default 1)                                            |
 //   | layer    | int  | collision layer bits (default 1); `mask` the layers it reports (0xFFFF)|
@@ -86,7 +87,7 @@ struct LevelOptions {
 class Level {
 public:
     static constexpr uint32_t kMaxSprites = 16;   // distinct sprite assets per level
-    static constexpr uint32_t kMaxClips   = 8;    // clips kept per sprite
+    static constexpr uint32_t kMaxClips   = 12;   // clips kept per sprite
 
     // Upload the map, set `physics`' collision grid (if given), spawn every entity into
     // app.world(). Ok, or why not (NotFound: no such map in the mounted bundles).
@@ -130,6 +131,7 @@ private:
         AnimClip    clips[kMaxClips]{};
         NameHash    clip_names[kMaxClips]{};
         uint16_t    clip_count = 0;
+        Span<const AnimEdge> edges;        // the sprite's transitions, in the bundle (zero-copy)
         int16_t     w = 0, h = 0;          // one frame (or the whole texture)
     };
     const SpriteSlot* sprite(ResourceCache& res, Renderer& r, NameHash name);

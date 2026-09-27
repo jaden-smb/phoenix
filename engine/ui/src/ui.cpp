@@ -49,6 +49,28 @@ void UI::bar(const UIRect& rc, scalar t, Rgba fg, Rgba bg, uint8_t layer) {
     rect(fgr, fg, uint8_t(layer + 1));                    // foreground fill (on top)
 }
 
+// One character at pen (x, y): a table glyph (its own rect + offset), else the grid cell.
+void UI::glyph(const BitmapFont& font, unsigned char c, int x, int y, Rgba tint, uint8_t layer) {
+    if (c < font.first_char || c == ' ') return;
+    DrawSprite d{};
+    d.tex = font.tex;
+    const int cell = c - font.first_char;
+    if (font.glyphs) {
+        if (cell >= font.glyph_count) return;            // not in the font: a blank advance
+        const FontGlyph& g = font.glyphs[cell];
+        if (!g.w || !g.h) return;
+        d.sx = int16_t(g.sx); d.sy = int16_t(g.sy); d.sw = int16_t(g.w); d.sh = int16_t(g.h);
+        x += g.xoff; y += g.yoff;
+    } else {
+        d.sx = int16_t((cell % font.cols) * font.glyph_w);
+        d.sy = int16_t((cell / font.cols) * font.glyph_h);
+        d.sw = int16_t(font.glyph_w); d.sh = int16_t(font.glyph_h);
+    }
+    d.pos = vec2{ s_from_int(x), s_from_int(y) };
+    d.tint = tint; d.layer = layer; d.z = 2;
+    r_->draw_sprite(d);
+}
+
 void UI::text(vec2 pos, const BitmapFont& font, const char* str, Rgba tint, uint8_t layer) {
     if (!str || font.tex == kNoTexture) return;
     int x = s_to_int(pos.x), y = s_to_int(pos.y);
@@ -56,18 +78,8 @@ void UI::text(vec2 pos, const BitmapFont& font, const char* str, Rgba tint, uint
     for (const char* p = str; *p; ++p) {
         unsigned char c = (unsigned char)*p;
         if (c == '\n') { x = x0; y += font.line_h; continue; }
-        if (c >= font.first_char && c != ' ') {
-            int cell = c - font.first_char;
-            int sx = (cell % font.cols) * font.glyph_w;
-            int sy = (cell / font.cols) * font.glyph_h;
-            DrawSprite d{};
-            d.tex = font.tex; d.sx = int16_t(sx); d.sy = int16_t(sy);
-            d.sw = int16_t(font.glyph_w); d.sh = int16_t(font.glyph_h);
-            d.pos = vec2{ s_from_int(x), s_from_int(y) };
-            d.tint = tint; d.layer = layer; d.z = 2;
-            r_->draw_sprite(d);
-        }
-        x += font.advance;
+        glyph(font, c, x, y, tint, layer);
+        x += glyph_advance(font, c);
     }
 }
 
@@ -76,9 +88,7 @@ bool UI::button(const UIRect& rc, const BitmapFont& font, const char* lbl) {
     const bool focused = (idx == focus_);
     rect(rc, focused ? panel_focus : panel, kLayer);
     if (lbl) {
-        // rough centering for fixed-width glyphs
-        int len = 0; for (const char* p = lbl; *p; ++p) ++len;
-        scalar tx = rc.pos.x + s_half(rc.size.x) - s_from_int(len * font.advance / 2);
+        scalar tx = rc.pos.x + s_half(rc.size.x) - s_from_int(text_width(font, lbl) / 2);
         scalar ty = rc.pos.y + s_half(rc.size.y) - s_from_int(font.glyph_h / 2);
         text(vec2{ tx, ty }, font, lbl, label, uint8_t(kLayer + 1));
     }
@@ -101,8 +111,9 @@ void UI::dialogue(const UIRect& box, const BitmapFont& font, const DialogueView&
               rgba(255, 255, 255), uint8_t(layer + 1));
         x0 += dv.portrait_w + 3;
     }
-    const int cols = (bx + s_to_int(box.size.x) - 3 - x0) / font.advance;
-    if (cols <= 0) return;
+    // Wrap by pixel width (each glyph's advance: fixed-width fonts wrap exactly as by columns).
+    const int maxw = bx + s_to_int(box.size.x) - 3 - x0;
+    if (maxw < font.advance) return;
 
     // Reveal budget: floor(reveal_t × total printable chars), in Q16 so both scalar tiers
     // reveal the identical character on the identical tick.
@@ -115,30 +126,23 @@ void UI::dialogue(const UIRect& box, const BitmapFont& font, const DialogueView&
 
     // Word-wrapped typewriter: separators count toward the reveal (uniform pacing); a word
     // that would overflow the row wraps before it draws; over-long words hard-wrap.
-    int x = x0, y = y0, col = 0, shown = 0;
+    int x = x0, y = y0, shown = 0;
     for (const char* p = str; *p && shown < budget; ) {
-        if (*p == '\n') { ++p; ++shown; col = 0; x = x0; y += font.line_h; continue; }
+        if (*p == '\n') { ++p; ++shown; x = x0; y += font.line_h; continue; }
         if (*p == ' ') {
             ++p; ++shown;
-            int wl = 0; for (const char* q = p; *q && *q != ' ' && *q != '\n'; ++q) ++wl;
-            if (col + 1 + wl > cols) { col = 0; x = x0; y += font.line_h; }
-            else                     { ++col; x += font.advance; }
+            int wl = 0;
+            for (const char* q = p; *q && *q != ' ' && *q != '\n'; ++q) wl += glyph_advance(font, (unsigned char)*q);
+            const int sp = glyph_advance(font, ' ');
+            if (x - x0 + sp + wl > maxw) { x = x0; y += font.line_h; }
+            else                         { x += sp; }
             continue;
         }
-        if (col >= cols) { col = 0; x = x0; y += font.line_h; }
         const unsigned char c = (unsigned char)*p;
-        if (c >= font.first_char) {
-            const int cell = c - font.first_char;
-            DrawSprite d{};
-            d.tex = font.tex;
-            d.sx = int16_t((cell % font.cols) * font.glyph_w);
-            d.sy = int16_t((cell / font.cols) * font.glyph_h);
-            d.sw = int16_t(font.glyph_w); d.sh = int16_t(font.glyph_h);
-            d.pos = vec2{ s_from_int(x), s_from_int(y) };
-            d.tint = label; d.layer = uint8_t(layer + 1); d.z = 2;
-            r_->draw_sprite(d);
-        }
-        ++col; x += font.advance; ++shown; ++p;
+        const int adv = glyph_advance(font, c);
+        if (x > x0 && x - x0 + adv > maxw) { x = x0; y += font.line_h; }   // an over-long word
+        glyph(font, c, x, y, label, uint8_t(layer + 1));
+        x += adv; ++shown; ++p;
     }
 
     // Fully revealed: a small "continue" marker in the bottom-right corner of the box.

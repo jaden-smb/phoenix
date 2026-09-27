@@ -52,7 +52,12 @@ const char* kPrefabs =
 "               {\"type\":\"slime\",\"w\":6,\"h\":8,\"body\":1,\"layer\":4,\"mask\":1,\"components\":\"Patrol Hazard\",\"Patrol_range\":10},"
 "               {\"type\":\"flag\",\"w\":4,\"h\":8,\"layer\":8,\"mask\":1,\"components\":\"Checkpoint\"},"
 "               {\"type\":\"door\",\"w\":4,\"h\":8,\"layer\":16,\"mask\":1,\"components\":\"Exit\",\"Exit_target\":\"level2\"} ] }";
-const char* kSprdef = "sheet b_sheet.png 2 2\nclip idle 0 1 0 0\nclip walk 1 3 8 1\n";
+// The hero's clips form a state machine (trans lines) the controller drives with its events:
+// idle -move-> walk -stop-> idle, jump from anywhere, land on touching down, back to idle when the
+// one-frame land clip is done.
+const char* kSprdef = "sheet b_sheet.png 2 2\nclip idle 0 1 0 0\nclip walk 1 3 8 1\nclip jump 3 1 0 0\n"
+                      "clip land 2 1 20 0\ntrans idle walk move\ntrans walk idle stop\ntrans * jump jump\n"
+                      "trans * jump fall\ntrans jump land land\ntrans land idle done\n";
 
 bool bake() {
     write_file("build/b_sheet.png", kSheet8x2, sizeof(kSheet8x2));
@@ -93,6 +98,7 @@ struct BehaviourGame final : Game {
     ecs::Entity    slime = ecs::kInvalid;
     vec2           start{}, flag{};
     bool           started_ok = false, jumped = false, walked = false, camera_moved = false;
+    bool           idle_first = true, jump_clip = false, land_clip = false, land_done = false, walk_after = false;
     int            slime_min = 1 << 20, slime_max = -(1 << 20);
     NameHash       exit_seen = 0;
     int32_t        deaths_before_tile = -1, deaths_after_tile = -1;
@@ -123,6 +129,13 @@ struct BehaviourGame final : Game {
         if (frame == 170) deaths_after_tile = beh.counter("deaths"_hash);
         if (const Body* b = w.get<Body>(p); b && frame >= 11 && frame <= 14 && b->vel.y < s_from_int(0)) jumped = true;
         if (const Animator* an = w.get<Animator>(p); an && frame > 30 && frame < 120 && an->clip == 1) walked = true;
+        if (const Animator* an = w.get<Animator>(p)) {             // the state machine's path
+            if (frame < 9 && an->clip != 0) idle_first = false;
+            if (frame >= 11 && frame <= 14 && an->clip == 2) jump_clip = true;
+            if (jump_clip && an->clip == 3) land_clip = true;
+            if (land_clip && !land_done && an->clip == 0) land_done = true;
+            if (land_done && an->clip == 1) walk_after = true;
+        }
         if (beh.camera().pos.x > s_from_int(0)) camera_moved = true;
         if (w.is_alive(slime)) {
             const int x = s_to_int(w.get<Transform>(slime)->pos.x);
@@ -159,6 +172,10 @@ int main() {
     check(g.jumped, "PlatformerController: A on the ground jumps");
     check(app.audio().plays() >= 2, "the jump sound and the pickup sound play (by name, from the bundle)");
     check(g.walked, "PlatformerController: the 'walk' clip plays while running");
+    check(g.idle_first && g.jump_clip, "state machine: idle until the 'jump' event takes '* -> jump'");
+    check(g.land_clip, "state machine: touching down sends 'land' (jump -> land)");
+    check(g.land_done, "state machine: the non-looping land clip ends and 'done' returns to idle");
+    check(g.walk_after, "state machine: running on the ground sends 'move' (idle -> walk)");
     check(g.beh.counter("coins"_hash) == 3, "Pickup: the coin added its value (3) to 'coins' and vanished");
     check(g.beh.respawn_point().x == g.flag.x, "Checkpoint: touching the flag made it the respawn point");
     check(g.beh.counter("deaths"_hash) >= 1, "Hazard: the patrolling slime sent the player back");

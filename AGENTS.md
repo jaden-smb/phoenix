@@ -170,7 +170,11 @@ compile-time capability tier and render tier via `cmake/caps_select.cmake` → `
   rate at bake time). Two-stage pipeline (docs/08): per-format **converters** (`phxsprite`/
   `phxtile`/`phxsnd`/`phxbin`) bake author sources into intermediate `.phx*` files, which the
   **`phxpack` assembler** merges (it can also bake sources directly). All share one bake path,
-  `tools/phxpack/builders.h`. Tools are **host-only** (STL allowed); engine code is not.
+  `tools/phxpack/builders.h`. Sound effects (`.sfx`) and music (`.song`, a pattern tracker) are
+  synthesized to PCM at bake time (`tools/phxpack/synth.h`), never at runtime; fonts (`.font` grid
+  sheets, BMFont `.fnt`) bake to a glyph table (`tools/phxpack/font.h`) that `phx/runtime/font.h`
+  loads into a proportional ui `BitmapFont`. Tools are
+  **host-only** (STL allowed); engine code is not.
 - **GUI editors** (`phxtmap` tilemap, `phxentity` record tables) **dogfood the engine** — same App
   loop / SDL window / soft renderer / UI as the games, no separate UI toolkit. They emit **author
   formats the converters bake** (`.tmj`, phxbin JSON), never engine blobs, and each splits a

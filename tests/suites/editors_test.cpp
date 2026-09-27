@@ -592,6 +592,42 @@ PHX_TEST(sprdoc_round_trips_through_the_bake) {
     CHECK(SprDoc::resolve_sheet("a/b/x.sprdef", "s.png") == "a/b/s.png" && SprDoc::resolve_sheet("a/x.sprdef", "art/s.png") == "art/s.png");
 }
 
+PHX_TEST(sprdoc_transitions_round_trip_and_follow_clip_edits) {
+    SprDoc s;
+    s.sheet = "e_sheet.png"; s.frame_w = 8; s.frame_h = 8;
+    s.clips = { SprClip{ "idle", 0, 1, 1, true }, SprClip{ "walk", 1, 3, 10, true }, SprClip{ "hit", 4, 2, 12, false } };
+    s.trans = { SprEdge{ "idle", "walk", "move" }, SprEdge{ "*", "hit", "hurt" }, SprEdge{ "hit", "idle", "done" } };
+    std::string err;
+    PixelDoc sheet = PixelDoc::blank(48, 8, px_rgba(1, 2, 3));
+    CHECK(sheet.save_png("build/e_sheet.png", &err));
+    for (int js = 0; js < 2; ++js) {                                // .sprdef, then the .json sidecar
+        s.json = js != 0;
+        const std::string path = js ? "build/e_trans.json" : "build/e_trans.sprdef";
+        CHECK(s.save(path, &err));
+        SprDoc r;
+        CHECK(SprDoc::load(path, r, &err) && r.trans.size() == 3 && r.trans[1] == s.trans[1] && r.trans[2] == s.trans[2]);
+        phxtool::SprDef bake;                                        // the bake reads what the Studio wrote
+        CHECK(js ? phxtool::load_sprjson(path, bake, &err) : phxtool::load_sprdef(path, bake));
+        std::vector<phx::SpriteTransDef> tr;
+        CHECK(phxtool::sprite_transitions(bake, tr, &err) && tr.size() == 3 && tr[0].from == 0 && tr[0].to == 1 &&
+              tr[0].trigger == phx::fnv1a("move") && tr[1].from == phx::kSpriteTransAny && tr[1].to == 2);
+        phxtool::BundleWriter w(2);                                  // and builds the sprite with them
+        CHECK(phxtool::build_sprite(w, path, "e_trans"));
+    }
+    CHECK(s.validate(48, 8).empty());
+    s.rename_clip(2, "ouch");                                        // edges follow a rename...
+    CHECK(s.trans[1].to == "ouch" && s.trans[2].from == "ouch" && s.validate(48, 8).empty());
+    s.remove_clip(0);                                                // ...and go with a removed clip
+    CHECK(s.trans.size() == 1 && s.trans[0].to == "ouch");
+    s.trans.push_back(SprEdge{ "walk", "nope", "" });
+    CHECK(s.validate(48, 8).size() == 2);                            // unknown clip + no trigger
+    phxtool::SprDef bad;                                             // the bake refuses a dangling edge
+    bad.clip_names = { "idle" }; bad.trans = { phxtool::SprTrans{ "idle", "run", "move" } };
+    std::vector<phx::SpriteTransDef> tr;
+    CHECK(!phxtool::sprite_transitions(bad, tr, &err) && err.find("run") != std::string::npos);
+    CHECK(s.suggest_edge(1).from == "ouch" && s.suggest_edge(1).trigger == "done");   // a one-shot: "done"
+}
+
 // =============================================================================================
 // TmapDoc (new operations) — re-read by the bake's tiled_load
 // =============================================================================================
@@ -962,9 +998,14 @@ PHX_TEST(new_project_template_is_complete_and_bakeable) {
     CHECK(main_cpp.find("#include \"phx/") != std::string::npos && main_cpp.find("src/") != std::string::npos);
     // the template assets are exactly what the bake reads
     phxtool::SprDef sd;
-    CHECK(phxtool::load_sprdef(dir + "/assets/hero.sprdef", sd) && sd.fw == 16 && sd.clips.size() == 2);
+    CHECK(phxtool::load_sprdef(dir + "/assets/hero.sprdef", sd) && sd.fw == 16 && sd.clips.size() == 4 && sd.trans.size() == 6);
+    {
+        std::vector<phx::SpriteTransDef> tr;
+        CHECK(phxtool::sprite_transitions(sd, tr) && tr.size() == 6 && tr[2].from == phx::kSpriteTransAny &&
+              tr[5].from == 3 && tr[5].to == 0 && tr[5].trigger == phx::fnv1a("done"));   // land -done-> idle
+    }
     PixelDoc hero, tiles;
-    CHECK(PixelDoc::load_png(dir + "/assets/hero.png", hero, &err) && hero.w == 64 && hero.h == 16);
+    CHECK(PixelDoc::load_png(dir + "/assets/hero.png", hero, &err) && hero.w == 96 && hero.h == 16);
     CHECK(PixelDoc::load_png(dir + "/assets/tiles.png", tiles, &err) && tiles.w == 64 && tiles.h == 8);
     std::string tmj;
     {
@@ -1000,13 +1041,26 @@ PHX_TEST(new_project_template_is_complete_and_bakeable) {
         CHECK(cf < pd.fields.size() && pd.fields[cf].type == "str64" &&
               pd.str_cell(0, cf) == "PlatformerController CameraFollow" && pd.str_cell(2, cf) == "Patrol Hazard");
     }
-    {   // the jump sound decodes the way phxsnd reads it; the stock behaviours play it (by name)
-        const std::string wav = tmpl::jump_wav();
-        std::vector<int16_t> mono;
-        uint32_t rate = 0;
-        CHECK(phxtool::wav_decode(reinterpret_cast<const uint8_t*>(wav.data()), wav.size(), mono, rate) &&
-              rate == 22050 && mono.size() == 22050u * 18 / 100);
-        CHECK(fs::exists(dir + "/assets/jump.wav") && fs::exists(dir + "/assets/coin.wav"));
+    {   // the sounds are .sfx documents and the music a .song, which phxsnd bakes (the stock
+        // behaviours play "jump" and "coin" by name; the flow's title screen starts "theme")
+        phxtool::BundleWriter sw(2);
+        CHECK(phxtool::build_sfx(sw, dir + "/assets/jump.sfx") && phxtool::build_sfx(sw, dir + "/assets/coin.sfx") &&
+              phxtool::build_song(sw, dir + "/assets/theme.song"));
+        phxtool::SfxParams jp;
+        CHECK(phxtool::sfx_from_json(read_head(dir + "/assets/jump.sfx", 1u << 20), jp) && jp == tmpl::jump_sfx());
+        phxtool::Song song;
+        CHECK(phxtool::song_from_json(read_head(dir + "/assets/theme.song", 1u << 20), song) &&
+              song.instruments.size() == 4 && song.order.size() == 2 && song.total_rows() == 32);
+        CHECK(!fs::exists(dir + "/assets/jump.wav"));
+        phxtool::FontDef fdef;                             // the flow's font: proportional, over font.png
+        CHECK(phxtool::load_fontdef(read_head(dir + "/assets/font.font", 1u << 20), dir + "/assets/font.font", fdef) &&
+              fdef.proportional && fdef.image == "font.png" && phxtool::build_font(sw, dir + "/assets/font.font"));
+        CHECK(kind_for("assets/font.font") == FileKind::Font && kind_for("x.fnt") == FileKind::Text);
+        phxtool::BinDoc fd;
+        CHECK(phxtool::BinDoc::load(read_head(dir + "/assets/flow.json", 1u << 20), fd));
+        size_t music = fd.fields.size();
+        for (size_t i = 0; i < fd.fields.size(); ++i) if (fd.fields[i].name == "music") music = i;
+        CHECK(music < fd.fields.size() && fd.str_cell(0, music) == "theme");
     }
     phxtool::TmapDoc md;
     CHECK(phxtool::TmapDoc::load(tmj, md, &err) && md.tileset_image == "tiles.png" && md.has_tile_flags());

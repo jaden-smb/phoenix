@@ -36,6 +36,11 @@ bool play_clip(ecs::World& w, ecs::Entity e, NameHash clip) {
     return false;
 }
 
+bool anim_trigger(ecs::World& w, ecs::Entity e, NameHash trigger) {
+    Animator* an = w.get<Animator>(e);
+    return an && an->trigger(trigger);
+}
+
 void Behaviours::start(App& app, Level& level, ResourceCache& res, PhysicsWorld& physics) {
     level_ = &level; res_ = &res; physics_ = &physics;
     player_ = ecs::kInvalid;
@@ -74,18 +79,29 @@ void Behaviours::update(App& app, scalar dt) {
 }
 
 void Behaviours::control(App& app, ecs::World& w) {
-    const PlatformerController* pc = w.get<PlatformerController>(player_);
+    PlatformerController* pc = w.get<PlatformerController>(player_);
     Body* b = w.get<Body>(player_);
     if (!pc || !b) return;
     const InputState& in = app.input();
     const int dir = (in.down(Button::Right) ? 1 : 0) - (in.down(Button::Left) ? 1 : 0);
     b->vel.x = pc->speed * s_from_int(dir);
-    if (in.just(Button::A) && b->on_ground) {
+    const bool jumped = in.just(Button::A) && b->on_ground;
+    if (jumped) {
         b->vel.y = s_from_int(0) - pc->jump;
         play(app, pc->jump_sound);
     }
     if (SpriteRenderer* s = w.get<SpriteRenderer>(player_))
         if (dir) s->flags = dir < 0 ? uint16_t(kFlipX) : uint16_t(0);
+    const bool landed = pc->airborne && b->on_ground;
+    pc->airborne = !b->on_ground || jumped;
+    Animator* an = w.get<Animator>(player_);
+    if (an && !an->edges.empty()) {       // the sprite's state machine decides: send it the events
+        if (jumped) { an->trigger("jump"_hash); return; }
+        if (!b->on_ground) { if (b->vel.y > s_from_int(0)) an->trigger("fall"_hash); return; }
+        if (landed && an->trigger("land"_hash)) return;
+        an->trigger(dir ? NameHash("move"_hash) : NameHash("stop"_hash));
+        return;
+    }
     if (!b->on_ground && play_clip(w, player_, pc->jump_clip)) return;
     play_clip(w, player_, dir ? pc->walk_clip : pc->idle_clip);
 }
@@ -136,6 +152,7 @@ void Behaviours::respawn(App& app) {
     if (player_ == ecs::kInvalid) return;
     if (Transform* t = w.get<Transform>(player_)) t->pos = respawn_;
     if (Body* b = w.get<Body>(player_)) b->vel = vec2{};
+    anim_trigger(w, player_, "hurt"_hash);
     slot("deaths"_hash) += 1;
 }
 
