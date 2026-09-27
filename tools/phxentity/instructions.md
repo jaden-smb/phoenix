@@ -25,7 +25,7 @@ bake through `build_bin`.
 |---|---|---|
 | `u8 i8 u16 i16 u32 i32` | integers | typed values (decimal or `0x` hex) **clamp** to the type's range, and the Studio tells you |
 | `f32` | `float` | rounded to float and saved with the shortest text that round-trips |
-| `str8 str16 str32` | NUL-terminated `char[N]` | clipped to N−1 characters. Text that is already too long (from hand-written JSON) shows red |
+| `str8 str16 str32 str64` | NUL-terminated `char[N]` | clipped to N−1 characters. Text that is already too long (from hand-written JSON) shows red |
 
 Field names and the struct name must be C identifiers, because they become the generated header's
 struct and members.
@@ -44,7 +44,7 @@ make entity                                # -> build/phxentity
 
 `--new NAME --fields a:type,b:type` starts a **fresh table** from a schema. It opens with one
 zeroed record and is written on the first Ctrl+S. The types are
-`u8 i8 u16 i16 u32 i32 f32 str8 str16 str32`.
+`u8 i8 u16 i16 u32 i32 f32 str8 str16 str32 str64`.
 
 **Prefab schemas:** give a table a string `type` (or `name`) column and it becomes the game's
 prefab vocabulary. The map editor (`phxtmap --prefabs table.json`, or any map in the Studio)

@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -319,6 +320,67 @@ public:
         for (int k = 2;; ++k) { const std::string n = base + std::to_string(k); if (!used(n)) return n; }
     }
 
+    // ---- per-spawn properties (Tiled object custom properties) ----
+    // The types the inspector offers; Tiled's others (color, file, object) round-trip as text.
+    static const std::vector<std::string>& prop_types() {
+        static const std::vector<std::string> t = { "int", "float", "bool", "string" };
+        return t;
+    }
+    // Set (add or replace) spawn i's property `name`.
+    void set_prop(int i, const std::string& name, const std::string& type, const std::string& value) {
+        if (i < 0 || i >= int(spawns.size()) || name.empty()) return;
+        std::vector<TiledProp>& ps = spawns[size_t(i)].props;
+        TiledProp np; np.name = name; np.type = type; np.value = normalise_prop(type, value);
+        for (TiledProp& p : ps) if (p.name == name) { if (!(p == np)) { p = np; dirty = true; } return; }
+        ps.push_back(np);
+        dirty = true;
+    }
+    void remove_prop(int i, const std::string& name) {
+        if (i < 0 || i >= int(spawns.size())) return;
+        std::vector<TiledProp>& ps = spawns[size_t(i)].props;
+        for (size_t k = 0; k < ps.size(); ++k) if (ps[k].name == name) { ps.erase(ps.begin() + long(k)); dirty = true; return; }
+    }
+    // A property name not in use on spawn i yet ("prop", "prop2", ...).
+    std::string fresh_prop_name(int i, const std::string& base) const {
+        if (i < 0 || i >= int(spawns.size())) return base;
+        auto used = [&](const std::string& n) { for (const TiledProp& p : spawns[size_t(i)].props) if (p.name == n) return true; return false; };
+        if (!used(base)) return base;
+        for (int k = 2;; ++k) { const std::string n = base + std::to_string(k); if (!used(n)) return n; }
+    }
+    // A value as its type stores it: an int keeps its digits (else 0), a float its number, a bool
+    // is "true"/"false"; text stays as typed.
+    static std::string normalise_prop(const std::string& type, const std::string& value) {
+        if (type == "int") {
+            char* end = nullptr;
+            const long long v = std::strtoll(value.c_str(), &end, 10);
+            return std::to_string(end && end != value.c_str() ? v : 0);
+        }
+        if (type == "float") {
+            char* end = nullptr;
+            const double v = std::strtod(value.c_str(), &end);
+            if (!end || end == value.c_str()) return "0";
+            char buf[40]; std::snprintf(buf, sizeof(buf), "%.9g", v);
+            return buf;
+        }
+        if (type == "bool") return (value == "true" || value == "1" || value == "yes") ? "true" : "false";
+        return value;
+    }
+    static std::string json_quote(const std::string& s) {
+        std::string o = "\"";
+        for (char c : s) {
+            if (c == '"' || c == '\\') { o += '\\'; o += c; }
+            else if (c == '\n') o += "\\n";
+            else if (c == '\t') o += "\\t";
+            else if (uint8_t(c) < 0x20) { char b[8]; std::snprintf(b, sizeof(b), "\\u%04x", unsigned(uint8_t(c))); o += b; }
+            else o += c;
+        }
+        return o + "\"";
+    }
+    static std::string prop_value_json(const TiledProp& p) {
+        if (p.type == "int" || p.type == "float" || p.type == "bool") return normalise_prop(p.type, p.value);
+        return json_quote(p.value);
+    }
+
     // ---- undo/redo (bounded snapshots; the GUI pushes one per edit gesture) ----
     // Call push_undo() BEFORE a gesture mutates the document (a paint stroke counts as one
     // gesture, so click-drag paints undo in one step).
@@ -412,9 +474,19 @@ public:
             for (size_t i = 0; i < spawns.size(); ++i) {
                 if (i) j += ",";
                 const TiledSpawn& s = spawns[i];
-                j += "{\"name\":\"" + s.name + "\",\"type\":\"" + s.type + "\"";
+                j += "{\"name\":" + json_quote(s.name) + ",\"type\":" + json_quote(s.type);
                 j += ",\"x\":" + std::to_string(s.x) + ",\"y\":" + std::to_string(s.y);
-                j += ",\"width\":" + std::to_string(s.w) + ",\"height\":" + std::to_string(s.h) + "}";
+                j += ",\"width\":" + std::to_string(s.w) + ",\"height\":" + std::to_string(s.h);
+                if (!s.props.empty()) {                         // Tiled's custom-property shape
+                    j += ",\"properties\":[";
+                    for (size_t p = 0; p < s.props.size(); ++p) {
+                        const TiledProp& tp = s.props[p];
+                        j += (p ? ",{\"name\":" : "{\"name\":") + json_quote(tp.name) + ",\"type\":" + json_quote(tp.type) +
+                             ",\"value\":" + prop_value_json(tp) + "}";
+                    }
+                    j += "]";
+                }
+                j += "}";
             }
             j += "]}";
         }

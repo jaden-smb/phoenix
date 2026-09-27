@@ -8,6 +8,75 @@ All notable changes to Phoenix are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Component reflection and a prefab inspector.** A game declares its components once with
+  `PHX_COMPONENT(Enemy, PHX_FIELD(Enemy, range), …)` (`phx/ecs/reflect.h`). Supported field types
+  are ints, bool, `scalar` and `PHX_FIELD_HASH` names. The registry is static, with no heap.
+  - **Level:** a prefab's `components` column attaches reflected components, filled from its
+    `Enemy_range` columns (a spawn property of the same name overrides it); a field with no value
+    keeps its C++ default. Scalars come out identical on both tiers.
+  - **Schema export:** `make game` runs the built game with `PHX_DUMP_COMPONENTS` to write
+    `build/components.json` (names, field types, defaults) without opening a window.
+  - **Studio:** the table editor's new COMPONENTS section ticks components on a prefab record,
+    creating their typed columns at the C++ defaults.
+  - `TableView::get_q16` and `SpawnsView::get_q16` read decimals exactly on both tiers.
+  - The template's coins carry a `Coin { value }` component.
+  - **Tests:** `level`, `smoke` (schema export) and `editors` (the inspector model) cover it,
+    and `project-check` now also checks the export.
+- **Per-spawn properties.** The map editor's spawn inspector has a PROPERTIES list (name, int,
+  float, bool or string, value), saved as Tiled custom properties; `tiled_load` imports them.
+  - The bake adds an optional **spawn extension** after the `SpawnDef`s: each spawn's name hash,
+    its typed properties and a string table. The 12-byte `SpawnDef` is unchanged, and maps with
+    bare spawns bake exactly as before.
+  - `SpawnsView` gains `name()`, `find_named()`, `get_int()`, `get_str()` and `get_hash()`.
+  - In `phx::Level`, a property named like a prefab column **overrides** it for that one entity.
+    `level.get_int(ref, key, def)` / `get_str` / `get_hash` read any setting as "the spawn's,
+    else the prefab's, else the default", and `level.find_named()` finds a spawn by its editor name.
+  - The map editor now JSON-escapes spawn names and types when saving.
+- **Levels load themselves: spawns placed in the map editor become entities.** `phx::Level`
+  (`phx/runtime/level.h`) takes a map from the bundle and, in one `load()` call:
+  - uploads it with its parallax, and builds the physics grid from the last layer with its
+    per-tile collision;
+  - turns every spawn into an entity built from the **prefab table** (`assets/prefabs.json`) row
+    whose `type` matches. The columns `sprite`, `clip`, `w`/`h`, `layer`/`mask`, `body`, `z` and
+    `collide` are read by name.
+
+  Each entity gets a `Transform` and a `PrefabRef` (its type and row). `SpriteRenderer` and
+  `draw_sprites()` draw them, following an `Animator`. `LevelOptions::on_spawn` lets a game add
+  its own components, and `level.prefabs()` reads its own columns. The new `level` suite covers
+  it on both scalar tiers.
+  - **Self-describing data tables.** phxbin appends a schema trailer (column name hash, type,
+    offset). `phx::TableView` (`phx/resource/table.h`) reads any column by name. Existing
+    readers are unaffected.
+  - **The project template is a small platformer driven by that data:** hero and coin prefabs,
+    run and jump, coins with a pickup sound, and spike tiles. `project-check` runs it on all
+    three profiles.
+- **Engine-owned sound: `App::audio()`.** A game plays sounds with
+  `app.audio().play(to_sound(res->sound("jump"_hash).unwrap()))`, plus `play_music` and
+  `stop_all`, and never calls a platform function. The engine owns the mixer, the lock-free
+  command queue and each target's device: SDL on PC, sceAudio on PSP, DirectSound on GBA.
+  - The platform seam's `audio()` now returns a `phx_audio { rate, start, stop }` device on
+    SDL, GBA and PSP.
+  - Nothing starts until the first sound. Games with their own mixer (Emberwing, the Studio)
+    are unaffected, and games that play nothing link no mixer.
+  - Without a device (the null platform), the App mixes headlessly; `plays()`, `peak()` and
+    `frames_mixed()` report what would have been heard.
+  - The project template plays a jump sound on A, and `project-check` asserts it on all three
+    profiles. `make game-audio-verify` checks a real SDL device.
+- **Game projects build for GBA and PSP.** `make game-gba | play-gba | game-psp | play-psp
+  PROJECT=path` turn a Studio project into a size-gated `.gba` ROM (native PPU) or a PSP
+  `EBOOT.PBP`, opened in mGBA / PPSSPP when installed. New projects get **GBA ROM** and **PSP
+  EBOOT** in the Run view.
+  - A game names its Game with `PHX_GAME(MyGame);` (`phx/runtime/main.h`) and has no `main()`:
+    the engine supplies one per target (`engine/runtime/src/entry/`) and boots the game with
+    that target's profile. The GBA gets a 160 KB arena and a 240×160 screen, the PSP a 4 MB
+    arena. The new `Game::on_configure(Config&)` hook is where the game sets its title and
+    resolution. Projects with their own `main()` still build for PC as before.
+  - `phxnew DIR [NAME]` creates a project from the command line. `make project-check` (now part
+    of `make check`) bakes the template for all three tiers and runs it headlessly under each
+    profile, the GBA run in fixed point on the PPU model. CI builds the template as a real ROM
+    and EBOOT.
+  - `bin2s.py --name SYM`; launch `needs` may name `$DEVKITARM`; `PSPDEV` defaults to the
+    install that `psp-g++` on `PATH` comes from.
 - **Editing assets after they're made, in Phoenix Studio.**
   - The Assets view has **edit source**: it opens the file an asset was baked from (a texture's
     PNG, a sprite's def, a map's `.tmj`, a table's `.json`). Double-clicking an asset does the
@@ -96,6 +165,18 @@ All notable changes to Phoenix are documented here. The format follows
   also reachable as `phx_desktop_set_scale()`).
 
 ### Fixed
+- **`make game-assets TIER=0|1` rebuilt every host tool.** A bake tier was also taken as the
+  scalar tier, so it switched the host object directory and relinked every host binary. It is now
+  only a bake tier.
+- **The GBA PPU backend crashed on an arena too small for its stores.** It wrote through a null
+  allocation; `Renderer::create` now fails with an error instead.
+- **Phoenix Studio's Run view on Windows.** Launches went to `cmd.exe`, which can't run their
+  POSIX shell commands, so every Play, Build and suite failed at once with no output. They now
+  run through MSYS2's or Git for Windows' `sh.exe`, found automatically (or set `PHX_SH`), and
+  **Stop** ends the whole process tree. Launches that need a tool (`sdl2-config`, …) are no
+  longer greyed out: `PATH` is now split on `;` and `.exe` names are found. The suite chips no
+  longer show a stray `\r` from a CRLF checkout of the Makefile, and without `HOME` the session
+  and recent projects are kept in `%APPDATA%\phxstudio`.
 - **`BinDoc` (phxbin tables in the editors) truncated `f32` fields to integers on load.** A float
   column opened in `phxentity` (or the Studio) and saved lost its fractions. Floats are now kept,
   edited and saved exactly.

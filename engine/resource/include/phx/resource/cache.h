@@ -48,9 +48,75 @@ struct BlobView {
 };
 
 // Object-layer spawn points (e.g. imported from a Tiled map). Zero-copy view over the table.
+// When the map gave its spawns names or per-instance properties (bundle.h: the spawn extension),
+// they read by spawn index; otherwise name() is 0 and every property is absent (the default).
 struct SpawnsView {
     uint32_t        count   = 0;
     const SpawnDef* spawns  = nullptr;
+    const uint8_t*  names   = nullptr;     // count * NameHash (unaligned-safe reads)
+    const uint8_t*  props   = nullptr;     // prop_count * SpawnPropDef
+    uint32_t        prop_count = 0;
+    const char*     strings = nullptr;     // the string table
+    uint32_t        strings_size = 0;
+
+    // The spawn's name hash ("door_a"_hash), 0 when unnamed.
+    NameHash name(uint32_t i) const {
+        NameHash h = 0;
+        if (names && i < count) for (int b = 0; b < 4; ++b) h |= NameHash(names[i * 4 + b]) << (8 * b);
+        return h;
+    }
+    // The first spawn called `name`, else -1.
+    int32_t find_named(NameHash n) const {
+        for (uint32_t i = 0; n && i < count; ++i) if (name(i) == n) return int32_t(i);
+        return -1;
+    }
+    // Spawn i's property `key`.
+    bool prop(uint32_t i, NameHash key, SpawnPropDef& out) const {
+        for (uint32_t p = 0; p < prop_count; ++p) {
+            const uint8_t* d = props + size_t(p) * sizeof(SpawnPropDef);
+            SpawnPropDef def;
+            for (size_t b = 0; b < sizeof(def); ++b) reinterpret_cast<uint8_t*>(&def)[b] = d[b];
+            if (def.spawn == i && def.key == key) { out = def; return true; }
+        }
+        return false;
+    }
+    bool has(uint32_t i, NameHash key) const { SpawnPropDef d; return prop(i, key, d); }
+    // An int / bool / float (truncated) property, else `def`.
+    int32_t get_int(uint32_t i, NameHash key, int32_t def = 0) const {
+        SpawnPropDef d;
+        if (!prop(i, key, d) || d.type == kPropStr) return def;
+        if (d.type == kPropFloat) { float f; const int32_t v = d.value; for (size_t b = 0; b < 4; ++b) reinterpret_cast<uint8_t*>(&f)[b] = reinterpret_cast<const uint8_t*>(&v)[b]; return int32_t(f); }
+        return d.value;
+    }
+    // A numeric property as Q16.16 (a float keeps its fraction). False when absent or a string.
+    bool get_q16(uint32_t i, NameHash key, int32_t& out) const {
+        SpawnPropDef d;
+        if (!prop(i, key, d) || d.type == kPropStr) return false;
+        if (d.type == kPropFloat) {
+            float f; const int32_t v = d.value;
+            for (size_t b = 0; b < 4; ++b) reinterpret_cast<uint8_t*>(&f)[b] = reinterpret_cast<const uint8_t*>(&v)[b];
+            const float q = f * 65536.0f;
+            out = q >= 2147483520.0f ? INT32_MAX : q <= -2147483648.0f ? INT32_MIN : int32_t(q);
+            return true;
+        }
+        const int64_t v = int64_t(d.value) * 65536;               // clamped to the Q16 range
+        out = int32_t(v > INT32_MAX ? INT32_MAX : v < INT32_MIN ? INT32_MIN : v);
+        return true;
+    }
+    // A string property (NUL-terminated, in the bundle), else nullptr.
+    const char* get_str(uint32_t i, NameHash key) const {
+        SpawnPropDef d;
+        if (!prop(i, key, d) || d.type != kPropStr || d.value < 0 || uint32_t(d.value) >= strings_size) return nullptr;
+        return strings + d.value;
+    }
+    // The FNV-1a hash of a string property, 0 when absent or empty.
+    NameHash get_hash(uint32_t i, NameHash key) const {
+        const char* s = get_str(i, key);
+        if (!s || !*s) return 0;
+        NameHash h = kFnvOffset;
+        for (; *s; ++s) h = (h ^ NameHash(uint8_t(*s))) * kFnvPrime;
+        return h;
+    }
 };
 
 // Mono 16-bit PCM, ready to wrap as an audio SoundView (kept render/audio-free here).

@@ -23,6 +23,13 @@ Field types: `u8 i8 u16 i16 u32 i32 f32`. Records are packed little-endian at **
 alignment**, so the generated struct matches the blob by construction (a `static_assert` on the
 stride in the generated header guards it). Blob layout: `[u32 count][u32 stride][records…]`.
 
+After the records, padded to 4 bytes, comes a **schema trailer**: `[u32 'PXTS'][u32 fields]` and
+then one `{name hash, offset, type, size}` entry per column (`phx::TableFieldDef`,
+`phx/resource/bundle.h`). It makes every table self-describing. Engine code can read a column by
+name without the game's generated header (`phx::TableView`, `phx/resource/table.h`), which is how
+the level loader reads a **prefab table**. Readers that use only count/stride/records never see
+the trailer.
+
 With `--header`, a `.gen.h` is written containing the `struct ItemRecord { … }`, the
 static_assert, and an accessor for indexing the mounted blob.
 

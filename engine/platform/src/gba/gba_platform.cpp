@@ -18,6 +18,10 @@
 #include <stddef.h>
 #include <stdlib.h>
 
+// The DirectSound device (defined at the bottom), also offered through the seam's audio().
+extern "C" int  phx_gba_audio_start(int rate, phx_audio_fill fill, void* user);
+extern "C" void phx_gba_audio_stop(void);
+
 namespace {
 
 // ---- GBA memory-mapped I/O (raw, no libgba dependency) --------------------------------
@@ -115,7 +119,6 @@ bool g_direct_present = false;
 // mixer. The platform downmixes the mixer's stereo S16 to mono S8 for the FIFO; it owns the
 // DMA/timer/FIFO but not the mixer (the game's fill does the mixing). phx_gba_audio_start()
 // installs the handler and enables the VBlank IRQ.
-typedef void (*phx_audio_fill)(void* user, int16_t* out, int frames);
 
 constexpr int kAudioBufCap = 320;          // samples per buffer (>= one frame at the chosen rate)
 
@@ -231,9 +234,10 @@ void gba_present_hot(void);
 void gba_present(void) { gba_present_hot(); }
 
 phx_gfx*   gba_gfx(void)   { return reinterpret_cast<phx_gfx*>(&g_gfx); }
-// The seam's generic audio handle stays null: DirectSound is driven through the game-side
-// phx_gba_audio_start() hook below (no threads on GBA, so the fill is pumped by present()).
-phx_audio* gba_audio(void) { return nullptr; }
+// The seam's audio device is DirectSound: phx_gba_audio_start() below (no threads on GBA, so the
+// fill is pumped by the VBlank IRQ). 18157 Hz is the vblank-locked rate the tier-0 bake targets.
+phx_audio  g_audio_device{ 18157, phx_gba_audio_start, phx_gba_audio_stop };
+phx_audio* gba_audio(void) { return &g_audio_device; }
 
 void gba_poll_input(phx_input_raw* out) {
     for (size_t i = 0; i < sizeof(*out); ++i) reinterpret_cast<uint8_t*>(out)[i] = 0;

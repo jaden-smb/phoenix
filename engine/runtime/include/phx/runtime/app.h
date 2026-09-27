@@ -13,6 +13,7 @@
 #include "phx/input/input.h"
 #include "phx/ecs/world.h"
 #include "phx/render/renderer.h"
+#include "phx/runtime/audio.h"
 
 struct phx_platform;
 
@@ -23,6 +24,10 @@ class App;
 // The game implements these hooks. No platform code ever appears in a Game.
 struct Game {
     virtual ~Game() = default;
+    // Before boot, when the engine starts the game (phx/runtime/main.h): set the title, the
+    // logical resolution, sim_hz. `cfg` arrives holding the target's budgets; leave them unless
+    // the game needs more (read phx::caps() to size by tier). Nothing is running yet: no App.
+    virtual void on_configure(Config&)         {}
     virtual void on_start(App&)                {}
     virtual void on_fixed_update(App&, scalar /*dt*/) {}   // runs 0..N times per frame
     virtual void on_render(App&, scalar /*alpha*/)    {}   // once per frame, interpolated
@@ -46,6 +51,8 @@ public:
     InputMap&           input_map()       { return input_.map; }
     ecs::World&         world()           { return *world_; }
     Renderer&           render()          { return *render_; }
+    // Sound output (phx/runtime/audio.h): play/stop intents; the engine owns mixer + device.
+    GameAudio&          audio()           { return audio_; }
     uint64_t            frame()    const  { return frame_; }
     scalar              dt()       const  { return dt_; }
     // Last frame's phase timings (update/render/present/frame, µs), stamped by the loop from
@@ -58,6 +65,7 @@ private:
     const phx_platform*  plat_   = nullptr;
     ecs::World*          world_  = nullptr;
     Renderer*            render_ = nullptr;
+    GameAudio            audio_;
     InputState           input_  {};
     StepAccumulator      acc_;
     FrameProfile         prof_   {};

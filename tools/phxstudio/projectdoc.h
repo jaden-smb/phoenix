@@ -212,7 +212,7 @@ public:
     // and its build/ folder.
     std::vector<std::string> bundle_paths() const {
         std::vector<std::string> out;
-        for (const std::string& b : bundles) out.push_back(canon_path(b[0] == '/' ? b : dir + "/" + b));
+        for (const std::string& b : bundles) out.push_back(canon_path(is_abs_path(b) ? b : dir + "/" + b));
         std::error_code ec;
         for (const pfs::path& d : { pfs::path(dir), pfs::path(dir) / "build" })
             for (pfs::directory_iterator it(d, ec), end; !ec && it != end; it.increment(ec))
@@ -223,7 +223,8 @@ public:
         return out;
     }
 
-    // The standard launches of a project built by the generic rules (`make game|game-assets|play`).
+    // The standard launches of a project built by the generic rules (`make game|game-assets|play`,
+    // `play-gba`, `play-psp`). A need may name an SDK variable ($DEVKITARM; see expand_need_vars).
     static std::vector<ProjectLaunch> standard_launches() {
         const std::string mk = "make -C \"$PHX_ROOT\" ";
         return {
@@ -233,8 +234,11 @@ public:
                            "Compile src/*.cpp against the engine into build/<name>", { "sdl2-config" }, false },
             ProjectLaunch{ "Bake assets", "build", mk + "game-assets PROJECT=\"$PHX_PROJECT\"",
                            "Bake assets/ into build/<name>.phxp (sprites, maps, sounds, tables, images)", {}, false },
-            ProjectLaunch{ "Bake for GBA", "build", mk + "game-assets PROJECT=\"$PHX_PROJECT\" TIER=0",
-                           "The same bake encoded for the GBA PPU (tier 0): build/<name>.t0.phxp", {}, false },
+            ProjectLaunch{ "GBA ROM", "console", mk + "-s play-gba PROJECT=\"$PHX_PROJECT\"",
+                           "devkitARM -> build/<name>.gba (native PPU, size-gated), opened in mGBA if installed",
+                           { "$DEVKITARM/bin/arm-none-eabi-g++" }, true },
+            ProjectLaunch{ "PSP EBOOT", "console", mk + "-s play-psp PROJECT=\"$PHX_PROJECT\"",
+                           "pspsdk -> build/psp/EBOOT.PBP, opened in PPSSPP if installed", { "psp-g++" }, true },
         };
     }
 };
@@ -279,40 +283,42 @@ inline const char* main_cpp() {
     return R"CPP(// src/main.cpp — @NAME@: a Phoenix game (made from the Phoenix Studio project template).
 //
 // One source for every target: gameplay code talks to the engine's public API only (phx/...),
-// never to a platform header. Build + run from Phoenix Studio (Run > Play) or from the engine
-// checkout:  make play PROJECT=path/to/this/project
+// never to a platform header, and the engine supplies main() for each target (PHX_GAME, at the
+// bottom). Build + run from Phoenix Studio (Run > Play, GBA ROM, PSP EBOOT) or from the engine
+// checkout:  make play | play-gba | play-psp PROJECT=path/to/this/project
 //
-// The assets in assets/ (hero sprite, tileset, level map) are baked into build/@SLUG@.phxp and
-// read here zero-copy by name: "hero"_hash is the sprite baked from assets/hero.sprdef.
-#include "phx/runtime/app.h"
+// The GAME is data you edit in the Studio, not code:
+//   assets/level.tmj     the map: tiles, per-tile collision (spikes are hazard tiles) and the
+//                        spawns you place with the map editor's T tool
+//   assets/prefabs.json  what each spawn type is: its sprite, collider, and its COMPONENTS: the
+//                        engine's stock behaviours (PlatformerController, Patrol, Pickup, Hazard,
+//                        Checkpoint, Exit, CameraFollow; phx/runtime/behaviours.h) tuned by
+//                        columns like Patrol_range, or your own PHX_COMPONENTs
+// This file loads the level and runs the behaviours. Add your own rules in on_fixed_update
+// (behaviours.hits() are this step's contacts, behaviours.counter("coins"_hash) the tallies).
+#include "phx/runtime/main.h"
+#include "phx/runtime/behaviours.h"
 #include "phx/resource/cache.h"
-#include "phx/render/renderer.h"
-#include "phx/input/input.h"
 #include "phx/core/log.h"
 
 using namespace phx;
 
 namespace {
 
-TextureId load_texture(ResourceCache& res, Renderer& r, NameHash name) {
-    auto t = res.texture(name);
-    if (!t) return kNoTexture;
-    const TextureView v = t.unwrap();
-    TextureDesc d{};
-    d.pixels = v.pixels; d.width = v.width; d.height = v.height; d.format = v.format;
-    return r.load_texture(d);
-}
-
 struct @TYPE@ final : Game {
     ResourceCache* res = nullptr;
-    SpriteView hero{};
-    TextureId hero_tex = kNoTexture;
-    const SpriteClipDef* walk = nullptr;
-    TilemapView level{};
-    TilemapId map = kNoTilemap;
-    vec2 pos{ s_from_int(40), s_from_int(112) };
-    bool facing_left = false, moving = false;
-    uint32_t ticks = 0;
+    Level          level;
+    PhysicsWorld   physics;
+    Behaviours     behaviours;
+
+    // Before boot. The budgets arrive sized for the target (GBA, PSP, PC); 240x160 is the GBA's
+    // screen, which fits every target.
+    void on_configure(Config& cfg) override {
+        cfg.title  = "@NAME@";
+        cfg.width  = 240;
+        cfg.height = 160;
+        cfg.sim_hz = 60;
+    }
 
     void on_start(App& app) override {
         res = ResourceCache::create(app.mem().persistent()).unwrap();
@@ -320,70 +326,32 @@ struct @TYPE@ final : Game {
             PHX_LOG_ERROR("@SLUG@: no bundle - bake the assets first (Run > Bake assets)");
             return;
         }
-        Renderer& r = app.render();
-        if (auto s = res->sprite("hero"_hash)) {
-            hero = s.unwrap();
-            hero_tex = load_texture(*res, r, hero.texture);
-            for (uint16_t i = 0; i < hero.clip_count; ++i)
-                if (hero.clips[i].name == "walk"_hash) walk = &hero.clips[i];
+        if (level.load(app, *res, &physics) != Status::Ok) {
+            PHX_LOG_ERROR("@SLUG@: the bundle has no 'level' map (assets/level.tmj)");
+            return;
         }
-        if (auto m = res->tilemap("level"_hash)) {
-            level = m.unwrap();
-            TilemapDesc d{};
-            d.indices = level.indices; d.width = level.width; d.height = level.height;
-            d.layers = level.layers; d.tile_w = level.tile_w; d.tile_h = level.tile_h;
-            d.tileset = load_texture(*res, r, level.tileset);
-            map = r.upload_tilemap(d);
-        }
+        physics.set_gravity(vec2{ s_from_int(0), s_from_int(420) });
+        behaviours.start(app, level, *res, physics);
+        if (behaviours.player() == ecs::kInvalid) PHX_LOG_ERROR("@SLUG@: no spawn has a PlatformerController (assets/prefabs.json)");
     }
 
-    void on_fixed_update(App& app, scalar) override {
-        const InputState& in = app.input();
-        const scalar speed = s_from_int(1);
-        moving = false;
-        if (in.down(Button::Left))  { pos.x = pos.x - speed; facing_left = true;  moving = true; }
-        if (in.down(Button::Right)) { pos.x = pos.x + speed; facing_left = false; moving = true; }
-        if (in.down(Button::Up))    { pos.y = pos.y - speed; moving = true; }
-        if (in.down(Button::Down))  { pos.y = pos.y + speed; moving = true; }
-        ++ticks;
+    void on_fixed_update(App& app, scalar dt) override {
+        behaviours.update(app, dt);
     }
 
     void on_render(App& app, scalar) override {
         Renderer& r = app.render();
-        r.begin_frame(Camera2D{});
-        if (map != kNoTilemap)
-            for (uint8_t l = 0; l < level.layers; ++l) r.draw_tilemap(map, l);
-        if (hero_tex != kNoTexture && hero.cols) {
-            int frame = walk ? walk->first : 0;
-            if (walk && moving && walk->fps && walk->count)
-                frame += int(ticks * walk->fps / 60u % walk->count);
-            DrawSprite s{};
-            s.tex = hero_tex;
-            s.sx = int16_t((frame % hero.cols) * hero.frame_w);
-            s.sy = int16_t((frame / hero.cols) * hero.frame_h);
-            s.sw = int16_t(hero.frame_w);
-            s.sh = int16_t(hero.frame_h);
-            s.pos = pos;
-            s.flags = facing_left ? uint16_t(kFlipX) : uint16_t(0);
-            s.layer = 10;
-            r.draw_sprite(s);
-        }
+        r.begin_frame(behaviours.camera());
+        level.draw(r);
+        draw_sprites(app.world(), r);
         r.end_frame();
     }
 };
 
 } // namespace
 
-int main() {
-    Config cfg = Config::from_defaults();        // budgets from the target's capability tier
-    cfg.title  = "@NAME@";
-    cfg.width  = 240;                            // the GBA's screen: it fits every target
-    cfg.height = 160;
-    cfg.sim_hz = 60;
-    App app(cfg);
-    @TYPE@ game;
-    return app.run(&game);
-}
+// The game. The engine's main() for each target (PC, GBA, PSP) boots it: no main() here.
+PHX_GAME(@TYPE@);
 )CPP";
 }
 
@@ -431,6 +399,75 @@ inline PixelDoc hero() {
     return h;
 }
 
+// The coin: 2 frames of 8x8 (a spin).
+inline PixelDoc coin() {
+    PixelDoc c = PixelDoc::blank(16, 8, 0);
+    const uint32_t gold = px_rgba(250, 206, 64), dark = px_rgba(196, 128, 32), shine = px_rgba(255, 246, 200);
+    c.ellipse(1, 1, 6, 6, gold, true);  c.ellipse(1, 1, 6, 6, dark, false);  c.set(3, 2, shine); c.set(3, 3, shine);
+    c.ellipse(10, 1, 13, 6, gold, true); c.ellipse(10, 1, 13, 6, dark, false); c.set(11, 3, shine);
+    return c;
+}
+
+// The slime: 2 frames of 16x16 (a squish).
+inline PixelDoc slime() {
+    PixelDoc s = PixelDoc::blank(32, 16, 0);
+    const uint32_t body = px_rgba(96, 200, 110), dark = px_rgba(40, 120, 60), eye = px_rgba(250, 250, 250),
+                   pupil = px_rgba(20, 30, 20);
+    for (int f = 0; f < 2; ++f) {
+        const int x = f * 16, top = f ? 7 : 5;               // frame 1 squashes down
+        s.ellipse(x + 1, top, x + 14, 15, body, true);
+        s.ellipse(x + 1, top, x + 14, 15, dark, false);
+        s.rect(x + 4, top + 3, x + 5, top + 4, eye, true);  s.set(x + 5, top + 4, pupil);
+        s.rect(x + 9, top + 3, x + 10, top + 4, eye, true); s.set(x + 10, top + 4, pupil);
+    }
+    return s;
+}
+
+// The prefab table (a phxbin table, edited in the Studio's table editor): what each spawn type in
+// the level is made of. The engine's level loader reads these columns by name (phx/runtime/level.h),
+// and `components` attaches behaviours (phx/runtime/behaviours.h, or your own PHX_COMPONENTs) tuned
+// by `Component_field` columns. Collision: the player (layer 1) reports coins (2) and slimes (4).
+inline const char* prefabs_json() {
+    return "{ \"struct\":\"Prefab\",\n"
+           "  \"fields\":[{\"name\":\"type\",\"type\":\"str16\"}, {\"name\":\"sprite\",\"type\":\"str16\"},"
+           " {\"name\":\"w\",\"type\":\"u8\"}, {\"name\":\"h\",\"type\":\"u8\"}, {\"name\":\"body\",\"type\":\"u8\"},"
+           " {\"name\":\"layer\",\"type\":\"u16\"}, {\"name\":\"mask\",\"type\":\"u16\"},"
+           " {\"name\":\"components\",\"type\":\"str64\"}, {\"name\":\"Pickup_value\",\"type\":\"i16\"},"
+           " {\"name\":\"Pickup_sound\",\"type\":\"str16\"}, {\"name\":\"Patrol_range\",\"type\":\"i16\"}],\n"
+           "  \"records\":[\n"
+           "    {\"type\":\"player\", \"sprite\":\"hero\", \"w\":10, \"h\":16, \"body\":1, \"layer\":1, \"mask\":6,"
+           " \"components\":\"PlatformerController CameraFollow\"},\n"
+           "    {\"type\":\"coin\", \"sprite\":\"coin\", \"w\":8, \"h\":8, \"body\":0, \"layer\":2, \"mask\":1,"
+           " \"components\":\"Pickup\", \"Pickup_value\":1, \"Pickup_sound\":\"coin\"},\n"
+           "    {\"type\":\"slime\", \"sprite\":\"slime\", \"w\":12, \"h\":16, \"body\":1, \"layer\":4, \"mask\":1,"
+           " \"components\":\"Patrol Hazard\", \"Patrol_range\":24}\n"
+           "  ] }\n";
+}
+
+// A square-wave blip as a WAV file: 16-bit mono PCM at 22050 Hz (the bake resamples it for each
+// target: 18157 Hz on the GBA), sliding from hz0 to hz1 over `ms` while it fades out. With `step`
+// the pitch jumps from hz0 to hz1 halfway instead (a coin's two notes). Integer math: every
+// project gets the same bytes.
+inline std::string blip_wav(uint32_t hz0, uint32_t hz1, uint32_t ms, bool step = false) {
+    const uint32_t rate = 22050, n = rate * ms / 1000;
+    std::string pcm;
+    uint32_t phase = 0;                                              // Q16 cycles
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t hz = step ? (i < n / 2 ? hz0 : hz1) : hz0 + (hz1 - hz0) * i / n;
+        phase += (hz << 16) / rate;
+        const int32_t amp = 9000 * int32_t(n - i) / int32_t(n);     // ...and fades out
+        const int32_t s = (phase & 0x8000) ? amp : -amp;
+        pcm += char(s & 0xFF);
+        pcm += char((s >> 8) & 0xFF);
+    }
+    auto u32 = [](uint32_t v) { std::string o; for (int k = 0; k < 4; ++k) o += char((v >> (8 * k)) & 0xFF); return o; };
+    auto u16 = [](uint32_t v) { std::string o; o += char(v & 0xFF); o += char((v >> 8) & 0xFF); return o; };
+    return std::string("RIFF") + u32(36 + uint32_t(pcm.size())) + "WAVE" + "fmt " + u32(16) + u16(1) + u16(1) +
+           u32(rate) + u32(rate * 2) + u16(2) + u16(16) + "data" + u32(uint32_t(pcm.size())) + pcm;
+}
+inline std::string jump_wav() { return blip_wav(280, 880, 180); }         // rising
+inline std::string coin_wav() { return blip_wav(988, 1319, 160, true); }  // B5 -> E6
+
 // The level: 30x20 tiles of 8x8 (one 240x160 screen), a backdrop layer + the gameplay layer.
 inline phxtool::TmapDoc level() {
     phxtool::TmapDoc d = phxtool::TmapDoc::blank(30, 20, 8, 8, "tiles");
@@ -452,15 +489,21 @@ inline phxtool::TmapDoc level() {
     d.set_tile_flag(4, phx::kTileFlagOneWay); d.set_tile_flag(5, phx::kTileFlagHazard);
     d.add_spawn("player", 40, 120);
     d.spawns.back().name = "player";
-    d.add_spawn("coin", 80, 80);
-    d.spawns.back().name = "coin";
+    // coins: on the plank, on the raised block, and floating over the ground
+    d.add_spawn("coin", 80, 84);
+    d.add_spawn("coin", 160, 108);
+    d.add_spawn("coin", 120, 116);
+    d.set_prop(2, "Pickup_value", "int", "5");  // the coin on the block is worth 5 (a spawn property)
+    d.add_spawn("slime", 100, 126);             // patrols the ground under the plank
+    d.spawns.back().name = "slime";
     return d;
 }
 
 } // namespace tmpl
 
 // Create a new project folder `dir` named `name` from the template: phxproject.json, src/main.cpp,
-// assets/ (hero sprite, tileset, level map), README.md. Refuses a non-empty existing folder.
+// assets/ (hero + coin sprites, tileset, level map, prefab table, sounds), README.md. Refuses a
+// non-empty folder.
 inline bool create_project(const std::string& dir, const std::string& name, std::string* err = nullptr) {
     auto fail = [&](const std::string& why) { if (err) *err = why; return false; };
     const std::string slug = project_slug(name.empty() ? base_name(dir) : name);
@@ -502,6 +545,21 @@ inline bool create_project(const std::string& dir, const std::string& name, std:
     if (!spr.save(dir + "/assets/hero.sprdef", &e)) return fail(e);
     phxtool::TmapDoc lvl = tmpl::level();
     if (!lvl.save_file(dir + "/assets/level.tmj")) return fail("cannot write assets/level.tmj");
+    if (!write("assets/jump.wav", tmpl::jump_wav())) return fail("cannot write assets/jump.wav");
+    if (!write("assets/coin.wav", tmpl::coin_wav())) return fail("cannot write assets/coin.wav");
+    PixelDoc coin = tmpl::coin();
+    if (!coin.save_png(dir + "/assets/coin.png", &e)) return fail(e);
+    SprDoc coin_spr;
+    coin_spr.sheet = "coin.png"; coin_spr.frame_w = 8; coin_spr.frame_h = 8;
+    coin_spr.clips = { SprClip{ "spin", 0, 2, 6, true } };
+    if (!coin_spr.save(dir + "/assets/coin.sprdef", &e)) return fail(e);
+    PixelDoc slime = tmpl::slime();
+    if (!slime.save_png(dir + "/assets/slime.png", &e)) return fail(e);
+    SprDoc slime_spr;
+    slime_spr.sheet = "slime.png"; slime_spr.frame_w = 16; slime_spr.frame_h = 16;
+    slime_spr.clips = { SprClip{ "idle", 0, 2, 3, true } };
+    if (!slime_spr.save(dir + "/assets/slime.sprdef", &e)) return fail(e);
+    if (!write("assets/prefabs.json", tmpl::prefabs_json())) return fail("cannot write assets/prefabs.json");
 
     ProjectDoc p;
     p.dir = canon_path(dir);

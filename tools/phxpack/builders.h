@@ -134,6 +134,55 @@ inline bool build_tmcsv(BundleWriter& w, const std::string& in, const std::strin
     return true;
 }
 
+// The spawn extension (phx/resource/bundle.h) for a map's spawns: every spawn's name, then its
+// properties typed as Tiled typed them (int, float, bool; anything else is a string). Empty when
+// no spawn has a name or a property, so old-style maps bake byte-identically.
+inline std::vector<uint8_t> spawn_ext_bytes(const std::vector<TiledSpawn>& spawns) {
+    bool any = false;
+    for (const TiledSpawn& s : spawns) any = any || !s.name.empty() || !s.props.empty();
+    if (!any) return {};
+    std::vector<phx::SpawnPropDef> props;
+    std::string strings;
+    for (size_t i = 0; i < spawns.size(); ++i)
+        for (const TiledProp& p : spawns[i].props) {
+            phx::SpawnPropDef d{};
+            d.key = phx::fnv1a(p.name.c_str());
+            d.spawn = uint16_t(i);
+            if (p.type == "int") {
+                d.type = phx::kPropInt;
+                const long long v = std::strtoll(p.value.c_str(), nullptr, 10);
+                d.value = int32_t(v < INT32_MIN ? INT32_MIN : v > INT32_MAX ? INT32_MAX : v);
+            } else if (p.type == "float") {
+                d.type = phx::kPropFloat;
+                const float f = float(std::strtod(p.value.c_str(), nullptr));
+                std::memcpy(&d.value, &f, 4);
+            } else if (p.type == "bool") {
+                d.type = phx::kPropBool;
+                d.value = (p.value == "true" || p.value == "1") ? 1 : 0;
+            } else {
+                d.type = phx::kPropStr;
+                d.value = int32_t(strings.size());
+                strings += p.value;
+                strings += '\0';
+            }
+            props.push_back(d);
+        }
+    std::vector<uint8_t> out;
+    auto put = [&](const void* data, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(data);
+        out.insert(out.end(), b, b + n);
+    };
+    const uint32_t hdr[3] = { phx::kSpawnExtMagic, uint32_t(props.size()), uint32_t(strings.size()) };
+    put(hdr, sizeof(hdr));
+    for (const TiledSpawn& s : spawns) {
+        const phx::NameHash h = s.name.empty() ? 0 : phx::fnv1a(s.name.c_str());
+        put(&h, 4);
+    }
+    if (!props.empty()) put(props.data(), props.size() * sizeof(phx::SpawnPropDef));
+    put(strings.data(), strings.size());
+    return out;
+}
+
 // Tiled .tmj -> Tilemap (+ Spawns). Both assets share `name` (matches the runtime lookup).
 inline bool build_tmj(BundleWriter& w, const std::string& in, const std::string& name = "") {
     std::vector<uint8_t> bytes;
@@ -159,8 +208,11 @@ inline bool build_tmj(BundleWriter& w, const std::string& in, const std::string&
         for (const auto& s : tm.spawns)
             sd.push_back(phx::SpawnDef{ phx::fnv1a((s.type.empty() ? s.name : s.type).c_str()),
                                         int16_t(s.x), int16_t(s.y), uint16_t(s.w), uint16_t(s.h) });
-        w.add_spawns(nm, sd);
-        std::printf("  + spawns  %-12s %u objects  (%s)\n", nm.c_str(), unsigned(sd.size()), in.c_str());
+        size_t nprops = 0;
+        for (const auto& s : tm.spawns) nprops += s.props.size();
+        w.add_spawns(nm, sd, spawn_ext_bytes(tm.spawns));
+        std::printf("  + spawns  %-12s %u objects%s  (%s)\n", nm.c_str(), unsigned(sd.size()),
+                    nprops ? (", " + std::to_string(nprops) + " properties").c_str() : "", in.c_str());
     }
     return true;
 }
@@ -303,7 +355,7 @@ inline bool build_sprite(BundleWriter& w, const std::string& in, const std::stri
 
 // ---- data tables: JSON -> flat binary + generated accessor header (phxbin) ----
 // Schema: { "struct": "<Name>", "fields": [ {"name","type"} ... ], "records": [ {field: value} ] }.
-// Field types: u8/i8/u16/i16/u32/i32/f32, plus str8/str16/str32 — an inline NUL-terminated
+// Field types: u8/i8/u16/i16/u32/i32/f32, plus str8/str16/str32/str64 — an inline NUL-terminated
 // char[N] (values truncate to N-1). A string field names a record (a prefab's spawn type, an
 // item's id string): the game hashes it (fnv1a) to match spawn types, and `phxtmap --prefabs`
 // reads the same table as its placeable-entity vocabulary. Records are packed at natural C
@@ -311,11 +363,13 @@ inline bool build_sprite(BundleWriter& w, const std::string& in, const std::stri
 // the header guards it).
 struct BinField { std::string name, type; uint32_t size = 0, align = 0, offset = 0; };
 
-// str8/str16/str32 -> 8/16/32; 0 for every other type.
+// str8/str16/str32/str64 -> 8/16/32/64; 0 for every other type. (str64 holds a prefab's
+// `components` list: "PlatformerController CameraFollow" is already 33 characters.)
 inline uint32_t bin_str_size(const std::string& t) {
     if (t == "str8")  return 8;
     if (t == "str16") return 16;
     if (t == "str32") return 32;
+    if (t == "str64") return 64;
     return 0;
 }
 inline bool bin_type_info(const std::string& t, uint32_t& size, uint32_t& align) {
@@ -386,6 +440,25 @@ inline bool build_bin(BundleWriter& w, const std::string& in, const std::string&
         const JsonValue& rv = recs->arr[r];
         for (const BinField& f : fs) if (const JsonValue* v = rv.find(f.name.c_str())) bin_write_field(rec, f.offset, f, *v);
         std::memcpy(blob.data() + 8 + size_t(r) * stride, rec.data(), stride);
+    }
+    // The schema trailer (phx/resource/bundle.h): padded to 4 bytes, then magic, field count and
+    // one TableFieldDef per column, so the engine can read columns by name (TableView).
+    blob.resize((blob.size() + 3) & ~size_t(3), 0);
+    auto put32 = [&](uint32_t v) { const size_t at = blob.size(); blob.resize(at + 4); std::memcpy(blob.data() + at, &v, 4); };
+    put32(phx::kTableSchemaMagic);
+    put32(uint32_t(fs.size()));
+    for (const BinField& f : fs) {
+        phx::TableFieldDef d{};
+        d.name   = phx::fnv1a(f.name.c_str());
+        d.offset = uint16_t(f.offset);
+        d.size   = uint8_t(f.size);
+        d.type   = f.type == "u8"  ? phx::kFieldU8  : f.type == "i8"  ? phx::kFieldI8  :
+                   f.type == "u16" ? phx::kFieldU16 : f.type == "i16" ? phx::kFieldI16 :
+                   f.type == "u32" ? phx::kFieldU32 : f.type == "i32" ? phx::kFieldI32 :
+                   f.type == "f32" ? phx::kFieldF32 : phx::kFieldStr;
+        const size_t at = blob.size();
+        blob.resize(at + sizeof(d));
+        std::memcpy(blob.data() + at, &d, sizeof(d));
     }
     const std::string nm = name.empty() ? stem(in) : name;
     w.add_blob(nm, blob.data(), uint32_t(blob.size()));

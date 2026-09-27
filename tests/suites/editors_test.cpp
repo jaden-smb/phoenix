@@ -31,6 +31,7 @@
 #include "../../tools/phxstudio/project.h"
 #include "../../tools/phxstudio/host.h"
 #include "../../tools/phxstudio/projectdoc.h"
+#include "../../tools/phxstudio/components.h"
 
 #include <cstdio>
 #include <cstring>
@@ -866,7 +867,46 @@ PHX_TEST(project_launch_command_and_discovery) {
     CHECK(found.size() == 1 && found[0] == base + "/examples/a");
     CHECK(ProjectDoc::is_project_dir(base + "/examples/a") && !ProjectDoc::is_project_dir(base + "/examples/b"));
     const std::vector<ProjectLaunch> std_l = ProjectDoc::standard_launches();
-    CHECK(std_l.size() == 4 && std_l[0].windowed && std_l[0].command.find("play PROJECT=") != std::string::npos);
+    CHECK(std_l.size() == 5 && std_l[0].windowed && std_l[0].command.find("play PROJECT=") != std::string::npos);
+    CHECK(std_l[3].group == "console" && std_l[3].command.find("play-gba PROJECT=") != std::string::npos &&
+          std_l[4].group == "console" && std_l[4].command.find("play-psp PROJECT=") != std::string::npos);
+}
+
+PHX_TEST(prefab_inspector_applies_reflected_components) {
+    // what component_schema.cpp writes for a game's PHX_COMPONENTs
+    const char* json = "{ \"components\": [\n"
+                       "  { \"name\": \"Enemy\", \"size\": 8, \"fields\": [\n"
+                       "    { \"name\": \"range\", \"type\": \"i16\", \"default\": 24 },\n"
+                       "    { \"name\": \"speed\", \"type\": \"scalar\", \"default\": 1.5 },\n"
+                       "    { \"name\": \"angry\", \"type\": \"bool\", \"default\": 1 },\n"
+                       "    { \"name\": \"target\", \"type\": \"hash\", \"default\": 0 } ] },\n"
+                       "  { \"name\": \"Coin\", \"size\": 2, \"fields\": [ { \"name\": \"value\", \"type\": \"i16\", \"default\": 1 } ] } ] }";
+    CompSchema s;
+    CHECK(CompSchema::parse(json, s) && s.comps.size() == 2 && s.find("Enemy") && s.find("Enemy")->fields.size() == 4);
+    CHECK(s.find("Enemy")->fields[1].type == "scalar" && s.find("Enemy")->fields[1].def == 1.5 && !s.find("Nope"));
+    CHECK(!CompSchema::parse("{}", s) && !CompSchema::parse("nope", s));
+    CompSchema::parse(json, s);
+    CHECK(comp_column_type("scalar") == "f32" && comp_column_type("hash") == "str16" && comp_column_type("bool") == "u8" &&
+          comp_column_type("i16") == "i16");
+    CHECK(split_components(" Enemy,Coin  X ").size() == 3 && split_components("").empty());
+
+    phxtool::BinDoc d;
+    CHECK(phxtool::BinDoc::load("{ \"struct\":\"Prefab\", \"fields\":[{\"name\":\"type\",\"type\":\"str16\"}],"
+                                " \"records\":[{\"type\":\"enemy\"},{\"type\":\"coin\"}] }", d));
+    const CompSchema::Comp& enemy = *s.find("Enemy");
+    CHECK(set_record_component(d, 0, enemy, true));                   // adds `components` + 4 typed columns
+    CHECK(!set_record_component(d, 0, enemy, true));                  // already on: no change
+    CHECK(d.fields.size() == 6 && components_field(d) == 1 && d.str_cell(0, 1) == "Enemy");
+    CHECK(d.fields[2].name == "Enemy_range" && d.fields[2].type == "i16" && d.records[0][2] == 24);
+    CHECK(d.fields[3].type == "f32" && d.flt_cell(0, 3) == 1.5 && d.fields[4].type == "u8" && d.records[0][4] == 1);
+    CHECK(d.fields[5].name == "Enemy_target" && d.fields[5].type == "str16");
+    CHECK(d.records[1][2] == 0 && !record_has_component(d, 1, "Enemy"));   // the other record is untouched
+    CHECK(set_record_component(d, 0, *s.find("Coin"), true) && d.str_cell(0, 1) == "Enemy Coin" && d.fields.size() == 7);
+    CHECK(set_record_component(d, 0, enemy, false) && d.str_cell(0, 1) == "Coin" && d.fields.size() == 7);  // columns stay
+    CHECK(!set_record_component(d, 1, enemy, false));                 // not on: no change
+    // the result still bakes through phxbin's own dialect
+    phxtool::BinDoc back;
+    CHECK(phxtool::BinDoc::load(d.save_json(), back) && back.fields.size() == 7 && back.str_cell(0, 1) == "Coin");
 }
 
 PHX_TEST(new_project_template_is_complete_and_bakeable) {
@@ -878,7 +918,7 @@ PHX_TEST(new_project_template_is_complete_and_bakeable) {
     CHECK(create_project(dir, "Test Quest", &err));
     CHECK(!create_project(dir, "Test Quest", &err) && !err.empty());                                // refuses a non-empty folder
     ProjectDoc p;
-    CHECK(ProjectDoc::load(dir, p, &err) && p.name == "Test Quest" && p.launches.size() == 4 &&
+    CHECK(ProjectDoc::load(dir, p, &err) && p.name == "Test Quest" && p.launches.size() == 5 &&
           p.bundles.size() == 1 && p.bundles[0] == "build/test_quest.phxp");
     std::string main_cpp;
     {
@@ -887,6 +927,8 @@ PHX_TEST(new_project_template_is_complete_and_bakeable) {
         if (f) { char b[65536]; const size_t n = std::fread(b, 1, sizeof(b), f); main_cpp.assign(b, n); std::fclose(f); }
     }
     CHECK(main_cpp.find("struct TestQuestGame final : Game") != std::string::npos);
+    CHECK(main_cpp.find("PHX_GAME(TestQuestGame);") != std::string::npos);                          // the engine's main()
+    CHECK(main_cpp.find("int main(") == std::string::npos && main_cpp.find("phx/runtime/main.h") != std::string::npos);
     CHECK(main_cpp.find("\"build/test_quest.phxp\"") != std::string::npos);
     CHECK(main_cpp.find("@") == std::string::npos);                                                  // every placeholder filled
     CHECK(main_cpp.find("#include \"phx/") != std::string::npos && main_cpp.find("src/") != std::string::npos);
@@ -902,7 +944,32 @@ PHX_TEST(new_project_template_is_complete_and_bakeable) {
         if (f) { char b[65536]; size_t n; while ((n = std::fread(b, 1, sizeof(b), f)) > 0) tmj.append(b, n); std::fclose(f); }
     }
     phxtool::TiledMap tm;
-    CHECK(phxtool::tiled_load(tmj, tm, &err) && tm.tileset == "tiles" && tm.layers.size() == 2 && tm.spawns.size() == 2);
+    CHECK(phxtool::tiled_load(tmj, tm, &err) && tm.tileset == "tiles" && tm.layers.size() == 2 && tm.spawns.size() == 5);
+    {   // the prefab table names every spawn type the level places, and the map editor offers them
+        std::string pj;
+        FILE* f = std::fopen((dir + "/assets/prefabs.json").c_str(), "rb");
+        if (f) { char b[8192]; size_t n; while ((n = std::fread(b, 1, sizeof(b), f)) > 0) pj.append(b, n); std::fclose(f); }
+        phxtool::BinDoc pd;
+        CHECK(phxtool::BinDoc::load(pj, pd));
+        const std::vector<std::string> types = pd.name_column();
+        CHECK(types.size() == 3 && types[0] == "player" && types[1] == "coin" && types[2] == "slime");
+        for (const auto& s : tm.spawns) CHECK(std::find(types.begin(), types.end(), s.type) != types.end());
+        phxtool::SprDef cd, sd2;
+        CHECK(phxtool::load_sprdef(dir + "/assets/coin.sprdef", cd) && cd.fw == 8 && cd.clips.size() == 1);
+        CHECK(phxtool::load_sprdef(dir + "/assets/slime.sprdef", sd2) && sd2.fw == 16);
+        // the prefabs are stock behaviours, listed by name (a str64 fits the player's two)
+        const size_t cf = components_field(pd);
+        CHECK(cf < pd.fields.size() && pd.fields[cf].type == "str64" &&
+              pd.str_cell(0, cf) == "PlatformerController CameraFollow" && pd.str_cell(2, cf) == "Patrol Hazard");
+    }
+    {   // the jump sound decodes the way phxsnd reads it; the stock behaviours play it (by name)
+        const std::string wav = tmpl::jump_wav();
+        std::vector<int16_t> mono;
+        uint32_t rate = 0;
+        CHECK(phxtool::wav_decode(reinterpret_cast<const uint8_t*>(wav.data()), wav.size(), mono, rate) &&
+              rate == 22050 && mono.size() == 22050u * 18 / 100);
+        CHECK(fs::exists(dir + "/assets/jump.wav") && main_cpp.find("behaviours.update(app, dt)") != std::string::npos);
+    }
     phxtool::TmapDoc md;
     CHECK(phxtool::TmapDoc::load(tmj, md, &err) && md.tileset_image == "tiles.png" && md.has_tile_flags());
     phxtool::BundleWriter w(2);

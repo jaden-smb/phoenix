@@ -72,6 +72,9 @@ int App::run(Game* game) {
     dt_ = fixed_dt(cfg_.sim_hz);
     prof_.budget_us = cfg_.sim_hz ? 1000000u / cfg_.sim_hz : 16667u;
 
+    // 5b. sound: nothing starts until the game first plays something (phx/runtime/audio.h)
+    audio_.attach(plat_->audio ? plat_->audio() : nullptr, &mem_->persistent(), caps(), cfg_.sim_hz);
+
     PHX_LOG_INFO("Phoenix boot: '%s'  ram=%uKB  sim=%uHz  ents=%u", cfg_.title,
                  cfg_.total_ram / 1024u, cfg_.sim_hz, max_ents);
 
@@ -109,6 +112,7 @@ int App::run(Game* game) {
 
         const uint64_t t_ren = plat_->clock_ns();
         game->on_render(*this, acc_.alpha());
+        if (audio_.pump_) audio_.pump_(audio_);   // no device: mix this frame's sound here
 
         mem_->swap_frame();        // double-buffered transient reclaim, O(1)
         ++frame_;
@@ -132,6 +136,8 @@ int App::run(Game* game) {
 
     // 6. teardown in reverse
     game->on_stop(*this);
+    if (audio_.stop_) audio_.stop_(audio_);   // silence the device before its state goes away
+    audio_.detach();
     plat_->shutdown();
     MemoryRoot::shutdown(mem_);
     PHX_LOG_INFO("Phoenix shutdown after %llu frames", (unsigned long long)frame_);

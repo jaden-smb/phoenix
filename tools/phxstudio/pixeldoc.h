@@ -17,6 +17,7 @@
 
 #include "png.h"         // tools/phxpack — the one PNG decoder
 #include "json.h"        // tools/phxpack — the one JSON parser
+#include "abspath.h"
 #include "png_write.h"   // tools/common
 
 #include <algorithm>
@@ -506,7 +507,7 @@ public:
     // The sheet's path on disk, resolved the way the bake resolves it (a bare name sits next to
     // the def; anything with a '/' is relative to the working directory).
     static std::string resolve_sheet(const std::string& def_path, const std::string& sheet) {
-        if (sheet.empty() || sheet[0] == '/' || sheet.find('/') != std::string::npos) return sheet;
+        if (sheet.empty() || is_abs_path(sheet) || sheet.find('/') != std::string::npos) return sheet;
         const size_t sl = def_path.find_last_of('/');
         return sl == std::string::npos ? sheet : def_path.substr(0, sl + 1) + sheet;
     }

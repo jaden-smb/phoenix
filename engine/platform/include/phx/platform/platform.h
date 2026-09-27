@@ -15,8 +15,20 @@ extern "C" {
 /* ---- opaque handles ---- */
 typedef struct phx_window phx_window;
 typedef struct phx_gfx    phx_gfx;     /* graphics device, consumed by render backend */
-typedef struct phx_audio  phx_audio;   /* audio device, consumed by audio mixer       */
 typedef struct phx_file   phx_file;    /* file handle (map() = stable in-memory view) */
+
+/* ---- the audio output device (consumed by the App's GameAudio, phx/runtime/audio.h) ----
+ * The platform owns the device but never the mixer (the platform must not depend on audio):
+ * start() runs `fill` wherever the device wants samples (SDL's audio thread, a PSP thread, the
+ * GBA's VBlank IRQ), asking for `frames` interleaved stereo S16 frames. The caller's fill drains
+ * its lock-free command queue into its mixer, then mixes: the mixer is only ever touched there.
+ * `rate` is the output rate the device runs at best; start() takes the rate to open at. */
+typedef void (*phx_audio_fill)(void* user, int16_t* out, int frames);
+typedef struct phx_audio {
+    int   rate;                                                  /* Hz: SDL/PSP 44100, GBA 18157 */
+    int   (*start)(int rate, phx_audio_fill fill, void* user);  /* 0 = playing */
+    void  (*stop)(void);
+} phx_audio;
 
 /* ---- normalized input frame (filled by platform, decoded by input module) ----
  * Canonical button bit order is fixed so Button::Jump means the same everywhere. */
@@ -60,7 +72,7 @@ typedef struct phx_platform {
     int   (*pump_events)(void);                 /* returns 0 to request quit */
     void  (*present)(void);                     /* swap buffers / wait vblank */
 
-    /* device handles handed to higher layers */
+    /* device handles handed to higher layers (audio: null when the backend has no output) */
     phx_gfx*   (*gfx)(void);
     phx_audio* (*audio)(void);
 

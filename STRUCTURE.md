@@ -37,8 +37,17 @@ phoenix/
 │   │                                sdl=window+audio+mouse, gba=ROM+DirectSound+SRAM save,
 │   │                                psp=EBOOT+sceAudio+sceIo save (ms0:-anchored keys)
 │   ├── runtime/                  Composition root: the App fixed-step main loop (top layer)
-│   │   ├── include/phx/runtime/  app.h (App, Game hooks, FrameProfile accessor)
-│   │   └── src/                  app.cpp (boot -> loop w/ per-phase profiling -> teardown)
+│   │   ├── include/phx/runtime/  app.h (App, Game hooks, FrameProfile accessor) · main.h (PHX_GAME,
+│   │   │                         target profiles, run_game: the engine-owned entry for game projects)
+│   │   │                         · audio.h (GameAudio = App::audio(): mixer + queue + the seam's
+│   │   │                         device, started on first play; headless mix where there's none)
+│   │   │                         · level.h (Level: tilemap + collision grid + spawns -> entities
+│   │   │                         from the prefab table; SpriteRenderer, PrefabRef, draw_sprites)
+│   │   └── src/                  app.cpp (boot -> loop w/ per-phase profiling -> teardown) ·
+│   │                             game_main.cpp (profile -> Config) · component_schema.cpp (host:
+│   │                             reflected components -> JSON for the Studio) · level.cpp (linked by projects
+│   │                             + the level suite) · entry/{desktop,gba,psp}_main.cpp
+│   │                             (each target's main(), linked only by `make game|game-gba|game-psp`)
 │   ├── render/                   One 2D-intent API; backends per render tier; LRU texture cache
 │   │   ├── include/phx/render/   renderer.h texture_cache.h
 │   │   └── src/{soft,gl,gu,gba}/  software (the golden reference) · GL (tier 2) ·
@@ -46,11 +55,13 @@ phoenix/
 │   │                              GBA PPU (tier 0: gba_ppu.cpp + ppu_model.h; PHX_GBA_HW = real MMIO)
 │   │                              front end (renderer.cpp): sort/batch + camera zoom/shake +
 │   │                              per-layer parallax — Q16 tier-exact, inherited by every backend
-│   ├── ecs/                      Sparse-set World, components, systems
+│   ├── ecs/                      Sparse-set World, components, systems; reflect.h (PHX_COMPONENT /
+│   │                             PHX_FIELD: a game's components by name, for the level loader + tools)
 │   ├── input/                    phx_input_raw -> semantic Button/edge/axis/pointer state,
 │   │                             remappable via InputMap (+ integer stick->dpad synthesis)
 │   ├── audio/                    Software mixer (mixer.h) + SPSC ring streaming (stream.h) + lock-free command queue (command_queue.h)
-│   ├── resource/                 .phxp bundle mount, zero-copy in-place views (incl. per-layer parallax), LZSS codec
+│   ├── resource/                 .phxp bundle mount, zero-copy in-place views (incl. per-layer parallax), LZSS codec;
+│   │                             table.h (TableView: a phxbin table's columns by name, via its schema trailer)
 │   ├── scene/                    Scene stack, transitions, persistent blackboard
 │   ├── physics/                  AABB + swept tile collision (per-tile flags: solid/one-way/
 │   │                             hazard, or the solid_from fallback); overlap queries
@@ -82,7 +93,11 @@ phoenix/
 │   │                             phxproject.json, the new-project template, and the ACCESS POLICY —
 │   │                             a project writes only its own folder, reads the engine's public API).
 │   │                             host.h = the panel<->host seam ·
-│   │                             solo.h = one-document host · jobs.h = process runner · main.cpp = shell
+│   │                             solo.h = one-document host · jobs.h = process runner (winjob.cpp =
+│   │                             its Windows half: sh.exe in a Job Object) · main.cpp = shell ·
+│   │                             new_main.cpp = `phxnew DIR [NAME]` (File > New project, headless) ·
+│   │                             components.h = the game's reflected components (build/components.json)
+│   │                             + the table editor's prefab inspector logic
 │   └── common/                   depcheck.py (layering gate) · size_gate.py (GBA budget gate) ·
 │                                 bin2s.py (portable asset embedding) · debug_font.h (shared tool font) ·
 │                                 ascii_font.h (full-ASCII 5x7 tool font) · twk.h (+ twk_geom.h,

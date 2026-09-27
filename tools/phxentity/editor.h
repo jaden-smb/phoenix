@@ -2,7 +2,7 @@
 // GUI so it is unit-testable headlessly. Loads/saves the phxbin author JSON (docs/08 §1:
 // editors output author formats the converters bake): a typed record table
 //   { "struct":"Name", "fields":[{"name","type"}...], "records":[{k:v}...] }
-// with integer field types (u8/u16/u32/i8/i16/i32), f32, and string fields (str8/str16/str32 —
+// with integer field types (u8/u16/u32/i8/i16/i32), f32, and string fields (str8/str16/str32/str64 —
 // phxbin bakes them as inline NUL-terminated char[N], so a strN cell holds at most N-1 chars).
 // A string column NAMES records, which is what makes a table a PREFAB SCHEMA: the game hashes
 // the name to match baked spawn types, and the map editor reads the same table as its placeable-
@@ -40,18 +40,18 @@ public:
     }
     // String field types (baked by phxbin as NUL-terminated char[N]).
     static bool str_type(const std::string& t) {
-        return t == "str8" || t == "str16" || t == "str32";
+        return t == "str8" || t == "str16" || t == "str32" || t == "str64";
     }
     static bool flt_type(const std::string& t) { return t == "f32"; }
     // Every type a schema may declare (valid for --new/--fields and add_field).
     static bool schema_type(const std::string& t) { return valid_type(t) || str_type(t) || flt_type(t); }
     static const std::vector<std::string>& all_types() {
-        static const std::vector<std::string> k = { "u8", "i8", "u16", "i16", "u32", "i32", "f32", "str8", "str16", "str32" };
+        static const std::vector<std::string> k = { "u8", "i8", "u16", "i16", "u32", "i32", "f32", "str8", "str16", "str32", "str64" };
         return k;
     }
     // Max characters a strN cell can hold (N-1: the NUL terminator takes one byte).
     static size_t str_capacity(const std::string& t) {
-        return t == "str8" ? 7 : t == "str16" ? 15 : t == "str32" ? 31 : 0;
+        return t == "str8" ? 7 : t == "str16" ? 15 : t == "str32" ? 31 : t == "str64" ? 63 : 0;
     }
     bool field_is_str(size_t f) const { return f < fields.size() && str_type(fields[f].type); }
     bool field_is_flt(size_t f) const { return f < fields.size() && flt_type(fields[f].type); }
@@ -80,7 +80,7 @@ public:
             Field f{ fs.substr(0, c), fs.substr(c + 1) };
             if (!schema_type(f.type))
                 return fail("bad field type '" + f.type + "' in '" + fs +
-                            "' (want u8/i8/u16/i16/u32/i32/f32 or str8/str16/str32)");
+                            "' (want u8/i8/u16/i16/u32/i32/f32 or str8/str16/str32/str64)");
             out.fields.push_back(std::move(f));
         }
         out.dirty = true;                        // a new table is unsaved by definition

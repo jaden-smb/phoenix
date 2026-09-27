@@ -77,15 +77,43 @@ voice count scales with `phx_caps::audio_channels`.
 namespace phx {
 class AudioMixer {
 public:
-    static Result<AudioMixer*> create(phx_audio*, ArenaAllocator&, const phx_caps&);
-    VoiceId play_sfx(SoundView, float vol=1, float pan=0, bool loop=false);
+    static Result<AudioMixer*> create(ArenaAllocator&, const Caps&, uint32_t out_rate = 44100);
+    VoiceId play_sfx(const SoundView&, float vol=1, float pan=0, bool loop=false);
     void    stop(VoiceId);
-    void    play_music(SoundView, bool loop=true);   // streamed where supported
+    void    play_music(const SoundView&, float vol=1, bool loop=true);
     void    set_music_volume(float);
-    void    mix(int16_t* out, uint32_t frames);      // called by platform callback
+    void    mix(int16_t* out, uint32_t frames);      // called by the device callback
 };
 } // namespace phx
 ```
+
+**What a game uses: `App::audio()`** (`phx/runtime/audio.h`, `GameAudio`). The engine owns the
+mixer, the lock-free `AudioCommandQueue` and the platform's device, so game code only states
+intents and never calls a platform function:
+
+```cpp
+jump = to_sound(res->sound("jump"_hash).unwrap());   // on_start: a baked sound, zero-copy
+app.audio().play(jump);                              // sfx (vol, pan, loop)
+app.audio().play_music(theme, 0.6f);                 // the music bus
+app.audio().stop_all();
+```
+
+Nothing is allocated or started until the first play. At that point the mixer and the queue
+come out of the persistent arena, and the platform's device (`phx_platform::audio()`, a
+`phx_audio { rate, start, stop }`) is started at the device's rate:
+
+| Platform | Device | Rate |
+|---|---|---|
+| SDL | audio thread | 44.1 kHz |
+| PSP | sceAudio thread | 44.1 kHz |
+| GBA | DirectSound, pumped by the VBlank IRQ | 18157 Hz (what the tier-0 bake resamples to) |
+
+The device's callback drains the queue into the mixer and mixes, so the mixer is only ever
+touched there. With no device (the null platform) the App mixes one frame's worth per rendered
+frame itself: voices advance deterministically, and `peak()`, `plays()` and `frames_mixed()` let
+tests check what would have been heard. A game that never plays anything pays nothing. A game
+that runs its own mixer and device (Emberwing, Phoenix Studio) is unaffected, because
+`GameAudio` never starts. `make game-audio-verify` checks the device path on a real SDL device.
 
 | Feature           | GBA                          | PSP                  | PC                |
 |-------------------|------------------------------|----------------------|-------------------|

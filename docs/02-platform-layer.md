@@ -17,8 +17,16 @@ extern "C" {
 
 typedef struct phx_window  phx_window;   // opaque
 typedef struct phx_gfx     phx_gfx;      // opaque graphics device handle
-typedef struct phx_audio   phx_audio;    // opaque audio device handle
 typedef struct phx_file    phx_file;     // opaque file handle (stable in-memory view)
+
+// The audio output device. The platform owns the device, never the mixer: start() runs `fill`
+// where the device wants samples (SDL/PSP thread, GBA VBlank IRQ). Null where there is none.
+typedef void (*phx_audio_fill)(void* user, int16_t* out, int frames);   // stereo S16 frames
+typedef struct phx_audio {
+    int   rate;                                                  // SDL/PSP 44100, GBA 18157
+    int   (*start)(int rate, phx_audio_fill fill, void* user);  // 0 = playing
+    void  (*stop)(void);
+} phx_audio;
 
 typedef struct phx_platform {
     /* lifecycle */

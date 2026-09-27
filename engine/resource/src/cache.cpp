@@ -6,6 +6,8 @@
 #include "phx/core/crc32.h"
 #include "phx/core/log.h"
 
+#include <cstring>
+
 namespace phx {
 
 namespace {
@@ -257,6 +259,25 @@ Result<SpawnsView> ResourceCache::spawns(NameHash name) {
     SpawnsView v;
     v.count  = sh->count;
     v.spawns = reinterpret_cast<const SpawnDef*>(p + sizeof(SpawnBlobHeader));
+
+    // The optional extension (bundle.h): names + per-instance properties, bounds-checked against
+    // the asset's size so a truncated or foreign trailer is simply ignored.
+    const uint64_t end = sizeof(SpawnBlobHeader) + uint64_t(v.count) * sizeof(SpawnDef);
+    const uint64_t ext = (end + 3u) & ~uint64_t(3);
+    if (ext + 12u <= e->usize) {
+        uint32_t hdr[3];
+        std::memcpy(hdr, p + ext, sizeof(hdr));
+        const uint64_t names_at = ext + 12u;
+        const uint64_t props_at = names_at + uint64_t(v.count) * 4u;
+        const uint64_t strs_at  = props_at + uint64_t(hdr[1]) * sizeof(SpawnPropDef);
+        if (hdr[0] == kSpawnExtMagic && strs_at + hdr[2] <= e->usize) {
+            v.names = p + names_at;
+            v.props = p + props_at;
+            v.prop_count = hdr[1];
+            v.strings = reinterpret_cast<const char*>(p + strs_at);
+            v.strings_size = hdr[2];
+        }
+    }
     return Result<SpawnsView>::good(v);
 }
 

@@ -22,6 +22,10 @@
 #include <cstdlib>
 #include <cstring>
 
+// The real audio device (defined at the bottom), also offered through the seam's audio().
+extern "C" int  phx_sdl_audio_start(int rate, phx_audio_fill fill, void* user);
+extern "C" void phx_sdl_audio_stop(void);
+
 namespace {
 
 // Canonical phx button bit order — MUST match phx::Button in engine/input (Up=0 .. Select=11).
@@ -310,13 +314,13 @@ void sdl_present(void) {
 }
 
 phx_gfx*   sdl_gfx(void)   { return reinterpret_cast<phx_gfx*>(&g); }   // gfx_soft_lock reads g.fb
-phx_audio* sdl_audio(void) { return nullptr; }                          // device opened separately
+phx_audio  g_audio_device{ 44100, phx_sdl_audio_start, phx_sdl_audio_stop };
+phx_audio* sdl_audio(void) { return &g_audio_device; }
 
 // --- real audio device --------------------------------------------------------------------
 // The platform owns the device but NOT the mixer (layering: platform must not depend on audio).
 // The game registers a fill callback that drains its lock-free AudioCommandQueue and calls
 // AudioMixer::mix(); SDL invokes it on the audio thread, so the mixer is touched single-threaded.
-typedef void (*phx_audio_fill)(void* user, int16_t* out, int frames);
 struct AudioState { SDL_AudioDeviceID dev; phx_audio_fill fill; void* user; };
 AudioState g_audio{ 0, nullptr, nullptr };
 

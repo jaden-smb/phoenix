@@ -7,6 +7,7 @@
 // (`make tools` / ctest `tools_cli`) can re-run the actual tool binaries over them.
 #include "phx/platform/platform.h"
 #include "phx/resource/cache.h"
+#include "phx/resource/table.h"
 #include "phx/core/caps.h"
 
 #include "builders.h"        // the converter bake logic
@@ -228,7 +229,14 @@ int main() {
         std::memcpy(&id0,    p + 8 + 0, 2);
         std::memcpy(&price0, p + 8 + 4, 4);
         std::memcpy(&atk1,   p + 8 + stride + 8, 2);
-        check(id0 == 1 && price0 == 100 && atk1 == -3, "table record fields"); }
+        check(id0 == 1 && price0 == 100 && atk1 == -3, "table record fields");
+        // the schema trailer: the same table read by COLUMN NAME (phx/resource/table.h)
+        TableView t;
+        check(t.parse(b) && t.has_schema() && t.count() == 2 && t.stride() == 12, "table schema trailer parses");
+        check(t.get_int(0, "price"_hash) == 100 && t.get_int(1, "atk"_hash) == -3 && t.get_int(1, "id"_hash) == 2,
+              "table columns read by name");
+        check(t.get_int(0, "nope"_hash, 7) == 7 && t.get_int(5, "id"_hash, -1) == -1 && !t.has("nope"_hash),
+              "absent column / row -> the default"); }
 
     // phxtmap editor document model: blank -> paint tiles + place spawns + a parallax layer
     // -> save .tmj -> the REAL importer parses it back identically (editors emit author
@@ -269,6 +277,60 @@ int main() {
         // The doc's spawn vocabulary is harvested for the GUI's placeable list.
         auto tys = r2.spawn_types();
         check(tys.size() == 1 && tys[0] == "player", "spawn_types harvests the doc's vocabulary");
+    }
+
+    // Per-spawn properties: the map editor's model -> .tmj (Tiled custom properties) -> the real
+    // importer -> the bake's spawn extension -> SpawnsView by name + key.
+    {
+        using phxtool::TmapDoc;
+        TmapDoc d = TmapDoc::blank(4, 2, 8, 8, "tiles");
+        d.add_spawn("door", 8, 0);
+        d.add_spawn("enemy", 16, 8);
+        d.add_spawn("coin", 24, 8);
+        d.spawns[0].name = "door_a";
+        d.spawns[2].name = "";                                        // an unnamed spawn
+        d.set_prop(0, "target", "string", "level2 \"b\"");            // quotes survive the JSON
+        d.set_prop(1, "range", "int", "-24");
+        d.set_prop(1, "speed", "float", "1.5");
+        d.set_prop(1, "angry", "bool", "yes");                        // normalised to true
+        d.set_prop(1, "range", "int", "32");                          // replaces, not appends
+        d.set_prop(1, "tmp", "int", "abc");                           // not a number -> 0
+        d.remove_prop(1, "tmp");
+        check(d.spawns[1].props.size() == 3 && d.spawns[1].props[0].value == "32" && d.spawns[1].props[2].value == "true",
+              "spawn props: set replaces by name, values normalise to their type, remove drops");
+        check(TmapDoc::normalise_prop("int", "-") == "0" && TmapDoc::normalise_prop("float", "2") == "2" &&
+              TmapDoc::normalise_prop("bool", "0") == "false", "prop values normalise per type");
+        TmapDoc r;
+        check(TmapDoc::load(d.save_tmj(), r) && r.spawns.size() == 3 && r.spawns[0].props.size() == 1 &&
+              r.spawns[0].props[0].value == "level2 \"b\"" && r.spawns[1].props == d.spawns[1].props,
+              "spawn props round-trip through the .tmj and the real importer");
+        check(d.save_file("build/p_props.tmj"), "write the props map");
+        phxtool::BundleWriter w(2);
+        check(phxtool::build_tmj(w, "build/p_props.tmj", "props") && w.write("build/p_props.phxp"), "bake the props map");
+        ResourceCache* cp = ResourceCache::create(arena).unwrap();
+        check(cp->mount(plat, "build/p_props.phxp") == Status::Ok, "mount the props map");
+        auto sp = cp->spawns("props"_hash);
+        check(sp.ok() && sp.unwrap().count == 3 && sp.unwrap().prop_count == 4, "the spawn extension is baked");
+        if (sp.ok()) {
+            const SpawnsView v = sp.unwrap();
+            check(v.name(0) == "door_a"_hash && v.name(2) == 0 && v.find_named("door_a"_hash) == 0 && v.find_named("x"_hash) == -1,
+                  "spawn names by index; an unnamed spawn is 0");
+            check(v.get_str(0, "target"_hash) && std::strcmp(v.get_str(0, "target"_hash), "level2 \"b\"") == 0 &&
+                  v.get_hash(0, "target"_hash) == phx::fnv1a("level2 \"b\""), "a string property");
+            check(v.get_int(1, "range"_hash) == 32 && v.get_int(1, "speed"_hash) == 1 && v.get_int(1, "angry"_hash) == 1,
+                  "int, float (truncated) and bool properties");
+            check(v.get_int(1, "nope"_hash, 7) == 7 && v.get_int(0, "range"_hash, 7) == 7 && v.get_str(1, "range"_hash) == nullptr,
+                  "absent keys / other spawns' keys / wrong type -> the default");
+        }
+        // a map whose spawns have no names and no properties bakes exactly as before (no extension)
+        TmapDoc plain = TmapDoc::blank(2, 2, 8, 8, "tiles");
+        plain.add_spawn("coin", 0, 0);
+        plain.spawns[0].name = "";
+        phxtool::BundleWriter wp(2);
+        check(plain.save_file("build/p_plain.tmj") && phxtool::build_tmj(wp, "build/p_plain.tmj", "plain") && wp.write("build/p_plain.phxp"),
+              "bake a map with bare spawns");
+        check(cp->mount(plat, "build/p_plain.phxp") == Status::Ok && cp->spawns("plain"_hash).ok() &&
+              cp->spawns("plain"_hash).unwrap().names == nullptr, "bare spawns carry no extension");
     }
 
     // phxtmap editor: per-GID collision flags author-edit + round-trip (saved as Tiled
@@ -478,6 +540,12 @@ int main() {
                   "overlong name truncates to N-1 chars + NUL");
             uint16_t hp0 = 0; std::memcpy(&hp0, p + 8 + 16, 2);
             check(hp0 == 3, "int field after the string column reads back");
+            TableView t;
+            check(t.parse(pb.unwrap()) && t.find("type"_hash, "player"_hash) == 0 && t.find("type"_hash, "ghost"_hash) == -1,
+                  "a prefab row is found by its type column");
+            check(t.get_int(0, "hp"_hash) == 3 && std::strcmp(t.get_str(0, "type"_hash), "player") == 0 &&
+                  t.get_hash(0, "type"_hash) == "player"_hash && t.get_str(0, "hp"_hash) == nullptr,
+                  "prefab columns by name: int, str, hash; an int column is not a str");
         }
         bool gen_str = false;
         if (FILE* h = std::fopen("build/p_prefabs.gen.h", "rb")) {
@@ -655,6 +723,8 @@ int main() {
         check(std::find(prereqs.begin(), prereqs.end(), "pipeline") != prereqs.end() &&
               std::find(prereqs.begin(), prereqs.end(), "depcheck") != prereqs.end(),
               "studio: `check:` prerequisites parsed");
+        const auto crlf = make_prereqs("x: y\r\ncheck: a b \\\r\n  c\r\nd: e\r\n", "check");
+        check(crlf.size() == 3 && crlf[1] == "b" && crlf[2] == "c", "studio: prerequisites of a CRLF Makefile");
         check(make_has_target(mk, "studio") && make_has_target(mk, "emberwing-sdl") && !make_has_target(mk, "CXXFLAGS"),
               "studio: make_has_target (rules, not variables)");
         const auto launches = default_launches(mk, "/nonexistent/devkitARM");
@@ -686,6 +756,47 @@ int main() {
               lr.at(1).text == "progress 99%" && lr.at(2).text == "four", "studio: LogRing splits, strips ANSI, honours \\r, caps");
         check(exit_code_from_status(0) == 0 && exit_code_from_status(3 << 8) == 3 && exit_code_from_status(15) == 143,
               "studio: wait status -> exit code (signals as 128+N)");
+
+        // tools on PATH + the Windows shell lookup (pure; the fake installs live under build/)
+        {
+            const std::vector<std::string> pl = split_path_list("C:\\a;;C:\\b c;", ';');
+            check(pl.size() == 2 && pl[0] == "C:\\a" && pl[1] == "C:\\b c", "studio: PATH list split, empties dropped");
+            check(split_path_list("/usr/bin::/bin", ':').size() == 2, "studio: POSIX PATH list split");
+            namespace sfs = std::filesystem;
+            std::error_code ec;
+            const std::string t = sfs::absolute("build/p_tools").generic_string();
+            sfs::remove_all(t, ec);
+            for (const char* d : { "/bin", "/msys/usr/bin", "/msys/ucrt64/bin", "/msys/opt/dk/bin", "/git/usr/bin" })
+                sfs::create_directories(t + d, ec);
+            for (const char* f : { "/bin/sdl2-config", "/bin/make.exe", "/msys/usr/bin/sh.exe", "/msys/usr/bin/make.exe",
+                                   "/msys/opt/dk/bin/arm-g++.exe", "/git/usr/bin/sh.exe" })
+                write_file((t + f).c_str(), "x", 1);
+            const std::vector<std::string> dirs = { t + "/bin" };
+            check(resolve_tool("sdl2-config", dirs, true) == t + "/bin/sdl2-config" &&
+                  resolve_tool("make", dirs, true) == t + "/bin/make.exe" && resolve_tool("make", dirs, false).empty(),
+                  "studio: tools resolve bare, and with .exe on Windows only");
+            check(resolve_tool("/opt/dk/bin/arm-g++", {}, true, t + "/msys") == t + "/msys/opt/dk/bin/arm-g++.exe" &&
+                  resolve_tool("/opt/dk/bin/arm-g++", {}, false, t + "/msys").empty(),
+                  "studio: a POSIX-absolute need resolves under the shell's root on Windows");
+            // sh.exe beside make wins; the toolchain folder and the shell's bin go in front of PATH
+            const PosixShell s1 = find_posix_shell({ t + "/msys/usr/bin" }, "", "", { t + "/git/usr/bin/sh.exe" });
+            check(s1.sh == t + "/msys/usr/bin/sh.exe" && s1.root == t + "/msys" && s1.add_path.size() == 1 &&
+                  s1.add_path[0] == t + "/msys/ucrt64/bin", "studio: MSYS2 shell beside make, ucrt64 added to PATH");
+            const PosixShell s2 = find_posix_shell({ t + "/bin" }, "", "UCRT64", { t + "/msys/usr/bin/sh.exe" });
+            check(s2.sh == t + "/msys/usr/bin/sh.exe" && s2.add_path.size() == 2 && s2.add_path[1] == t + "/msys/usr/bin",
+                  "studio: shell from the fallbacks, its bin added to PATH");
+            const PosixShell s3 = find_posix_shell({}, t + "/git/usr/bin/sh.exe", "", {});
+            check(s3.sh == t + "/git/usr/bin/sh.exe" && s3.root == t + "/git", "studio: PHX_SH overrides the search");
+            check(find_posix_shell({ t + "/bin" }, "", "", {}).sh.empty(), "studio: no shell found");
+            // launch needs name SDK variables; DEVKITPRO/DEVKITARM default like the Makefile's
+            auto no_env = [](const std::string&) { return std::string(); };
+            auto dkp_env = [](const std::string& k) { return std::string(k == "DEVKITPRO" ? "/c/dkp" : ""); };
+            check(expand_need_vars("$DEVKITARM/bin/arm-none-eabi-g++", no_env) == "/opt/devkitpro/devkitARM/bin/arm-none-eabi-g++" &&
+                  expand_need_vars("${DEVKITARM}/bin/x", dkp_env) == "/c/dkp/devkitARM/bin/x" &&
+                  expand_need_vars("$NOPE/x $", no_env) == "$NOPE/x $" && expand_need_vars("psp-g++", no_env) == "psp-g++",
+                  "studio: launch needs expand $VAR / ${VAR} with the SDK defaults");
+            sfs::remove_all(t, ec);
+        }
 
         // layout math
         const Rect f1 = fit_rect(16, 8, Rect{ 0, 0, 100, 100 });

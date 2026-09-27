@@ -508,7 +508,9 @@ struct StudioGame final : Game {
         const char* xdg = std::getenv("XDG_CONFIG_HOME");
         const char* home = std::getenv("HOME");
         if (xdg && *xdg) return std::string(xdg) + "/phxstudio/projects.txt";
+        const char* appdata = std::getenv("APPDATA");    // Windows, started outside a Unix shell
         if (home && *home) return std::string(home) + "/.config/phxstudio/projects.txt";
+        if (appdata && *appdata) return std::string(appdata) + "/phxstudio/projects.txt";
         return "";
     }
     void load_recent_projects() {
@@ -641,7 +643,7 @@ struct StudioGame final : Game {
     // A compiler message's file -> an absolute, canonical path. Relative paths are relative to
     // the directory make ran in: the project folder, or (make -C "$PHX_ROOT") the engine checkout.
     std::string resolve_diag_file(const std::string& f) const {
-        if (f.empty() || f[0] == '/') return canon_path(f);
+        if (f.empty() || is_abs_path(f)) return canon_path(f);
         std::error_code ec;
         for (const std::string& base : { ws_root, root })
             if (!base.empty() && pfs::exists(join_path(base, f), ec)) return canon_path(join_path(base, f));
@@ -657,7 +659,7 @@ struct StudioGame final : Game {
     }
 
     std::string resolve_user_path(const std::string& p) const {
-        if (p.empty() || p[0] == '/') return p;
+        if (p.empty() || is_abs_path(p)) return p;
         std::error_code ec;
         if (pfs::exists(p, ec)) return canon_path(p);         // relative to the working directory
         return join_path(ws_root.empty() ? root : ws_root, p);
@@ -702,7 +704,7 @@ struct StudioGame final : Game {
         }
     }
     // Bundle list entries are engine-root-relative (engine dev) or absolute (a project's).
-    std::string bundle_abs(const std::string& p) const { return p.empty() || p[0] == '/' ? p : root + "/" + p; }
+    std::string bundle_abs(const std::string& p) const { return p.empty() || is_abs_path(p) ? p : root + "/" + p; }
     std::string bundle_label(const std::string& p) const {
         if (has_project && path_within(p, project.dir)) return p.substr(project.dir.size() + 1);
         return p;
@@ -760,10 +762,10 @@ struct StudioGame final : Game {
             g.text_field(g.id("np-where"), twk::Rect{ body.x + 70, body.y + 17, body.w - 70, 13 }, st->where, "examples",
                          0, "The parent folder: relative to the Phoenix checkout, or an absolute path");
             const std::string slug = project_slug(st->name);
-            const std::string parent = st->where.empty() ? root : (st->where[0] == '/' ? st->where : join_path(root, st->where));
+            const std::string parent = st->where.empty() ? root : (is_abs_path(st->where) ? st->where : join_path(root, st->where));
             const std::string dir = join_path(parent, slug);
             g.text(body.x, body.y + 38, "creates " + dir, pal::faint, twk::kSubText, body.w);
-            g.text(body.x, body.y + 48, "src/main.cpp, assets/ (hero sprite, tileset, level), phxproject.json", pal::faint, twk::kSubText, body.w);
+            g.text(body.x, body.y + 48, "src/main.cpp, assets/ (sprites, tileset, level, prefabs, sounds), phxproject.json", pal::faint, twk::kSubText, body.w);
             if (!st->err.empty()) g.text(body.x, body.y + 62, st->err, pal::bad, twk::kSubText, body.w);
             const int y = body.bottom() - 14;
             twk::Btn cb; cb.on = true; cb.enabled = !slug.empty();
@@ -2497,7 +2499,7 @@ struct StudioGame final : Game {
         if (tool("follow", con_follow, true, "Keep the newest output in view")) con_follow = !con_follow;
         if (tool("clear", false, true, "Clear the console")) { con.clear(); log.clear(); log_consumed = log.total(); con_scroll = 0; }
         if (tool("stop", false, rid >= 0 && jobs && jobs->can_stop(),
-                 jobs && jobs->can_stop() ? "Signal the running job's whole process group (and drop the queue)"
+                 jobs && jobs->can_stop() ? "Stop the running job and everything it started (and drop the queue)"
                                           : "Stopping needs `setsid` (util-linux)")) {
             jobs->cancel_queue();
             jobs->stop_current();

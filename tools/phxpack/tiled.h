@@ -14,15 +14,24 @@
 #include "phx/resource/bundle.h"   // kTileFlag* — the baked per-tile collision flag values
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
 namespace phxtool {
 
+// A Tiled custom property on an object: `type` is Tiled's ("int", "float", "bool", "string",
+// "color", "file", …); `value` is its text form ("12", "0.5", "true", "hello").
+struct TiledProp {
+    std::string name, type = "string", value;
+    bool operator==(const TiledProp& o) const { return name == o.name && type == o.type && value == o.value; }
+};
+
 struct TiledSpawn {
     std::string name;        // object name
     std::string type;        // object type/class (-> spawn type hash at bake time)
     int x = 0, y = 0, w = 0, h = 0;
+    std::vector<TiledProp> props;   // per-instance properties (baked into the spawn extension)
 };
 
 struct TiledMap {
@@ -56,6 +65,21 @@ inline uint8_t tiled_flag_of(const std::string& s) {
     if (s == "oneway" || s == "one_way") return phx::kTileFlagOneWay;
     if (s == "hazard")                   return phx::kTileFlagHazard;
     return 0;
+}
+
+// A property value's text form: numbers print without a trailing ".0" when whole, bools as
+// "true"/"false", strings as themselves.
+inline std::string tiled_value_text(const JsonValue* v) {
+    if (!v) return "";
+    if (v->type == JsonValue::Bool) return v->boolean ? "true" : "false";
+    if (v->type == JsonValue::Num) {
+        const double n = v->number;
+        if (n == double(int64_t(n)) && n > -1e15 && n < 1e15) return std::to_string(int64_t(n));
+        char buf[40];
+        std::snprintf(buf, sizeof(buf), "%.9g", n);
+        return buf;
+    }
+    return v->as_str();
 }
 
 inline bool tiled_load(const std::string& text, TiledMap& out, std::string* err = nullptr) {
@@ -147,6 +171,15 @@ inline bool tiled_load(const std::string& text, TiledMap& out, std::string* err 
                     if (sp.type.empty()) sp.type = o.str_at("class");   // Tiled 1.9+ renamed type->class
                     sp.x = o.int_at("x"); sp.y = o.int_at("y");
                     sp.w = o.int_at("width"); sp.h = o.int_at("height");
+                    if (const JsonValue* props = o.find("properties"); props && props->is_arr())
+                        for (const JsonValue& pv : props->arr) {
+                            TiledProp tp;
+                            tp.name = pv.str_at("name");
+                            if (tp.name.empty()) continue;
+                            if (!pv.str_at("type").empty()) tp.type = pv.str_at("type");
+                            tp.value = tiled_value_text(pv.find("value"));
+                            sp.props.push_back(std::move(tp));
+                        }
                     out.spawns.push_back(std::move(sp));
                 }
             }

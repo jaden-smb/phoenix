@@ -14,6 +14,8 @@
 #include <system_error>
 #include <vector>
 
+#include "abspath.h"
+
 namespace phxstudio {
 
 namespace pfs = std::filesystem;
@@ -53,7 +55,7 @@ inline std::string stem_of(const std::string& path) {
 inline std::string join_path(const std::string& a, const std::string& b) {
     if (a.empty()) return b;
     if (b.empty()) return a;
-    if (b[0] == '/') return b;
+    if (is_abs_path(b)) return b;
     return a.back() == '/' ? a + b : a + "/" + b;
 }
 

@@ -174,13 +174,19 @@ public:
         push(name, phx::AssetType::Sound, std::move(blob));
     }
 
-    // Object-layer spawn points (e.g. from a Tiled object group).
-    void add_spawns(const std::string& name, const std::vector<phx::SpawnDef>& spawns) {
+    // Object-layer spawn points (e.g. from a Tiled object group), plus the optional extension
+    // (names + per-instance properties, already laid out; see phx/resource/bundle.h).
+    void add_spawns(const std::string& name, const std::vector<phx::SpawnDef>& spawns,
+                    const std::vector<uint8_t>& ext = {}) {
         phx::SpawnBlobHeader sh{}; sh.count = uint32_t(spawns.size());
         std::vector<uint8_t> blob(sizeof(sh) + spawns.size() * sizeof(phx::SpawnDef));
         std::memcpy(blob.data(), &sh, sizeof(sh));
         if (!spawns.empty())
             std::memcpy(blob.data() + sizeof(sh), spawns.data(), spawns.size() * sizeof(phx::SpawnDef));
+        if (!ext.empty()) {
+            blob.resize((blob.size() + 3) & ~size_t(3), 0);
+            blob.insert(blob.end(), ext.begin(), ext.end());
+        }
         push(name, phx::AssetType::Spawns, std::move(blob));
     }
 

@@ -72,7 +72,9 @@ set(_itests
   tiled:tiled_test
   resource:resource_test
   pipeline:pipeline_test
-  editors:editors_test)
+  editors:editors_test
+  level:level_test
+  behaviours:behaviours_test)
 
 foreach(spec ${_itests})
   string(REPLACE ":" ";" parts ${spec})

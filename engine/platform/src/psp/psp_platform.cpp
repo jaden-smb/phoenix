@@ -21,6 +21,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+// The sceAudio device (defined at the bottom), also offered through the seam's audio().
+extern "C" int  phx_psp_audio_start(int rate, phx_audio_fill fill, void* user);
+extern "C" void phx_psp_audio_stop(void);
+
 // Freestanding mem/str primitives for the PSP build. The compiler emits calls to these (e.g. to
 // zero-init objects in placement-new). pspsdk would otherwise resolve them to the KERNEL sysclib
 // SYSCALL stubs in libpspkernel.a — wrong for a user module, and PPSSPP's HLE of sysclib_memset
@@ -175,7 +179,9 @@ void psp_present(void) {
 }
 
 phx_gfx*   psp_gfx(void)   { return reinterpret_cast<phx_gfx*>(&g_gfx); }
-phx_audio* psp_audio(void) { return nullptr; }   // the device is driven via phx_psp_audio_start (below)
+// The seam's audio device: phx_psp_audio_start (below), always 44.1 kHz stereo S16.
+phx_audio  g_audio_device{ 44100, phx_psp_audio_start, phx_psp_audio_stop };
+phx_audio* psp_audio(void) { return &g_audio_device; }
 
 // --- sceAudio output device ----------------------------------------------------------------
 // The platform owns the hardware channel + the audio thread but NOT the mixer (layering: platform
@@ -184,7 +190,6 @@ phx_audio* psp_audio(void) { return nullptr; }   // the device is driven via phx
 // priority PSP thread calls it and pushes the result to a reserved sceAudio channel with
 // sceAudioOutputBlocking — so the mixer is touched single-threaded, exactly like on desktop.
 // The PSP's standard channels run at 44.1 kHz stereo S16, matching the mixer's default output.
-typedef void (*phx_audio_fill)(void* user, int16_t* out, int frames);
 
 constexpr int kAudioSamples = 1024;              // frames per output block (multiple of 64)
 

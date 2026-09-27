@@ -1005,6 +1005,7 @@ inline std::vector<std::string> make_prereqs(const std::string& mk, const std::s
         size_t e = mk.find('\n', p);
         if (e == std::string::npos) e = mk.size();
         std::string line = mk.substr(p, e - p);
+        if (!line.empty() && line.back() == '\r') line.pop_back();   // a CRLF checkout (Windows)
         const bool cont = !line.empty() && line.back() == '\\';
         if (cont) line.pop_back();
         deps += ' ' + line;
@@ -1126,42 +1127,217 @@ inline std::vector<Launch> default_launches(const std::string& mk, const std::st
     return v;
 }
 
-// Is `tool` available? Absolute/relative paths are checked directly; bare names are looked up
-// on PATH (the studio inherits the environment it was launched from).
-inline bool tool_available(const std::string& tool) {
-    std::error_code ec;
-    if (tool.find('/') != std::string::npos) return fs::exists(tool, ec);
-    const char* path = std::getenv("PATH");
-    if (!path) return false;
-    const std::string p = path;
+// ---- tools on PATH, and the shell the launches run in ----------------------------------------
+// Launch commands are POSIX shell. On Linux/macOS that is /bin/sh; on Windows it is the sh.exe of
+// MSYS2 or Git for Windows (never cmd.exe), found by find_posix_shell below.
+
+// A PATH-style list (':' on POSIX, ';' on Windows) -> its non-empty entries.
+inline std::vector<std::string> split_path_list(const std::string& s, char sep) {
+    std::vector<std::string> v;
     size_t i = 0;
-    while (i <= p.size()) {
-        size_t j = p.find(':', i);
-        if (j == std::string::npos) j = p.size();
-        if (j > i) {
-            const fs::path cand = fs::path(p.substr(i, j - i)) / tool;
-            if (fs::exists(cand, ec) && !fs::is_directory(cand, ec)) return true;
-        }
+    while (i <= s.size()) {
+        size_t j = s.find(sep, i);
+        if (j == std::string::npos) j = s.size();
+        if (j > i) v.push_back(s.substr(i, j - i));
         i = j + 1;
     }
-    return false;
+    return v;
 }
 
-// The first missing requirement of a launch, or "" when it can run.
-inline std::string missing_need(const Launch& l) {
-    for (const std::string& n : l.needs) if (!tool_available(n)) return n;
+inline bool is_file_at(const std::string& p) {
+    std::error_code ec;
+    return fs::exists(p, ec) && !fs::is_directory(p, ec);
+}
+
+// Where `tool` resolves on disk, or "". A bare name is looked up in `dirs`. A name with a '/' is a
+// path and is checked as is. With `windows`, a tool may also carry .exe/.cmd/.bat (shell scripts
+// such as sdl2-config have none, so the bare name is tried first), and a POSIX-absolute path
+// ("/opt/devkitpro/...") is also looked for under `posix_root`, the folder the shell calls "/".
+inline std::string resolve_tool(const std::string& tool, const std::vector<std::string>& dirs, bool windows,
+                                const std::string& posix_root = "") {
+    static const char* const kWinExts[] = { "", ".exe", ".cmd", ".bat" };
+    const size_t n_ext = windows ? 4 : 1;
+    auto try_exts = [&](const std::string& base) -> std::string {
+        for (size_t e = 0; e < n_ext; ++e)
+            if (is_file_at(base + kWinExts[e])) return base + kWinExts[e];
+        return "";
+    };
+    if (tool.empty()) return "";
+    if (tool.find('/') != std::string::npos) {
+        std::string hit = try_exts(tool);
+        if (hit.empty() && windows && !posix_root.empty() && tool[0] == '/' && tool.compare(0, 2, "//") != 0)
+            hit = try_exts(posix_root + tool);
+        return hit;
+    }
+    for (const std::string& d : dirs) {
+        std::string hit = try_exts((fs::path(d) / tool).generic_string());
+        if (!hit.empty()) return hit;
+    }
     return "";
 }
 
-// A process wait status (pclose) -> an exit code; signals map to 128+N like a shell.
+// The POSIX shell for Windows launches, and the folders to put in front of PATH so the shell finds
+// make and the compiler even when the Studio was started from Explorer rather than a terminal.
+struct PosixShell {
+    std::string sh;                         // sh.exe ("" = none found)
+    std::string root;                       // the folder the shell calls "/" (the MSYS2 or Git install)
+    std::vector<std::string> add_path;      // the toolchain's bin and the shell's bin, when not on PATH
+};
+
+// Search order: `override_sh` (PHX_SH), then the sh.exe beside the first make.exe on PATH (so the
+// shell and make share one MSYS runtime), then sh.exe on PATH, then the usual install folders
+// (`fallbacks`). `msystem` (MSYS2's MSYSTEM, e.g. UCRT64) picks the toolchain folder; without it
+// the first of ucrt64, mingw64, clang64 that exists is used.
+inline PosixShell find_posix_shell(const std::vector<std::string>& path, const std::string& override_sh,
+                                   const std::string& msystem, const std::vector<std::string>& fallbacks) {
+    auto norm = [](std::string s) {
+        for (char& c : s) {
+            if (c == '\\') c = '/';
+            else if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+        }
+        while (s.size() > 1 && s.back() == '/') s.pop_back();
+        return s;
+    };
+    auto slashes = [](std::string s) { for (char& c : s) if (c == '\\') c = '/'; return s; };
+    auto ends_with = [](const std::string& s, const char* t) {
+        const size_t n = std::strlen(t);
+        return s.size() >= n && s.compare(s.size() - n, n, t) == 0;
+    };
+    PosixShell r;
+    if (!override_sh.empty() && is_file_at(override_sh)) r.sh = slashes(override_sh);
+    if (r.sh.empty()) {
+        const std::string make = resolve_tool("make", path, true);
+        if (!make.empty()) {
+            const std::string beside = slashes(fs::path(make).parent_path().generic_string()) + "/sh.exe";
+            if (is_file_at(beside)) r.sh = beside;
+        }
+    }
+    if (r.sh.empty()) r.sh = slashes(resolve_tool("sh", path, true));
+    for (size_t i = 0; r.sh.empty() && i < fallbacks.size(); ++i)
+        if (is_file_at(fallbacks[i])) r.sh = slashes(fallbacks[i]);
+    if (r.sh.empty()) return r;
+
+    const std::string bin = r.sh.substr(0, r.sh.find_last_of('/'));
+    const std::string lbin = norm(bin);
+    if (ends_with(lbin, "/usr/bin")) r.root = bin.substr(0, bin.size() - 8);
+    else if (ends_with(lbin, "/bin")) r.root = bin.substr(0, bin.size() - 4);
+
+    std::vector<std::string> want;
+    if (!r.root.empty()) {
+        std::vector<std::string> envs;
+        if (!msystem.empty()) envs.push_back(norm(msystem));
+        else envs = { "ucrt64", "mingw64", "clang64" };
+        for (const std::string& e : envs) {
+            std::error_code ec;
+            const std::string tc = r.root + "/" + e + "/bin";
+            if (fs::is_directory(tc, ec)) { want.push_back(tc); break; }
+        }
+    }
+    want.push_back(bin);
+    for (const std::string& w : want) {
+        bool on_path = false;
+        for (const std::string& p : path) on_path = on_path || norm(p) == norm(w);
+        if (!on_path) r.add_path.push_back(w);
+    }
+    return r;
+}
+
+#ifdef _WIN32
+// This process's shell, found once. The first call also puts its folders in front of PATH, for
+// the Studio's own tool checks and for every child it starts (they inherit the environment).
+inline const PosixShell& host_posix_shell() {
+    static const PosixShell shell = [] {
+        auto env = [](const char* k) { const char* v = std::getenv(k); return std::string(v ? v : ""); };
+        const std::string path = env("PATH");
+        std::vector<std::string> fallbacks = { "C:/msys64/usr/bin/sh.exe" };
+        for (const char* base : { "ProgramFiles", "ProgramW6432" })
+            if (!env(base).empty()) {
+                fallbacks.push_back(env(base) + "/Git/usr/bin/sh.exe");
+                fallbacks.push_back(env(base) + "/Git/bin/sh.exe");
+            }
+        if (!env("LOCALAPPDATA").empty()) fallbacks.push_back(env("LOCALAPPDATA") + "/Programs/Git/usr/bin/sh.exe");
+        PosixShell s = find_posix_shell(split_path_list(path, ';'), env("PHX_SH"), env("MSYSTEM"), fallbacks);
+        if (!s.add_path.empty()) {
+            std::string np = "PATH=";
+            for (std::string d : s.add_path) {
+                for (char& c : d) if (c == '/') c = '\\';
+                np += d + ";";
+            }
+            _putenv((np + path).c_str());
+        }
+        return s;
+    }();
+    return shell;
+}
+#endif
+
+// Is `tool` available? Absolute/relative paths are checked directly; bare names are looked up
+// on PATH (the studio inherits the environment it was launched from; on Windows, extended by
+// host_posix_shell so the answer matches what a launch will see).
+inline bool tool_available(const std::string& tool) {
+#ifdef _WIN32
+    const PosixShell& sh = host_posix_shell();
+    const char* path = std::getenv("PATH");
+    return !resolve_tool(tool, split_path_list(path ? path : "", ';'), true, sh.root).empty();
+#else
+    const char* path = std::getenv("PATH");
+    return !resolve_tool(tool, split_path_list(path ? path : "", ':'), false).empty();
+#endif
+}
+
+// A launch need with its $VAR / ${VAR} references filled in by `env` (a lookup returning "" when
+// unset). The console SDK variables default the way the Makefile defaults them: DEVKITPRO to
+// /opt/devkitpro and DEVKITARM to $DEVKITPRO/devkitARM. Another unset variable stays as written.
+template <class Env>
+std::string expand_need_vars(const std::string& need, const Env& env) {
+    auto value = [&](const std::string& k) -> std::string {
+        std::string v = env(k);
+        if (!v.empty()) return v;
+        if (k == "DEVKITPRO") return "/opt/devkitpro";
+        if (k == "DEVKITARM") {
+            const std::string dkp = env("DEVKITPRO");
+            return (dkp.empty() ? std::string("/opt/devkitpro") : dkp) + "/devkitARM";
+        }
+        return "$" + k;
+    };
+    auto ident = [](char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; };
+    std::string o;
+    for (size_t i = 0; i < need.size();) {
+        if (need[i] != '$') { o += need[i++]; continue; }
+        size_t b = i + 1, e;
+        const bool braced = b < need.size() && need[b] == '{';
+        if (braced) {
+            e = need.find('}', b + 1);
+            if (e == std::string::npos) { o += need.substr(i); break; }
+            o += value(need.substr(b + 1, e - b - 1));
+            i = e + 1;
+        } else {
+            e = b;
+            while (e < need.size() && ident(need[e])) ++e;
+            if (e == b) { o += need[i++]; continue; }
+            o += value(need.substr(b, e - b));
+            i = e;
+        }
+    }
+    return o;
+}
+
+// The first missing requirement of a launch (with its variables filled in), or "" when it can run.
+inline std::string missing_need(const Launch& l) {
+    auto env = [](const std::string& k) { const char* v = std::getenv(k.c_str()); return std::string(v ? v : ""); };
+    for (const std::string& n : l.needs) {
+        const std::string need = expand_need_vars(n, env);
+        if (!tool_available(need)) return need;
+    }
+    return "";
+}
+
+// A POSIX process wait status (pclose) -> an exit code; signals map to 128+N like a shell.
+// (Windows jobs read the exit code directly; see winjob.h.)
 inline int exit_code_from_status(int status) {
     if (status == -1) return -1;
-#ifdef _WIN32
-    return status;                                   // _pclose returns the exit code itself
-#else
     if ((status & 0x7f) == 0) return (status >> 8) & 0xff;
     return 128 + (status & 0x7f);
-#endif
 }
 
 // ============================================================================================

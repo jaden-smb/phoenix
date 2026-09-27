@@ -84,7 +84,10 @@ The side panel has four tabs:
   ([Studio guide](../phxstudio/instructions.md#tilemap-editor)).
 - **Layers**: visibility (editor-only), add, delete, reorder, rename, and horizontal/vertical
   parallax (1 = moves with the world, 0 = fixed to the screen).
-- **Spawns**: the type to place, the spawn list, and an inspector (name, type, x/y, w/h, delete).
+- **Spawns**: the type to place, the spawn list, and an inspector (name, type, x/y, w/h, delete),
+  plus **per-spawn properties**: name, type (int/float/bool/string) and value, saved as Tiled
+  custom properties and baked for the game. One named like a prefab column overrides it for that
+  spawn.
 - **Map**: size (the **resize** dialog anchors the old map, and spawns move with it), the tileset
   name, and the tileset image.
 

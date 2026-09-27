@@ -65,7 +65,7 @@ design: they are the project's own build configuration and run whatever they say
 | `name`, `description` | shown in the Studio; the name's slug (`my_game`) names the binary and the bundle |
 | `source`, `assets` | code folders, and the folders `make game-assets` bakes (default `["src"]`, `["assets"]`) |
 | `bundles` | extra `.phxp` files for the Assets view, relative to the project (it always lists the project's own `*.phxp` and `build/*.phxp`) |
-| `launches[]` | the Run view: `label`, `command`, `group` (`play`, `build`, `test`, `console`, `tool`), `blurb` (status-bar help), `needs` (tools that must be installed; the launch is greyed out without them), `windowed` (it opens its own window) |
+| `launches[]` | the Run view: `label`, `command`, `group` (`play`, `build`, `test`, `console`, `tool`), `blurb` (status-bar help), `needs` (tools that must be installed; the launch is greyed out without them; `$VAR` is filled from the environment, with `$DEVKITPRO` = `/opt/devkitpro` and `$DEVKITARM` = `$DEVKITPRO/devkitARM` by default), `windowed` (it opens its own window) |
 
 Launch commands run **from the project folder** with `$PHX_ROOT` (the Phoenix checkout) and
 `$PHX_PROJECT` (the project) exported. A new project uses the engine's generic rules, so it needs
@@ -75,7 +75,54 @@ no edit to the engine's Makefile:
 make game        PROJECT=path/to/project        # src/*.cpp against the PUBLIC headers -> build/<name>
 make game-assets PROJECT=path/to/project [TIER=0|1|2]   # assets/ -> build/<name>.phxp (TIER 0 = GBA: <name>.t0.phxp)
 make play        PROJECT=path/to/project        # both, then run it from the project folder
+make game-gba    PROJECT=path/to/project        # devkitARM -> build/<name>.gba (native PPU, size-gated)
+make play-gba    PROJECT=path/to/project        # ... and open it in mGBA if installed (MGBA=path overrides)
+make game-psp    PROJECT=path/to/project        # pspsdk -> build/psp/EBOOT.PBP
+make play-psp    PROJECT=path/to/project        # ... and open it in PPSSPP if installed (PPSSPP=path overrides)
 ```
+
+**One game, every target.** A game names its `Game` once with `PHX_GAME(MyGame);`
+(`phx/runtime/main.h`) and has no `main()`: the engine supplies one per target
+(`engine/runtime/src/entry/`). Each does that target's boot chores (a console links the bundle
+into the ROM or EBOOT and hands it to the platform, so `mount()` finds it whatever path the game
+names) and boots the game with the target's profile:
+
+| Target | Budgets the game receives | Resolution |
+|---|---|---|
+| PC | the capability tier's | whatever `on_configure` asks |
+| GBA (native PPU) | 160 KB arena, 4 KB frame scratch, 256 entities | always 240×160 |
+| PSP (software renderer) | 4 MB arena, 64 KB frame scratch, 1024 entities | up to 480×272 |
+
+The game describes itself in `Game::on_configure(Config&)` (title, resolution, `sim_hz`). The
+budgets arrive already sized for the target; a game may change them, and `phx::caps()` tells it
+which tier it's on. A project made before this has its own `main()`. It still builds and plays on
+PC; to build it for GBA or PSP, move the `main()` body into `on_configure` and add `PHX_GAME`.
+
+**Sound** goes through `app.audio()` (`phx/runtime/audio.h`). The engine owns the mixer and each
+target's audio device (SDL on PC, sceAudio on PSP, DirectSound on GBA), so a game never calls a
+platform function:
+
+```cpp
+jump = to_sound(res->sound("jump"_hash).unwrap());   // a baked .wav, by its file stem
+app.audio().play(jump);                              // or play_music(), stop_all()
+```
+
+The template plays `assets/jump.wav` when you jump (A, Z on a keyboard) and `assets/coin.wav`
+when you collect a coin. Nothing starts until the first sound, so a silent game pays nothing.
+
+**The template is a small platformer driven by its data.** `level.load()` builds the map, its
+collision and every spawn from `assets/level.tmj` and `assets/prefabs.json` (see [what a spawn
+becomes](#tilemap-editor)). `src/main.cpp` adds only the rules: run and jump, collect coins,
+and go back to the start on a spike tile. Coins carry the game's own reflected `Coin { value }`
+component. The prefab sets `Coin_value` = 1, and the coin on the block overrides it with a spawn
+property of 5 (see [Components](#data-table-editor)).
+
+**GBA ROM** and **PSP EBOOT** in a new project's Run view are `play-gba` and `play-psp`. They
+need devkitARM (`$DEVKITARM`) and pspsdk (`psp-g++` on `PATH`). `make phxnew` builds `phxnew DIR
+[NAME]`, which is File > New project on the command line. `make project-check` (part of `make
+check`) creates the template, bakes it for all three tiers, and runs it headlessly under each
+target's profile, pressing A to check that it makes sound. The GBA run is fixed-point, on the PPU
+model, at the GBA budget.
 
 `make game-assets` runs `tools/common/bake_project.py`. It sends `.sprdef` and sprite `.json` to
 `phxsprite`, `.tmj` to `phxtile`, `.wav` to `phxsnd` and phxbin tables to `phxbin` (the headers go
@@ -112,7 +159,7 @@ The window is **resizable**. The canvas follows the window at the integer UI sca
 Ctrl+= / Ctrl+- change it, and the Studio opens at 800×450 canvas pixels when the display has
 room. The open documents, recent files and Explorer width are restored on the next start. They
 are kept per project in `~/.config/phxstudio/session-*.txt`, and the recent projects in
-`~/.config/phxstudio/projects.txt`.
+`~/.config/phxstudio/projects.txt` (on Windows without `HOME`, in `%APPDATA%\phxstudio`).
 
 ## The Editor workspace
 
@@ -239,6 +286,35 @@ entity spawns and parallax. It is the same panel as `phxtmap`
 - **Spawns tab**: the type to place comes from every prefab table's name column in the project, plus
   player/coin/enemy/spike and the map's own types. It lists the spawns and has an inspector for
   name, type, x/y and w/h.
+- **Spawn properties** (the inspector's PROPERTIES section, **+ property**): values that belong to
+  this one placed spawn, saved as Tiled custom properties. Each has a name, a type (int, float,
+  bool or string) and a value, and × removes it.
+  - A property named like a prefab column (`w`, `h`, `sprite`, `clip`, `body`, `layer`, `mask`,
+    `z`, `collide`) **overrides** that column for this spawn only: one bigger coin, one enemy with
+    a different sprite.
+  - Any other property is the spawn's own data: a door's `target`, an enemy's `range`, a sign's
+    `text`.
+  - The spawn's **name** is baked too, so code can find one specific spawn (`level.find_named`).
+
+**What a spawn becomes in the game.** The engine's level loader (`phx::Level`,
+`phx/runtime/level.h`) turns every spawn into an entity. It builds each one from the row of
+`assets/prefabs.json` whose `type` matches, reading the columns it knows by name:
+
+| Column | Makes |
+|---|---|
+| `sprite` | the sprite (animated, starting in `clip` or "idle") |
+| `w`, `h` | the collider size |
+| `layer`, `mask` | collision bits |
+| `body` = 1 | gravity and tile collision |
+| `z` | draw order |
+
+Add a row in the table editor (for example an `enemy` with a sprite and `body` 1) and place it
+with the T tool: it appears in the game with no code. Game code finds entities by type
+(`level.find(world, "player"_hash)`, or each `PrefabRef`) or by name
+(`level.find_named(world, "door_a"_hash)`). It reads any setting with the same inheritance the
+loader uses: `level.get_int(ref, "speed"_hash, 60)` is the spawn's property, else the prefab's
+column, else 60. `get_str` and `get_hash` do the same for text. The template does
+exactly this: its C++ adds only run/jump, coin pickup and spikes.
 - **Map tab**: size (resize with an anchor; spawns move with it), the tileset name (the texture the
   bake references), and the tileset image (saved as Tiled's `image`, so Tiled opens the map with
   its art too).
@@ -264,6 +340,26 @@ Every value you can enter is one the baked struct can hold. Integers **clamp** t
 characters (text already too long shows red). Field and struct names must be C identifiers.
 The **Record** inspector on the right edits the selected record with typed fields. **Table**
 shows the prefab vocabulary (the `type`/`name` column), duplicate names, and the baked size.
+
+**Components** (prefab tables): the game's own components, for the selected prefab record.
+- **Declaring one.** A component is a plain struct in the game's code, declared once with its
+  data fields:
+
+  ```cpp
+  struct Enemy { int16_t range = 24; scalar speed = s_from_int(30); bool angry = false; };
+  PHX_COMPONENT(Enemy, PHX_FIELD(Enemy, range), PHX_FIELD(Enemy, speed), PHX_FIELD(Enemy, angry));
+  ```
+
+  Field types are 8/16/32-bit ints, bool, `scalar` (entered as a decimal) and `NameHash` names
+  (`PHX_FIELD_HASH`, entered as text).
+- **How the Studio learns them.** Run > **Build** makes the game write its components to
+  `build/components.json`, and this section lists them.
+- **Adding one to a prefab.** Tick a component to add it: its name goes into the record's
+  `components` column, and each field gets a typed column `Enemy_range`, … set to the C++ default.
+  Edit the values in the Record inspector.
+- **In the game.** The level attaches `Enemy` to every entity spawned from that prefab, filled
+  from those columns. A placed spawn's property `Enemy_range` overrides the value for that one
+  spawn. Code reads it with `world.get<Enemy>(entity)`.
 
 ## How it works
 
@@ -300,7 +396,8 @@ toolkit (docs/gui-editor-feasibility.md, Option A). The layers:
   plus `main.cpp`). `solo.h` is another: a one-document window, which is what `phxtmap` and
   `phxentity` now are.
 - **`jobs.h`** runs launches one at a time as `setsid sh -c '…'` process groups, so Stop signals
-  the whole tree.
+  the whole tree. On Windows (`winjob.cpp`) each launch runs through MSYS2's or Git for Windows'
+  `sh.exe` inside a Job Object, which Stop terminates.
 
 Engine facts the shell works around (the next tool will hit them too):
 
@@ -342,8 +439,15 @@ ASAN_OPTIONS=detect_leaks=0 ./build/asan/phxstudio --project mygame --script "op
 
 - Games and editors opened from **Run** get their own windows. Their job ends when you close them,
   and only one job runs at a time; others queue.
-- The Run view shells out through `sh`, and **Stop** needs `setsid` (util-linux). Both are
-  Linux/macOS.
+- Launch commands are POSIX shell on every host. On Linux/macOS they run through `sh`, and
+  **Stop** needs `setsid` (util-linux).
+- On **Windows** they run through the `sh.exe` of [MSYS2](https://www.msys2.org) or Git for
+  Windows, never `cmd.exe`. The Studio uses the `sh.exe` beside `make` on `PATH`, else `sh.exe`
+  on `PATH`, else `C:\msys64` or Git's install folder; set `PHX_SH` to choose one. It puts that
+  shell's `usr\bin` and the MSYS2 toolchain's `bin` (`$MSYSTEM`, else `ucrt64`) in front of
+  `PATH` when they are missing, so it also works when started from Explorer. A need such as
+  `/opt/devkitpro/...` is looked for under the MSYS2 folder. **Stop** ends the whole process
+  tree (a Job Object), and quitting the Studio ends its running job.
 - The fonts are ASCII 5×7 on a 6-pixel pitch. Other UTF-8 characters display as a look-alike
   (— as -, → as >) or as a box, but are kept byte-for-byte on save.
 - The code editor has no language server: highlighting is lexical, and errors come from real

@@ -22,7 +22,10 @@
 >   sources glob list.
 > - **Phase 5**: per-tier previews exist in the Assets view, but the editors paint RGBA.
 > - **Phase 6**: no in-process play mode; games launch as child processes.
-> - **Phase 8**: no reflection-driven inspector.
+> - **Phase 8** is done differently from this plan. `PHX_COMPONENT` (`phx/ecs/reflect.h`)
+>   registers a game's components; `make game` exports them to `build/components.json`; the
+>   table editor ticks them onto prefab records; and the level loader builds them from those
+>   columns. There is no live entity inspector during play (that needs Phase 6's in-process play).
 > - **The CI / CMake part of Phase 9**: the editors are Makefile-only.
 >
 > Usage: `tools/phxstudio/instructions.md`.

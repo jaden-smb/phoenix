@@ -36,7 +36,9 @@ changes get a line under `[Unreleased]` in `CHANGELOG.md`. `CONTRIBUTING.md` is 
 contributor guide.
 
 `make check` runs many separate suite binaries (`smoke render ppu gu playable physics anim scene ui
-platformer emberwing emberwing-ppu audio texcache png sprite tiled resource phxpack pipeline tools`). Each is its own Make
+platformer emberwing emberwing-ppu audio texcache png sprite tiled resource phxpack pipeline tools`,
+plus `level`: the engine level loader over baked map/prefabs/sprite, and `project-check`: the Studio's
+new-project template baked and run headlessly on the PC, GBA and PSP profiles). Each is its own Make
 target that builds and runs one binary — e.g. `make physics`, `make ppu`, `make pipeline`. **To run
 a single suite, run its target.** There is no per-test-case filter; the unit harness
 (`tests/phx_test.h`) runs every `PHX_TEST` registered in the binary. Expected output:
@@ -96,7 +98,15 @@ make win                  # MinGW-w64 -> build/win/*.exe: EVERY host binary as s
 make win-verify           # run the Windows unit-suite exe under Wine (native or flatpak)
 make size-gate            # GBA ROM/IWRAM/EWRAM budget gate (MVP gate; CI job)
 make gba-save / psp-save  # console save-path smoke ROM/EBOOT (verify on mGBA / PPSSPP)
+make game-gba | game-psp PROJECT=path   # a game project (PHX_GAME, no main()) -> .gba / EBOOT.PBP
 ```
+
+Game projects (folders with `phxproject.json`) name their Game with `PHX_GAME` (`phx/runtime/main.h`);
+the engine owns `main()` per target (`engine/runtime/src/entry/{desktop,gba,psp}_main.cpp`, linked only
+by the project rules) and applies each target's profile (GBA: 160 KB arena, 240x160; PSP: 4 MB).
+`phx::Level` (`phx/runtime/level.h`) builds entities from a map's spawns + the `prefabs` table (columns
+read by name via phxbin's schema trailer, `phx/resource/table.h`); per-spawn properties override columns;
+`PHX_COMPONENT` (`phx/ecs/reflect.h`) makes a game's components data-buildable and exportable to the Studio.
 
 GBA has no filesystem: `gba-platformer` bakes the `.phxp` bundle on the host (tier 0 — sounds are
 resampled to the GBA device rate at bake time) and links it into the ROM with `bin2s`. Canonical

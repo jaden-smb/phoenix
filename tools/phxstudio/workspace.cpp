@@ -33,7 +33,9 @@ std::string config_dir() {
     const char* xdg = std::getenv("XDG_CONFIG_HOME");
     const char* home = std::getenv("HOME");
     if (xdg && *xdg) return std::string(xdg) + "/phxstudio";
+    const char* appdata = std::getenv("APPDATA");        // Windows, started outside a Unix shell
     if (home && *home) return std::string(home) + "/.config/phxstudio";
+    if (appdata && *appdata) return std::string(appdata) + "/phxstudio";
     return "";
 }
 
@@ -816,7 +818,7 @@ void Workspace::new_table(Host& h, const std::string& dir0) {
         g.text_field(g.id("nt-dir"), f.row("folder"), st->dir, "(repo root)");
         g.text_field(g.id("nt-s"), f.row("struct"), st->sname, "C struct name, e.g. Prefab");
         g.text_field(g.id("nt-f"), f.row("fields"), st->fields, "name:type, ...", 0,
-                     "u8 i8 u16 i16 u32 i32 f32 str8 str16 str32. A str 'type' column makes it a prefab table");
+                     "u8 i8 u16 i16 u32 i32 f32 str8 str16 str32 str64. A str 'type' column makes it a prefab table");
         if (!st->err.empty()) f.note(st->err, g.th.bad);
         else f.note("A string column named 'type' makes this the prefab vocabulary the map editor places.", g.th.faint);
         const std::string stem = clean_stem(st->name);

@@ -88,10 +88,19 @@ jobs:
         run: make size-gate
       - name: Build Emberwing PPU ROM + enforce size gate
         run: make size-gate-emberwing
+      # A game project exactly as Phoenix Studio creates one, through the generic project rules
+      # and the engine's GBA entry (no hand-written main) — size-gated like the shipping ROMs.
+      - name: Build a new Studio project as a GBA ROM
+        run: |
+          make phxnew
+          ./build/phxnew build/ci-project/game "CI Game"
+          make game-gba PROJECT=build/ci-project/game
       - uses: actions/upload-artifact@v4
         with:
           name: gba-roms
-          path: build/gba/*.gba
+          path: |
+            build/gba/*.gba
+            build/ci-project/game/build/*.gba
           retention-days: 14
 
   # PSP: cross-compile both example EBOOTs (MIPS Allegrex). The pspdev image provides the
@@ -115,10 +124,17 @@ jobs:
         run: make psp-platformer
       - name: Build PSP Emberwing EBOOT
         run: make psp-emberwing
+      # A game project exactly as Phoenix Studio creates one, through the engine's PSP entry.
+      - name: Build a new Studio project as a PSP EBOOT
+        run: |
+          make phxnew
+          ./build/phxnew build/ci-project/game "CI Game"
+          make game-psp PROJECT=build/ci-project/game
       - uses: actions/upload-artifact@v4
         with:
           name: psp-eboots
           path: |
             build/psp/platformer/EBOOT.PBP
             build/psp/emberwing/EBOOT.PBP
+            build/ci-project/game/build/psp/EBOOT.PBP
           retention-days: 14

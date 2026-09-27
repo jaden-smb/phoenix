@@ -43,6 +43,13 @@ INCLUDES := -Iengine/core/include \
             -Itests
 
 TIER ?= pc
+# `make game-assets PROJECT=… TIER=0|1|2` names a BAKE tier (GBA/PSP/PC encoding), not a scalar
+# tier: record it as BAKE_TIER and keep the host tools on the float build, so a console bake never
+# recompiles every tool into a new object dir or relinks the host binaries.
+ifneq ($(filter 0 1 2,$(TIER)),)
+  BAKE_TIER := $(TIER)
+  override TIER := pc
+endif
 ifeq ($(TIER),gba_sim)
   CXXFLAGS += -DPHX_TARGET_GBA=1
 endif
@@ -128,10 +135,11 @@ APP_SRC := engine/core/src/assert.cpp \
            engine/scene/src/scene.cpp \
            engine/ui/src/ui.cpp \
            engine/platform/src/null/null_platform.cpp \
-           engine/runtime/src/app.cpp
+           engine/runtime/src/app.cpp \
+           engine/runtime/src/game_main.cpp
 
 # The smoke binary: the loop + its own main.
-SMOKE_SRC := $(APP_SRC) tests/suites/smoke_app.cpp
+SMOKE_SRC := $(APP_SRC) engine/audio/src/mixer.cpp engine/runtime/src/component_schema.cpp tests/suites/smoke_app.cpp
 SMOKE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(SMOKE_SRC))
 
 # The playable binary: full stack (memory+ecs+input+render+loop) driven by scripted input.
@@ -179,6 +187,12 @@ PLATAPP_SRC := $(APP_SRC) \
                examples/platformer/src/main.cpp
 PLATAPP_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(PLATAPP_SRC))
 PLATAPP     := $(BUILD)/platformer
+
+# SDL link flags. Our mains never include SDL.h, so on MinGW drop -lSDL2main (it needs an SDL_main
+# symbol), -lmingw32 (only there for SDL2main) and -mwindows (keep the console for logs); and drop
+# -Dmain=SDL_main from the cflags, which would rename our main(). A no-op on Linux/macOS.
+SDL_CFLAGS = $(shell sdl2-config --cflags 2>/dev/null | sed -e 's/-Dmain=SDL_main//g')
+SDL_LIBS = $(shell sdl2-config --libs 2>/dev/null | sed -e 's/-lSDL2main//g' -e 's/-lmingw32//g' -e 's/-mwindows//g')
 
 # The SDL build of the example: a REAL WINDOW you can play. Swaps the null backend for the
 # SDL backend and defines PHX_HAVE_SDL. Requires SDL2 (`sdl2-config`); it is deliberately NOT
@@ -442,6 +456,18 @@ PIPELINE     := $(BUILD)/phx_pipeline
 # scripted queue, the tool widget kit's logic, the code/pixel/sprite/map/table document models
 # (each saved form re-read by the bake's own loaders) and the workspace helpers. Links the App
 # stack so the widget kit's draw path links (it runs with no renderer here).
+# The level suite: the engine's level loader (phx/runtime/level.h) over a map, prefab table and
+# sprite baked by the real converters: spawns -> entities, collision, overlaps, drawing, unload.
+LEVEL_SRC := $(APP_SRC) engine/resource/src/cache.cpp engine/runtime/src/level.cpp tests/suites/level_test.cpp
+LEVEL_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(LEVEL_SRC))
+LEVEL     := $(BUILD)/phx_level
+
+# The behaviours suite: the stock behaviours (phx/runtime/behaviours.h) run from prefab data alone.
+BEHAV_SRC := $(APP_SRC) engine/resource/src/cache.cpp engine/runtime/src/level.cpp \
+             engine/runtime/src/behaviours.cpp engine/audio/src/mixer.cpp tests/suites/behaviours_test.cpp
+BEHAV_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(BEHAV_SRC))
+BEHAV     := $(BUILD)/phx_behaviours
+
 EDITORS_SRC := $(APP_SRC) tests/suites/editors_test.cpp
 EDITORS_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(EDITORS_SRC))
 EDITORS     := $(BUILD)/phx_editors
@@ -471,16 +497,16 @@ GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/
             $(patsubst tests/suites/render_test.cpp,tests/suites/gu_test.cpp,$(RENDER_SRC)))
 GU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(GU_SRC))
 
-.PHONY: studio test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl miracle miracle-headless miracle-test gba-miracle-ppu size-gate-miracle tinyllm tinyllm-sdl tinyllm-test tinyllm-fixture tinyllm-model gba-tinyllm-ppu size-gate-tinyllm sdl gl sdl-verify gl-verify audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline editors tools game game-check game-assets play size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
+.PHONY: studio test smoke render ppu gu playable physics level behaviours anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl miracle miracle-headless miracle-test gba-miracle-ppu size-gate-miracle tinyllm tinyllm-sdl tinyllm-test tinyllm-fixture tinyllm-model gba-tinyllm-ppu size-gate-tinyllm sdl gl sdl-verify gl-verify audio-verify game-audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline editors tools game game-check game-assets play game-src-check game-console-check game-gba play-gba game-psp play-psp project-check project-run project-schema phxnew size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
 
 # Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstones + audio + resource + dep gate.
-check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test audio texcache png sprite tiled resource phxpack pipeline editors tools depcheck
+check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test audio texcache png sprite tiled resource phxpack pipeline editors level behaviours tools project-check depcheck
 
 # --- M7 release gates --------------------------------------------------------------------------
 # Determinism gate: the SAME suites under scalar=float (pc) and scalar=fixed16 (gba_sim) must
 # print identical outcomes AND render the byte-identical frame. Cheap to run: the per-tier
 # object dirs mean the second tier is mostly relinks. This is a named release gate (docs/09 §5).
-DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test
+DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test level behaviours
 determinism:
 	@echo "determinism gate: pc (scalar=float) vs gba_sim (scalar=fixed16)"
 	@$(MAKE) -s $(DET_SUITES) TIER=pc      | grep -aE "PASS|FAIL" > $(BUILD)/det-pc.log
@@ -561,24 +587,24 @@ emberwing-ppu: $(EMBERWING_PPU)
 emberwing-sdl:
 	@command -v sdl2-config >/dev/null 2>&1 || { echo "SDL build needs SDL2 (sdl2-config not found). Install libsdl2-dev."; exit 1; }
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
-	  $(EWSDL_SRC) `sdl2-config --libs` -o $(BUILD)/emberwing_sdl
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) $(SDL_CFLAGS) \
+	  $(EWSDL_SRC) $(SDL_LIBS) -o $(BUILD)/emberwing_sdl
 	@echo "built $(BUILD)/emberwing_sdl  —  run ./$(BUILD)/emberwing_sdl (arrows move, Z=jump, Enter=start)"
 
 # The same windowed Emberwing through the OpenGL backend. Needs SDL2 + libGL.
 emberwing-gl:
 	@command -v sdl2-config >/dev/null 2>&1 || { echo "GL build needs SDL2 + libGL (sdl2-config not found)."; exit 1; }
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL -DPHX_HAVE_GL $(INCLUDES) `sdl2-config --cflags` \
-	  $(EWGL_SRC) `sdl2-config --libs` -lGL -o $(BUILD)/emberwing_gl
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL -DPHX_HAVE_GL $(INCLUDES) $(SDL_CFLAGS) \
+	  $(EWGL_SRC) $(SDL_LIBS) -lGL -o $(BUILD)/emberwing_gl
 	@echo "built $(BUILD)/emberwing_gl  —  GPU-rendered window (software backend stays the golden ref)"
 
 # Build the windowed SDL example (not run automatically — it opens a window).
 sdl:
 	@command -v sdl2-config >/dev/null 2>&1 || { echo "SDL build needs SDL2 (sdl2-config not found). Install libsdl2-dev."; exit 1; }
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
-	  $(PLATSDL_SRC) `sdl2-config --libs` -o $(BUILD)/platformer_sdl
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) $(SDL_CFLAGS) \
+	  $(PLATSDL_SRC) $(SDL_LIBS) -o $(BUILD)/platformer_sdl
 	@echo "built $(BUILD)/platformer_sdl  —  run ./$(BUILD)/platformer_sdl to play (arrows/WASD, Z=jump, Enter=start)"
 
 # The "A Small Miracle" music visualizer in a real SDL window (software renderer + real audio).
@@ -586,8 +612,8 @@ sdl:
 miracle: $(MIRACLE_WAV)
 	@command -v sdl2-config >/dev/null 2>&1 || { echo "miracle needs SDL2 (sdl2-config not found). Install libsdl2-dev."; exit 1; }
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
-	  $(MIRACLESDL_SRC) `sdl2-config --libs` -o $(BUILD)/miracle
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) $(SDL_CFLAGS) \
+	  $(MIRACLESDL_SRC) $(SDL_LIBS) -o $(BUILD)/miracle
 	@echo "built $(BUILD)/miracle  —  run ./$(BUILD)/miracle (START=play/pause, A=style, B=chrome)"
 
 # Headless build of the same app (null platform + audio stand-in): compiles the shipping entry
@@ -611,8 +637,8 @@ tinyllm: $(TINYLLM_BLOB) $(TINYLLMAPP)
 tinyllm-sdl: $(TINYLLM_BLOB)
 	@command -v sdl2-config >/dev/null 2>&1 || { echo "tinyllm-sdl needs SDL2 (sdl2-config not found). Install libsdl2-dev."; exit 1; }
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
-	  $(TINYLLMSDL_SRC) `sdl2-config --libs` -o $(BUILD)/tinyllm_sdl
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) $(SDL_CFLAGS) \
+	  $(TINYLLMSDL_SRC) $(SDL_LIBS) -o $(BUILD)/tinyllm_sdl
 	@echo "built $(BUILD)/tinyllm_sdl  —  run TINYLLM_MODEL=$(TINYLLM_BLOB) ./$(BUILD)/tinyllm_sdl"
 
 # MAINTENANCE target: regenerate the committed golden token file. Dumps the C++-generated fixture
@@ -630,8 +656,8 @@ tinyllm-fixture: $(TINYLLMBAKE)
 gl:
 	@command -v sdl2-config >/dev/null 2>&1 || { echo "GL build needs SDL2 + libGL (sdl2-config not found). Install libsdl2-dev + libgl-dev."; exit 1; }
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL -DPHX_HAVE_GL $(INCLUDES) `sdl2-config --cflags` \
-	  $(PLATGL_SRC) `sdl2-config --libs` -lGL -o $(BUILD)/platformer_gl
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL -DPHX_HAVE_GL $(INCLUDES) $(SDL_CFLAGS) \
+	  $(PLATGL_SRC) $(SDL_LIBS) -lGL -o $(BUILD)/platformer_gl
 	@echo "built $(BUILD)/platformer_gl  —  GPU-rendered window (the software backend stays the golden ref)"
 
 # Pixel-verify the desktop backends on a REAL window/GPU against the software golden reference
@@ -648,15 +674,15 @@ GLVER_SRC  := $(filter-out engine/render/src/soft/soft_renderer.cpp,$(SDLVER_SRC
 sdl-verify:
 	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found)."; exit 1; }
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
-	  $(SDLVER_SRC) `sdl2-config --libs` -o $(BUILD)/window_verify_sdl
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) $(SDL_CFLAGS) \
+	  $(SDLVER_SRC) $(SDL_LIBS) -o $(BUILD)/window_verify_sdl
 	@./$(BUILD)/window_verify_sdl
 
 gl-verify:
 	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 + libGL (sdl2-config not found)."; exit 1; }
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL -DPHX_HAVE_GL $(INCLUDES) `sdl2-config --cflags` \
-	  $(GLVER_SRC) `sdl2-config --libs` -lGL -o $(BUILD)/window_verify_gl
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL -DPHX_HAVE_GL $(INCLUDES) $(SDL_CFLAGS) \
+	  $(GLVER_SRC) $(SDL_LIBS) -lGL -o $(BUILD)/window_verify_gl
 	@./$(BUILD)/window_verify_gl
 
 # Verify the SDL audio DEVICE glue live: open a real output device, drive the mixer + command
@@ -667,9 +693,20 @@ AUDIOVER_SRC := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core
 audio-verify:
 	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found)."; exit 1; }
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` \
-	  $(AUDIOVER_SRC) `sdl2-config --libs` -o $(BUILD)/audio_device_verify
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) $(SDL_CFLAGS) \
+	  $(AUDIOVER_SRC) $(SDL_LIBS) -o $(BUILD)/audio_device_verify
 	@./$(BUILD)/audio_device_verify
+
+# The App's engine-owned audio (phx/runtime/audio.h) on a REAL device: a game only calls
+# app.audio().play(); the engine must start SDL's device through the seam and have it pull samples.
+GAMEAUDIOVER_SRC := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) engine/audio/src/mixer.cpp \
+                    engine/platform/src/sdl/sdl_platform.cpp tests/verify/game_audio_verify.cpp
+game-audio-verify:
+	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found)."; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) $(SDL_CFLAGS) \
+	  $(GAMEAUDIOVER_SRC) $(SDL_LIBS) -o $(BUILD)/game_audio_verify
+	@./$(BUILD)/game_audio_verify
 
 # --- Game projects (a folder with a phxproject.json — what Phoenix Studio opens) --------------
 # A project is built against the engine's PUBLIC headers only (engine/*/include): its src/*.cpp +
@@ -678,27 +715,42 @@ audio-verify:
 #   make game        PROJECT=path   compile + link the game
 #   make game-assets PROJECT=path [TIER=0|1|2]   bake its assets (TIER 0 = GBA, 1 = PSP, 2 = PC)
 #   make play        PROJECT=path   both, then run it from the project folder
+#   make game-gba | play-gba | game-psp | play-psp PROJECT=path   the consoles (see below)
 # No engine file names the project: a new game needs no Makefile edit. Needs SDL2 for game/play.
+# A game names its Game with PHX_GAME (phx/runtime/main.h) and the engine supplies main() per
+# target (engine/runtime/src/entry/). A project whose sources define main() themselves still
+# builds for PC exactly as before, but only a PHX_GAME project builds for the consoles.
 SDL_PLATFORM_OBJ := $(HOSTOBJ)/sdl/sdl_platform.o
 PROJECT     ?=
-TIER_BAKE   := $(if $(filter 0 1,$(TIER)),$(TIER),2)
+TIER_BAKE   := $(if $(BAKE_TIER),$(BAKE_TIER),2)
 GAME_DIR     = $(abspath $(PROJECT))
 GAME_NAME    = $(shell python3 -c "import json,re,sys,os;d=json.load(open(sys.argv[1]+'/phxproject.json'));print(re.sub(r'[^a-z0-9_-]','',(d.get('name') or os.path.basename(sys.argv[1])).lower().replace(' ','_')) or 'game')" "$(GAME_DIR)" 2>/dev/null)
 GAME_SRC     = $(wildcard $(GAME_DIR)/src/*.cpp)
+LPAREN       := (
+GAME_HAS_MAIN = $(shell grep -lE '^[[:space:]]*int[[:space:]]+main[[:space:]]*[$(LPAREN)]' $(GAME_SRC) /dev/null 2>/dev/null)
 PUBLIC_INCLUDES := $(addprefix -I,$(wildcard engine/*/include))
 GAME_ENGINE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) \
-                   engine/resource/src/cache.cpp engine/audio/src/mixer.cpp engine/audio/src/stream.cpp)
+                   engine/resource/src/cache.cpp engine/audio/src/mixer.cpp engine/audio/src/stream.cpp \
+                   engine/runtime/src/level.cpp engine/runtime/src/behaviours.cpp \
+                   engine/runtime/src/component_schema.cpp)
+GAME_ENTRY_OBJ  := $(HOSTOBJ)/engine/runtime/src/entry/desktop_main.o
+GAME_NULL_OBJ   := $(HOSTOBJ)/engine/platform/src/null/null_platform.o
 
 game-check:
-	@test -n "$(PROJECT)" || { echo "usage: make game|game-assets|play PROJECT=path/to/project"; exit 1; }
+	@test -n "$(PROJECT)" || { echo "usage: make game|game-assets|play|game-gba|game-psp PROJECT=path/to/project"; exit 1; }
 	@test -f "$(GAME_DIR)/phxproject.json" || { echo "$(GAME_DIR): not a Phoenix project (no phxproject.json)"; exit 1; }
 
-game: game-check $(GAME_ENGINE_OBJ) $(SDL_PLATFORM_OBJ)
+game-src-check: game-check
 	@test -n "$(GAME_SRC)" || { echo "$(GAME_DIR)/src has no .cpp files"; exit 1; }
+
+game: game-src-check $(GAME_ENGINE_OBJ) $(GAME_ENTRY_OBJ) $(SDL_PLATFORM_OBJ)
 	@mkdir -p "$(GAME_DIR)/build"
 	$(CXX) $(CXXFLAGS) $(PUBLIC_INCLUDES) -I"$(GAME_DIR)/src" -I"$(GAME_DIR)/build/gen" $(GAME_SRC) \
-	  $(GAME_ENGINE_OBJ) $(SDL_PLATFORM_OBJ) `sdl2-config --libs` -o "$(GAME_DIR)/build/$(GAME_NAME)"
+	  $(GAME_ENGINE_OBJ) $(if $(GAME_HAS_MAIN),,$(GAME_ENTRY_OBJ)) $(SDL_PLATFORM_OBJ) $(SDL_LIBS) \
+	  -o "$(GAME_DIR)/build/$(GAME_NAME)"
 	@echo "built $(GAME_DIR)/build/$(GAME_NAME)"
+	@# the game's reflected components, for Phoenix Studio's prefab inspector (no window opens)
+	@test -n "$(GAME_HAS_MAIN)" || { cd "$(GAME_DIR)" && PHX_DUMP_COMPONENTS=build/components.json "./build/$(GAME_NAME)"; }
 
 game-assets: game-check $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXPACK)
 	@python3 tools/common/bake_project.py "$(GAME_DIR)" --tools $(BUILD) --tier $(TIER_BAKE)
@@ -720,12 +772,12 @@ ENTITY_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(EDITOR_ENGINE) tools/phxentity/m
 
 tmap: $(TMAP_OBJ) $(SDL_PLATFORM_OBJ)
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) $(TMAP_OBJ) $(SDL_PLATFORM_OBJ) `sdl2-config --libs` -o $(BUILD)/phxtmap
+	$(CXX) $(CXXFLAGS) $(TMAP_OBJ) $(SDL_PLATFORM_OBJ) $(SDL_LIBS) -o $(BUILD)/phxtmap
 	@echo "built $(BUILD)/phxtmap  —  tilemap editor: ./$(BUILD)/phxtmap [--out f.tmj] [f.tmj]"
 
 entity: $(ENTITY_OBJ) $(SDL_PLATFORM_OBJ)
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) $(ENTITY_OBJ) $(SDL_PLATFORM_OBJ) `sdl2-config --libs` -o $(BUILD)/phxentity
+	$(CXX) $(CXXFLAGS) $(ENTITY_OBJ) $(SDL_PLATFORM_OBJ) $(SDL_LIBS) -o $(BUILD)/phxentity
 	@echo "built $(BUILD)/phxentity  —  data-table editor: ./$(BUILD)/phxentity file.json"
 
 # phxstudio: Phoenix Studio — the one editor for the engine: the module graph as built, every .phxp
@@ -735,18 +787,19 @@ entity: $(ENTITY_OBJ) $(SDL_PLATFORM_OBJ)
 # SDL flags; every studio TU talks to the window through phx/platform/desktop.h. The document
 # models are unit-tested in the editors + pipeline suites. Needs SDL2 + a display.
 STUDIO_TOOL_SRC := tools/phxstudio/main.cpp tools/phxstudio/workspace.cpp tools/phxstudio/ed_code.cpp \
-                   tools/phxstudio/ed_sprite.cpp tools/phxstudio/ed_map.cpp tools/phxstudio/ed_table.cpp
+                   tools/phxstudio/ed_sprite.cpp tools/phxstudio/ed_map.cpp tools/phxstudio/ed_table.cpp \
+                   tools/phxstudio/winjob.cpp
 STUDIO_ENGINE   := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) engine/audio/src/mixer.cpp
 STUDIO_OBJ      := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(STUDIO_ENGINE) $(STUDIO_TOOL_SRC))
 
 $(SDL_PLATFORM_OBJ): engine/platform/src/sdl/sdl_platform.cpp
 	@command -v sdl2-config >/dev/null 2>&1 || { echo "needs SDL2 (sdl2-config not found). Install libsdl2-dev."; exit 1; }
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) `sdl2-config --cflags` -MMD -MP -MF $(@:.o=.d) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -DPHX_HAVE_SDL $(INCLUDES) $(SDL_CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
 studio: $(STUDIO_OBJ) $(SDL_PLATFORM_OBJ)
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) $(STUDIO_OBJ) $(SDL_PLATFORM_OBJ) `sdl2-config --libs` -pthread -o $(BUILD)/phxstudio
+	$(CXX) $(CXXFLAGS) $(STUDIO_OBJ) $(SDL_PLATFORM_OBJ) $(SDL_LIBS) -pthread -o $(BUILD)/phxstudio
 	@echo "built $(BUILD)/phxstudio  —  Phoenix Studio: ./$(BUILD)/phxstudio  (run from the repo root)"
 
 # --- Windows cross build (MinGW-w64) --------------------------------------------------------
@@ -1101,7 +1154,8 @@ $(BUILD)/gba/phx-save.gba: $(GBA_SAVE_OBJ)
 # --- PSP cross build (pspsdk) ---------------------------------------------------------------
 # Cross-compiles the portable engine + the PSP platform backend into an EBOOT.PBP. Needs pspsdk
 # (psp-gcc). Not part of `check`. The third real target for the one codebase.
-PSPDEV     ?= /home/jaden/pspdev
+# PSPDEV: the environment's, else the install that psp-g++ on PATH comes from.
+PSPDEV     ?= $(or $(patsubst %/bin/psp-g++,%,$(shell command -v psp-g++ 2>/dev/null)),/home/jaden/pspdev)
 PSPSDK     := $(PSPDEV)/psp/sdk
 PSP_CXX    := $(PSPDEV)/bin/psp-g++
 PSP_FIXUP  := $(PSPDEV)/bin/psp-fixup-imports
@@ -1268,6 +1322,126 @@ $(BUILD)/psp/save/EBOOT.PBP: $(PSP_SAVE_OBJ)
 	$(PSP_PACK) $@ $(BUILD)/psp/save/PARAM.SFO NULL NULL NULL NULL NULL $(BUILD)/psp/save/save.prx NULL
 	@echo "EBOOT: $@ ($$(stat -c%s $@) bytes)"
 
+# --- Game projects on the consoles -----------------------------------------------------------
+# A PHX_GAME project (see "Game projects" above) for GBA and PSP: its src/*.cpp + the engine + the
+# console's platform backend + the engine's entry for that console (engine/runtime/src/entry/),
+# with the project's assets baked for the console's tier and linked in as `phx_game_phxp`.
+#   make game-gba PROJECT=path   devkitARM -> <project>/build/<name>.gba (native PPU), size-gated
+#   make play-gba PROJECT=path   ... then open it in mGBA        (MGBA=/path/to/mgba overrides)
+#   make game-psp PROJECT=path   pspsdk    -> <project>/build/psp/EBOOT.PBP (software renderer)
+#   make play-psp PROJECT=path   ... then open it in PPSSPP      (PPSSPP=/path/to/ppsspp overrides)
+# The engine set is the shipping ROM/EBOOTs' (no AudioStream: nothing streams on the consoles,
+# see phx/audio/stream.h; App::audio() plays resident sounds). The ROM budget is the cartridge cap (GAME_GBA_ROM_MB, 32 MB);
+# the IWRAM/EWRAM budgets are the size gate's, as for every GBA build.
+GAME_CONSOLE_ENGINE := engine/core/src/assert.cpp engine/core/src/fixed.cpp engine/core/src/log.cpp \
+                       engine/memory/src/memory_root.cpp engine/ecs/src/world.cpp \
+                       engine/render/src/renderer.cpp engine/physics/src/physics.cpp \
+                       engine/anim/src/anim.cpp engine/scene/src/scene.cpp engine/ui/src/ui.cpp \
+                       engine/runtime/src/app.cpp engine/runtime/src/game_main.cpp engine/runtime/src/level.cpp \
+                       engine/runtime/src/behaviours.cpp \
+                       engine/resource/src/cache.cpp engine/audio/src/mixer.cpp
+GAME_GBA_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GAME_CONSOLE_ENGINE) engine/render/src/gba/gba_ppu.cpp \
+                  engine/platform/src/gba/gba_platform.cpp engine/runtime/src/entry/gba_main.cpp)
+GAME_PSP_OBJ := $(patsubst %.cpp,$(BUILD)/psp/%.o,$(GAME_CONSOLE_ENGINE) engine/render/src/soft/soft_renderer.cpp \
+                  engine/platform/src/psp/psp_platform.cpp engine/runtime/src/entry/psp_main.cpp)
+GAME_OUT       = $(GAME_DIR)/build
+GAME_TITLE     = $(shell python3 -c "import json,sys,os;d=json.load(open(sys.argv[1]+'/phxproject.json'));print((d.get('name') or os.path.basename(sys.argv[1]))[:64])" "$(GAME_DIR)" 2>/dev/null)
+GAME_GBA_TITLE = $(shell echo "$(GAME_NAME)" | tr a-z A-Z | tr -cd 'A-Z0-9' | cut -c1-12)
+GAME_GBA_ROM_MB ?= 32
+MGBA   ?= $(firstword $(shell command -v mgba-qt mgba mGBA 2>/dev/null))
+PPSSPP ?= $(firstword $(shell command -v PPSSPPSDL ppsspp PPSSPPWindows64 PPSSPPWindows 2>/dev/null))
+
+game-console-check: game-src-check
+	@test -z "$(GAME_HAS_MAIN)" || { echo "$(GAME_HAS_MAIN) defines main(). A console build supplies the engine's own main(): name the game with PHX_GAME(YourGame); (phx/runtime/main.h) instead"; exit 1; }
+
+game-gba: game-console-check $(GAME_GBA_OBJ) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXPACK)
+	@$(MAKE) --no-print-directory game-assets PROJECT="$(GAME_DIR)" TIER=0
+	@mkdir -p "$(GAME_OUT)/gba"
+	python3 tools/common/bin2s.py --name phx_game_phxp "$(GAME_OUT)/$(GAME_NAME).t0.phxp" > "$(GAME_OUT)/gba/bundle.s"
+	$(GBA_CXX) $(GBA_ARCH) -x assembler-with-cpp -c "$(GAME_OUT)/gba/bundle.s" -o "$(GAME_OUT)/gba/bundle.o"
+	$(GBA_CXX) $(GBA_FLAGS) $(PUBLIC_INCLUDES) -I"$(GAME_DIR)/src" -I"$(GAME_OUT)/gen" -specs=gba.specs \
+	  $(GAME_SRC) $(GAME_GBA_OBJ) "$(GAME_OUT)/gba/bundle.o" -o "$(GAME_OUT)/gba/$(GAME_NAME).elf"
+	$(GBA_OBJCOPY) -O binary "$(GAME_OUT)/gba/$(GAME_NAME).elf" "$(GAME_OUT)/$(GAME_NAME).gba"
+	$(GBA_FIX) "$(GAME_OUT)/$(GAME_NAME).gba" -t"$(GAME_GBA_TITLE)" >/dev/null
+	@python3 tools/common/size_gate.py --rom "$(GAME_OUT)/$(GAME_NAME).gba" --elf "$(GAME_OUT)/gba/$(GAME_NAME).elf" \
+	  --rom-budget-mb $(GAME_GBA_ROM_MB) --size-tool $(DEVKITARM)/bin/arm-none-eabi-size
+	@echo "ROM: $(GAME_OUT)/$(GAME_NAME).gba ($$(wc -c < "$(GAME_OUT)/$(GAME_NAME).gba") bytes)"
+
+play-gba: game-gba
+	@if [ -n "$(MGBA)" ]; then echo "opening $(GAME_NAME).gba in $(MGBA)"; "$(MGBA)" "$(GAME_OUT)/$(GAME_NAME).gba"; \
+	 else echo "no mGBA found (install it, or set MGBA=/path/to/mgba): the ROM is $(GAME_OUT)/$(GAME_NAME).gba"; fi
+
+game-psp: game-console-check $(GAME_PSP_OBJ) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXPACK)
+	@$(MAKE) --no-print-directory game-assets PROJECT="$(GAME_DIR)" TIER=1
+	@mkdir -p "$(GAME_OUT)/psp"
+	python3 tools/common/bin2s.py --name phx_game_phxp "$(GAME_OUT)/$(GAME_NAME).t1.phxp" > "$(GAME_OUT)/psp/bundle.s"
+	$(PSP_CXX) -x assembler-with-cpp -c "$(GAME_OUT)/psp/bundle.s" -o "$(GAME_OUT)/psp/bundle.o"
+	$(PSP_CXX) $(PSP_FLAGS) $(PUBLIC_INCLUDES) -I"$(GAME_DIR)/src" -I"$(GAME_OUT)/gen" $(GAME_SRC) $(GAME_PSP_OBJ) \
+	  "$(GAME_OUT)/psp/bundle.o" $(PSP_LDFLAGS) $(PSP_LIBS) -o "$(GAME_OUT)/psp/$(GAME_NAME).elf"
+	$(PSP_FIXUP) "$(GAME_OUT)/psp/$(GAME_NAME).elf"
+	$(PSP_PRXGEN) "$(GAME_OUT)/psp/$(GAME_NAME).elf" "$(GAME_OUT)/psp/$(GAME_NAME).prx"
+	$(PSP_MKSFO) "$(GAME_TITLE)" "$(GAME_OUT)/psp/PARAM.SFO"
+	$(PSP_PACK) "$(GAME_OUT)/psp/EBOOT.PBP" "$(GAME_OUT)/psp/PARAM.SFO" NULL NULL NULL NULL NULL \
+	  "$(GAME_OUT)/psp/$(GAME_NAME).prx" NULL
+	@echo "EBOOT: $(GAME_OUT)/psp/EBOOT.PBP ($$(wc -c < "$(GAME_OUT)/psp/EBOOT.PBP") bytes)"
+
+play-psp: game-psp
+	@if [ -n "$(PPSSPP)" ]; then echo "opening the EBOOT in $(PPSSPP)"; "$(PPSSPP)" "$(GAME_OUT)/psp/EBOOT.PBP"; \
+	 else echo "no PPSSPP found (install it, or set PPSSPP=/path/to/ppsspp): the EBOOT is $(GAME_OUT)/psp/EBOOT.PBP"; fi
+
+# The Studio's new-project template, proven a working game on every tier without a window or a
+# console SDK: phxnew writes it, it is baked for PC, GBA and PSP, and it runs headlessly on the
+# null platform under each target's profile (budgets + resolution, phx/runtime/main.h) for
+# PROJCHECK_FRAMES frames. PC: float + soft rasterizer + tier-2 bundle. GBA: fixed-point
+# (TIER=gba_sim) + the GBA PPU backend's host model + tier-0 bundle. PSP: float + soft + tier-1.
+# Any engine warning or error fails it. The console links themselves need the SDKs (CI:
+# game-gba / game-psp on the same project).
+PHXNEW           := $(BUILD)/phxnew
+PROJCHECK_DIR    := $(BUILD)/projcheck/game
+PROJCHECK_FRAMES ?= 180
+PROJRUN_ENTRY    := $(HOSTOBJ)/tests/suites/project_entry.o
+
+$(PHXNEW): $(HOSTOBJ)/tools/phxstudio/new_main.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+phxnew: $(PHXNEW)
+
+project-check: $(PHXNEW) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXPACK)
+	@rm -rf $(BUILD)/projcheck
+	@./$(PHXNEW) $(PROJCHECK_DIR) "Project Check" >/dev/null
+	@for t in 2 0 1; do $(MAKE) -s --no-print-directory game-assets PROJECT=$(PROJCHECK_DIR) TIER=$$t >/dev/null || exit 1; done
+	@$(MAKE) -s --no-print-directory project-run PROJECT=$(PROJCHECK_DIR) PROFILE=desktop BUNDLE=phxp
+	@$(MAKE) -s --no-print-directory project-run PROJECT=$(PROJCHECK_DIR) PROFILE=gba BUNDLE=t0.phxp TIER=gba_sim GAME_RENDER=ppu
+	@$(MAKE) -s --no-print-directory project-run PROJECT=$(PROJCHECK_DIR) PROFILE=psp BUNDLE=t1.phxp
+	@$(MAKE) -s --no-print-directory project-schema PROJECT=$(PROJCHECK_DIR)
+	@echo "PROJECT PASS"
+
+# The component schema `make game` exports for Phoenix Studio (internal to project-check): the
+# project on the engine's real desktop entry (null platform), run with PHX_DUMP_COMPONENTS.
+project-schema: game-console-check $(GAME_ENGINE_OBJ) $(GAME_ENTRY_OBJ) $(GAME_NULL_OBJ)
+	@$(CXX) $(CXXFLAGS) $(PUBLIC_INCLUDES) -I"$(GAME_DIR)/src" -I"$(GAME_OUT)/gen" $(GAME_SRC) $(GAME_ENGINE_OBJ) \
+	  $(GAME_ENTRY_OBJ) $(GAME_NULL_OBJ) -o "$(GAME_OUT)/schema-dump"
+	@cd "$(GAME_DIR)" && PHX_DUMP_COMPONENTS=build/components.json ./build/schema-dump
+	@grep -q '"name": "PlatformerController"' "$(GAME_OUT)/components.json" || { echo "  FAIL $(GAME_NAME): the stock behaviours are missing from build/components.json"; exit 1; }
+	@echo "  ok   $(GAME_NAME): its component schema exports (build/components.json)"
+
+# One headless run of a PHX_GAME project (internal to project-check): link it on the null platform,
+# put the chosen bundle where the game mounts it, run PROJCHECK_FRAMES frames under PHX_PROFILE.
+GAME_RENDER ?= soft
+PROJRUN_OBJ = $(if $(filter ppu,$(GAME_RENDER)),$(patsubst %/soft/soft_renderer.o,%/gba/gba_ppu.o,$(GAME_ENGINE_OBJ)),$(GAME_ENGINE_OBJ)) \
+              $(PROJRUN_ENTRY) $(GAME_NULL_OBJ)
+PROJRUN_DIR = $(GAME_OUT)/run-$(PROFILE)
+project-run: game-console-check $(PROJRUN_OBJ)
+	@mkdir -p "$(PROJRUN_DIR)/build"
+	@$(CXX) $(CXXFLAGS) $(PUBLIC_INCLUDES) -I"$(GAME_DIR)/src" -I"$(GAME_OUT)/gen" $(GAME_SRC) $(PROJRUN_OBJ) \
+	  -o "$(PROJRUN_DIR)/game"
+	@cp "$(GAME_OUT)/$(GAME_NAME).$(BUNDLE)" "$(PROJRUN_DIR)/build/$(GAME_NAME).phxp"
+	@cd "$(PROJRUN_DIR)" && PHX_MAX_FRAMES=$(PROJCHECK_FRAMES) PHX_PROFILE=$(PROFILE) PHX_EXPECT_AUDIO=1 ./game > run.log 2>&1; \
+	  rc=$$?; if [ $$rc -ne 0 ] || grep -qE '\]\[(ERROR|WARN)' run.log; then \
+	    cat run.log; echo "  FAIL $(GAME_NAME) on the $(PROFILE) profile (exit $$rc)"; exit 1; fi
+	@echo "  ok   $(GAME_NAME): $(PROJCHECK_FRAMES) frames on the $(PROFILE) profile ($(TIER), $(GAME_RENDER), .$(BUNDLE))"
+
 resource: $(RESOURCE)
 	@./$(RESOURCE)
 
@@ -1329,6 +1503,12 @@ phxpack: $(PHXPACK)
 # (`tools`) re-runs the real binaries over.
 pipeline: $(PIPELINE)
 	@./$(PIPELINE)
+
+level: $(LEVEL)
+	@./$(LEVEL)
+
+behaviours: $(BEHAV)
+	@./$(BEHAV)
 
 # Studio / editor document models + widget kit, headless (no SDL, no display).
 editors: $(EDITORS)
@@ -1560,6 +1740,14 @@ $(EDITORS): $(EDITORS_OBJ)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(EDITORS_OBJ) -o $@
 
+$(LEVEL): $(LEVEL_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(LEVEL_OBJ) -o $@
+
+$(BEHAV): $(BEHAV_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(BEHAV_OBJ) -o $@
+
 $(HOSTOBJ)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
@@ -1575,7 +1763,7 @@ $(TIERSTAMP):
 HOST_BINS := $(BIN) $(SMOKE) $(RENDER) $(PPU) $(GU) $(PLAYABLE) $(PHYSICS) $(ANIM) $(SCENE) \
              $(UI) $(PLATFORMER) $(PLATAPP) $(EMBERWING) $(EMBERWING_PPU) $(EWAPP) \
              $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) \
-             $(RESOURCE) $(PIPELINE) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) \
+             $(RESOURCE) $(PIPELINE) $(LEVEL) $(BEHAV) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) \
              $(PLATBAKE) $(EWBAKE)
 $(HOST_BINS): $(TIERSTAMP)
 

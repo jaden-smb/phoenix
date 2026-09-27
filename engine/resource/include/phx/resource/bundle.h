@@ -158,6 +158,41 @@ struct SpawnBlobHeader {
     // followed by count * SpawnDef
 };
 
+// After the SpawnDefs, padded to 4 bytes, an optional EXTENSION carries each spawn's name and its
+// per-instance properties (Tiled object custom properties, set in the map editor's spawn
+// inspector): a door's target, an enemy's patrol range, or an override of a prefab column. Readers
+// that use only count/SpawnDef never see it:
+//   [u32 kSpawnExtMagic][u32 prop_count][u32 strings_size]
+//   [count * NameHash name]             (0 = unnamed)
+//   [prop_count * SpawnPropDef]         (grouped by spawn, in spawn order)
+//   [strings_size bytes]                (NUL-terminated string values; SpawnPropDef.value = offset)
+constexpr uint32_t kSpawnExtMagic = 0x58535850u;   // 'PXSX' (little-endian)
+enum SpawnPropType : uint8_t { kPropInt = 1, kPropFloat = 2, kPropBool = 3, kPropStr = 4 };
+struct SpawnPropDef {
+    NameHash key;          // the property's name, FNV-1a ("range"_hash)
+    int32_t  value;        // int, float bits, 0/1, or a string's offset in the string table
+    uint16_t spawn;        // the spawn it belongs to
+    uint8_t  type;         // SpawnPropType
+    uint8_t  pad;
+};
+
+// A data table (phxbin; a Blob asset): [u32 count][u32 stride][count * stride record bytes],
+// then — padded to 4 bytes — an optional SCHEMA TRAILER that makes the table self-describing, so
+// engine code can read a column by name without the game's generated header (TableView,
+// phx/resource/table.h): [u32 kTableSchemaMagic][u32 field_count][field_count * TableFieldDef].
+// Readers that only use count/stride/records (every generated header) never see the trailer.
+constexpr uint32_t kTableSchemaMagic = 0x53545850u;   // 'PXTS' (little-endian)
+enum TableFieldType : uint8_t {
+    kFieldU8 = 1, kFieldI8 = 2, kFieldU16 = 3, kFieldI16 = 4,
+    kFieldU32 = 5, kFieldI32 = 6, kFieldF32 = 7, kFieldStr = 8,   // str: char[size], NUL-terminated
+};
+struct TableFieldDef {
+    NameHash name;         // the column's name, FNV-1a ("speed"_hash)
+    uint16_t offset;       // byte offset within a record
+    uint8_t  type;         // TableFieldType
+    uint8_t  size;         // bytes (1/2/4, or the string capacity incl. the NUL)
+};
+
 // Lock the on-disk layout: the offline writer and the runtime reader must agree exactly,
 // and the layout must be identical across all targets (all LE, same natural alignment).
 static_assert(sizeof(BundleHeader)      == 24, "BundleHeader layout changed");
@@ -169,6 +204,8 @@ static_assert(sizeof(SpriteBlobHeader)  == 12, "SpriteBlobHeader layout changed"
 static_assert(sizeof(SpawnDef)          == 12, "SpawnDef layout changed");
 static_assert(sizeof(SpawnBlobHeader)   == 4,  "SpawnBlobHeader layout changed");
 static_assert(sizeof(SoundBlobHeader)   == 8,  "SoundBlobHeader layout changed");
+static_assert(sizeof(TableFieldDef)     == 8,  "TableFieldDef layout changed");
+static_assert(sizeof(SpawnPropDef)      == 12, "SpawnPropDef layout changed");
 
 } // namespace phx
 #endif // PHX_RESOURCE_BUNDLE_H

@@ -35,6 +35,7 @@ namespace {
 using namespace twk;
 using phxtool::TmapDoc;
 using phxtool::TiledSpawn;
+using phxtool::TiledProp;
 
 enum class MTool : uint8_t { Brush, Eraser, Fill, Rect, Picker, Select, Spawn, Hand };
 
@@ -231,7 +232,7 @@ private:
         ts_path.clear();
         const std::string dir = dir_name(path);
         std::vector<std::string> cands;
-        if (!doc.tileset_image.empty()) cands.push_back(doc.tileset_image[0] == '/' ? doc.tileset_image : join_path(dir, doc.tileset_image));
+        if (!doc.tileset_image.empty()) cands.push_back(is_abs_path(doc.tileset_image) ? doc.tileset_image : join_path(dir, doc.tileset_image));
         cands.push_back(join_path(dir, doc.tileset + ".png"));
         for (const std::string& rel : h.files_with({ ".png" }))
             if (stem_of(rel) == doc.tileset) cands.push_back(join_path(h.root(), rel));
@@ -886,6 +887,55 @@ private:
         ch |= g.int_field(g.id("sw"), Rect{ b.x + 34, y, 44, 13 }, s.w, 0, 4096, 1, "Size in pixels (0 = a point)");
         ch |= g.int_field(g.id("sh"), Rect{ b.x + 82, y, 44, 13 }, s.h, 0, 4096, 1);
         y += 18;
+
+        // Per-instance properties (Tiled custom properties). One named like a prefab column
+        // overrides it for this spawn only; any other is this spawn's own data for the game.
+        g.section(b.x, y, b.w, "PROPERTIES", g.th.faint);
+        y += 12;
+        const std::vector<std::string>& kinds = TmapDoc::prop_types();
+        for (size_t k = 0; k < s.props.size(); ++k) {
+            TiledProp& p = s.props[k];
+            const int ik = int(k);
+            ch |= g.text_field(g.id("pname", ik), Rect{ b.x, y, 46, 13 }, p.name, "name", 0,
+                               "The property's name: a prefab column (w, h, sprite, body, ...) overrides it");
+            std::vector<std::string> items = kinds;
+            int ts = 3;
+            for (size_t t = 0; t < items.size(); ++t) if (items[t] == p.type) ts = int(t);
+            if (std::find(items.begin(), items.end(), p.type) == items.end()) { items.push_back(p.type); ts = int(items.size()) - 1; }
+            if (g.dropdown(g.id("ptype", ik), Rect{ b.x + 48, y, 40, 13 }, items, ts, "int, float, bool or string")) {
+                p.type = items[size_t(ts)];
+                p.value = TmapDoc::normalise_prop(p.type, p.value);
+                ch = true;
+            }
+            const Rect vr{ b.x + 90, y, b.w - 90 - 14, 13 };
+            if (p.type == "bool") {
+                const bool on = p.value == "true";
+                if (g.button(vr, on ? "true" : "false", Btn{ on, true, false, 0, "Click to toggle" })) { p.value = on ? "false" : "true"; ch = true; }
+            } else if (g.text_field(g.id("pval", ik), vr, p.value, "value")) {
+                ch = true;
+            }
+            if (g.icon_button(Rect{ b.right() - 12, y, 12, 13 }, kIconClose, "Remove this property")) {
+                s.props.erase(s.props.begin() + long(k));
+                ch = true;
+                break;
+            }
+            y += 15;
+        }
+        if (s.props.empty()) {
+            g.text(b.x, y + 1, "none: this spawn is its prefab as is", g.th.faint, kSubText, b.w);
+            y += 11;
+        }
+        if (g.button(Rect{ b.x, y, 70, 13 }, "property", Btn{ false, true, false, kIconPlus,
+                     "Add a property to this spawn (e.g. range = 24, or w = 12 to override the prefab)" })) {
+            TiledProp np;
+            np.name = doc.fresh_prop_name(spawn_sel_, "prop");
+            np.type = "int"; np.value = "0";
+            s.props.push_back(np);
+            ch = true;
+        }
+        y += 18;
+        // (Values stay as typed while editing, so "-" can become "-5"; saving writes each one as
+        // its type stores it, TmapDoc::prop_value_json.)
         if (ch) { doc.push_undo(); doc.spawns[size_t(spawn_sel_)] = s; doc.dirty = true; }
         if (g.button(Rect{ b.x, y, 60, 13 }, "delete", Btn{ false, true, false, kIconTrash, "Remove this spawn (Delete)" })) {
             doc.push_undo(); doc.remove_spawn(spawn_sel_); spawn_sel_ = -1;

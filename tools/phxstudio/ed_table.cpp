@@ -9,6 +9,7 @@
 //   + / -  (Shift: 10)             step a number                          Delete clear the cell
 //   Ctrl+D duplicate record · Ctrl+Enter insert a record · right-click a header / row number
 #include "host.h"
+#include "components.h"            // the game's reflected components (build/components.json)
 #include "../phxentity/editor.h"
 
 #include <algorithm>
@@ -26,6 +27,29 @@ using phxtool::BinDoc;
 class TableView final : public DocView {
 public:
     BinDoc doc;
+    // The game's reflected components, as `make game` exported them to build/components.json.
+    phxstudio::CompSchema schema_;
+    int64_t schema_stamp_ = -1;
+    uint64_t schema_checked_ = ~uint64_t(0);
+
+    void refresh_schema(Host& h) {
+        if (schema_checked_ != ~uint64_t(0) && h.ticks() - schema_checked_ < 30) return;   // twice a second
+        schema_checked_ = h.ticks();
+        const std::string p = join_path(h.root(), "build/components.json");
+        const int64_t st = file_stamp(p);
+        if (st == schema_stamp_) return;
+        schema_stamp_ = st;
+        schema_ = phxstudio::CompSchema{};
+        if (!st) return;
+        std::string text;
+        if (FILE* f = std::fopen(p.c_str(), "rb")) {
+            char buf[16384];
+            size_t n;
+            while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+            std::fclose(f);
+        }
+        phxstudio::CompSchema::parse(text, schema_);
+    }
 
     bool load(const std::string& p, std::string* err) {
         path = p;
@@ -393,11 +417,48 @@ private:
                 y += 16;
             }
         }
+        // components (prefab tables): the game's reflected components on this record
+        const size_t nc = doc.name_field();
+        if (nc < doc.fields.size() && !doc.records.empty()) {
+            refresh_schema(h);
+            int rows = 1;
+            for (const auto& c : schema_.comps)
+                rows += 1 + (phxstudio::record_has_component(doc, size_t(row_), c.name) ? int(c.fields.size()) : 0);
+            Rect cb = panel_section(g, col, std::min(col.h - 70, 14 + rows * 11), "COMPONENTS");
+            int y = cb.y;
+            if (schema_.comps.empty()) {
+                g.text(cb.x, y, "none yet: declare them in code with", g.th.faint, kSubText, cb.w);
+                g.text(cb.x, y + 9, "PHX_COMPONENT, then Run > Build", g.th.faint, kSubText, cb.w);
+            }
+            for (size_t k = 0; k < schema_.comps.size() && y + 11 <= cb.bottom(); ++k) {
+                const phxstudio::CompSchema::Comp& c = schema_.comps[k];
+                const bool on = phxstudio::record_has_component(doc, size_t(row_), c.name);
+                const Rect tr{ cb.x, y, cb.w, 11 };
+                if (g.button(Rect{ tr.x, tr.y, 11, 10 }, on ? "x" : "", Btn{ on, true, false, 0,
+                             on ? "Remove it from this prefab (its columns stay)" : "Add it: its fields get columns, at the C++ defaults" })) {
+                    doc.push_undo();
+                    if (!phxstudio::set_record_component(doc, size_t(row_), c, !on)) doc.drop_undo();
+                }
+                g.text(tr.x + 15, tr.y + 2, c.name, on ? g.th.text : g.th.dim, kSubText, tr.w - 60);
+                g.text(tr.right() - 44, tr.y + 2, fmt("%u field%s", unsigned(c.fields.size()), c.fields.size() == 1 ? "" : "s"), g.th.faint);
+                y += 11;
+                if (!on) continue;
+                for (const auto& f : c.fields) {
+                    if (y + 11 > cb.bottom()) break;
+                    const std::string colname = phxstudio::comp_column(c.name, f.name);
+                    size_t fi = doc.fields.size();
+                    for (size_t q = 0; q < doc.fields.size(); ++q) if (doc.fields[q].name == colname) fi = q;
+                    const std::string val = fi < doc.fields.size() ? doc.cell_text(size_t(row_), fi) : "-";
+                    g.text(tr.x + 15, y + 1, f.name + " = " + val, g.th.faint, kSubText, cb.w - 15);
+                    if (fi < doc.fields.size() && g.clicked(Rect{ tr.x, y, cb.w, 11 })) col_ = int(fi);
+                    y += 11;
+                }
+            }
+        }
         // prefab / validation
         Rect pb = panel_section(g, col, std::max(40, col.h), "TABLE");
         int y = pb.y;
         const std::vector<std::string> names = doc.name_column();
-        const size_t nc = doc.name_field();
         if (nc < doc.fields.size()) {
             g.text(pb.x, y, fmt("prefab table: %zu types", names.size()), g.th.good);
             y += 10;
