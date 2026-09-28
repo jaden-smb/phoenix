@@ -5,6 +5,7 @@
 #include "phx/runtime/main.h"
 #include "phx/ecs/reflect.h"
 #include "phx/runtime/devtools.h"
+#include "phx/runtime/budget.h"
 #include "phx/physics/physics.h"
 #include "phx/platform/desktop.h"
 #include "phx/platform/gfx_soft.h"
@@ -114,9 +115,31 @@ struct DevGame : CountGame {
         CountGame::on_stop(app);
         const phx_soft_fb fb = phx_gfx_soft_lock(app.platform()->gfx());
         if (fb.pixels && fb.w > 150 && fb.h > 30) {
-            panel_px = fb.pixels[size_t(20) * size_t(fb.w) + 180];   // inside the overlay panel
+            panel_px = fb.pixels[size_t(3) * size_t(fb.w) + 196];    // inside the overlay panel (past the short first line)
             clear_px = fb.pixels[size_t(fb.h - 1) * size_t(fb.w) + size_t(fb.w - 1)];   // outside it
         }
+    }
+};
+
+// The debugger's other tools: F9 halts on the engine's next warning; PgDn + '=' edit the selected
+// entity (sent mid-run, once the overlay has picked it); PHX_TRACE writes the per-frame trace.
+struct DebugGame : CountGame {
+    ecs::Entity marked = ecs::kInvalid;
+    scalar end_x{}, end_y{};
+    void on_start(App& app) override {
+        CountGame::on_start(app);
+        marked = app.world().spawn();
+        app.world().add<Transform>(marked, Transform{ vec2{ s_from_int(20), s_from_int(20) } });
+    }
+    void on_fixed_update(App& app, scalar dt) override {
+        CountGame::on_fixed_update(app, dt);
+        auto key = [](int k) { phx_desktop_event e{}; e.kind = PHX_DEV_KEY_DOWN; e.key = k; phx_null_desktop_push(&e); };
+        if (fixed_updates == 2) { key(PHX_KEY_PAGE_DOWN); key('='); key('='); }   // cursor -> y, y += 2
+        if (fixed_updates == 5) PHX_LOG_WARN("smoke: a warning the developer tools halt on");
+    }
+    void on_stop(App& app) override {
+        CountGame::on_stop(app);
+        if (const Transform* t = app.world().get<Transform>(marked)) { end_x = t->pos.x; end_y = t->pos.y; }
     }
 };
 
@@ -220,6 +243,41 @@ int main() {
         std::printf("devtools results: rc=%d fixed=%d renders=%d overlay_px=%08x clear_px=%08x\n", dev_rc,
                     dev.fixed_updates, dev.renders, unsigned(dev.panel_px), unsigned(dev.clear_px));
         ok = ok && dev_rc == 0 && dev.fixed_updates == 2 && dev.renders == 10 && darker;
+
+        // F9 (halt on a warning) + a live edit + the trace
+#if defined(_WIN32)
+        _putenv("PHX_TRACE=build/smoke_trace.csv");
+#else
+        setenv("PHX_TRACE", "build/smoke_trace.csv", 1);
+#endif
+        key(PHX_KEY_F9);
+        phx_null_set_max_frames(20);
+        App dbg_app(dc);
+        install_devtools(dbg_app);
+        DebugGame dbg;
+        const int dbg_rc = dbg_app.run(&dbg);
+#if defined(_WIN32)
+        _putenv("PHX_TRACE=");
+#else
+        unsetenv("PHX_TRACE");
+#endif
+        int trace_lines = 0;
+        if (FILE* f = std::fopen("build/smoke_trace.csv", "rb")) {
+            char b[256];
+            while (std::fgets(b, sizeof(b), f)) ++trace_lines;
+            std::fclose(f);
+        }
+        // F3: half speed (one fixed step every other frame)
+        key(PHX_KEY_F3);
+        phx_null_set_max_frames(20);
+        App slow_app(dc);
+        install_devtools(slow_app);
+        CountGame slow;
+        const int slow_rc = slow_app.run(&slow);
+        std::printf("debugger results: rc=%d fixed=%d x=%.1f y=%.1f trace_lines=%d | slow rc=%d fixed=%d\n", dbg_rc,
+                    dbg.fixed_updates, s_to_double(dbg.end_x), s_to_double(dbg.end_y), trace_lines, slow_rc, slow.fixed_updates);
+        ok = ok && dbg_rc == 0 && dbg.fixed_updates == 5 && dbg.end_x == s_from_int(20) && dbg.end_y == s_from_int(22) &&
+             trace_lines >= 20 && slow_rc == 0 && slow.fixed_updates == 10;
     }
 
     // The component schema tools read: names, field types, and the C++ defaults.
@@ -234,6 +292,25 @@ int main() {
                            schema.find("{ \"name\": \"turbo\", \"type\": \"bool\", \"default\": 1 }") != std::string::npos;
     std::printf("schema results: ok=%d (%u bytes)\n", schema_ok, unsigned(schema.size()));
     ok = ok && schema_ok;
+
+    // The budget report (phx/runtime/budget.h): the first run's high-water marks, written after
+    // run() tore the App down (the peaks outlive it), with the target's ceilings and the host-only
+    // bytes left out of the arena figures.
+    const RuntimePeaks& pk = app.peaks();
+    std::string rep;
+    if (write_budget_report(app, kTargetGba, "build/smoke_budget.json", 1024u))
+        if (FILE* f = std::fopen("build/smoke_budget.json", "rb")) {
+            char b[4096]; const size_t n = std::fread(b, 1, sizeof(b), f); rep.assign(b, n); std::fclose(f);
+        }
+    const bool budget_ok = pk.entities >= 1 && pk.arena_used > 0 && pk.arena_capacity >= pk.arena_used &&
+                           rep.find("\"target\": \"gba\"") != std::string::npos &&
+                           rep.find("\"sprites\": { \"peak\": ") != std::string::npos &&
+                           rep.find("\"max\": 128") != std::string::npos &&
+                           rep.find("\"capacity\": " + std::to_string(pk.arena_capacity - 1024u) + " }") != std::string::npos &&
+                           rep.find("\"frames\": 100") != std::string::npos;
+    std::printf("budget results: ok=%d entities=%u arena=%llu/%llu\n", budget_ok, pk.entities,
+                (unsigned long long)pk.arena_used, (unsigned long long)pk.arena_capacity);
+    ok = ok && budget_ok;
 
     std::printf(ok ? "SMOKE PASS\n\n" : "SMOKE FAIL\n\n");
     return ok ? 0 : 1;

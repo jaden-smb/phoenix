@@ -16,6 +16,7 @@ PHX_COMPONENT(Hazard, PHX_FIELD_HASH(Hazard, sound));
 PHX_COMPONENT(Checkpoint, PHX_FIELD_HASH(Checkpoint, sound));
 PHX_COMPONENT(Exit, PHX_FIELD_HASH(Exit, target));
 PHX_COMPONENT(CameraFollow, PHX_FIELD(CameraFollow, offset_y));
+PHX_COMPONENT(Talk, PHX_FIELD_HASH(Talk, conversation), PHX_FIELD(Talk, auto_start));
 
 namespace {
 bool    g_start_set = false;               // set_start_override(): used once, by the next start()
@@ -55,7 +56,7 @@ void Behaviours::start(App& app, Level& level, ResourceCache& res, PhysicsWorld&
         respawn_ = t->pos;
     }
     for (uint32_t i = 0; i < kMaxCounters; ++i) { counter_names_[i] = 0; counters_[i] = 0; }
-    exit_ = 0; hit_count_ = 0;
+    exit_ = 0; talk_ = 0; can_talk_ = false; hit_count_ = 0;
     camera_ = Camera2D{};
     follow(app, w);
 }
@@ -64,6 +65,7 @@ void Behaviours::update(App& app, scalar dt) {
     if (!physics_) return;
     ecs::World& w = app.world();
     if (player_ != ecs::kInvalid && !w.is_alive(player_)) player_ = ecs::kInvalid;
+    can_talk_ = false;
     if (player_ != ecs::kInvalid) control(app, w);
     patrol(w, dt);
     hit_count_ = physics_->step(w, dt, Span<Hit>{ hits_, kMaxHits });
@@ -144,6 +146,11 @@ void Behaviours::contacts(App& app, ecs::World& w) {
             continue;
         }
         if (const Exit* ex = w.get<Exit>(o)) exit_ = ex->target ? ex->target : NameHash("exit"_hash);
+        if (Talk* tk = w.get<Talk>(o); tk && tk->conversation) {
+            can_talk_ = true;
+            if (tk->auto_start) { tk->auto_start = false; talk_ = tk->conversation; }
+            else if (app.input().just(Button::Up)) talk_ = tk->conversation;
+        }
     }
 }
 

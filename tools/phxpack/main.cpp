@@ -3,7 +3,7 @@
 //   (a) author-friendly SOURCE files, baked directly via the shared builders (builders.h):
 //         *.png/*.ppm -> Texture   *.tmcsv/*.tmj -> Tilemap(+Spawns)
 //         *.sprdef    -> Texture+Sprite          *.wav / *.sfx / *.song -> Sound
-//         *.font / *.fnt -> Texture+Font
+//         *.font / *.fnt -> Texture+Font   *.dlg -> Dialogue
 //   (b) pre-baked INTERMEDIATE files emitted by the per-format converters
 //       (phxsprite/phxtile/phxsnd/phxbin) — each is itself a one-source bundle, MERGED in:
 //         *.phxspr  *.phxtmap  *.phxsnd  *.phxbin  *.phxviz  *.phxp
@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
         else if (a == "--help" || a == "-h") {
             std::printf("usage: phxpack --out FILE [--target 0|1|2] [--compress] [--manifest] [--full] <inputs...>\n"
                         "       phxpack --upgrade FILE.phxp [--target 0|1|2] [--compress]\n"
-                        "  sources:       .png .ppm .tmcsv .tmj .wav .sfx .song .sprdef .font .fnt\n"
+                        "  sources:       .png .ppm .tmcsv .tmj .wav .sfx .song .sprdef .font .fnt .dlg\n"
                         "  intermediates: .phxspr .phxtmap .phxsnd .phxbin .phxviz .phxp  (merged)\n"
                         "  sidecars:      FILE.lock (always; drives incremental rebakes),\n"
                         "                 FILE.manifest.txt (--manifest; hash <-> name <-> source)\n");

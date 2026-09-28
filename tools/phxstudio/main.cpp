@@ -41,6 +41,8 @@
 #include "jobs.h"
 #include "host.h"
 #include "workspace.h"
+#include "budget.h"       // the Budget view's model
+#include "settings.h"     // File > Settings (the Studio's own)
 #include "../phxentity/editor.h"
 
 #include <algorithm>
@@ -117,6 +119,7 @@ Rgba type_colour(AssetType t) {
     case AssetType::Sprite:  return pal::accent;
     case AssetType::Sound:   return pal::violet;
     case AssetType::Spawns:  return pal::warn;
+    case AssetType::Dialogue: return pal::good;
     case AssetType::Font:    return rgba(96, 212, 220);
     case AssetType::Blob:    return pal::dim;
     }
@@ -233,8 +236,8 @@ void audio_fill(void* user, int16_t* out, int frames) {
     g->mixer->mix(out, uint32_t(frames));
 }
 
-enum class Tab : uint8_t { Overview, Assets, Editor, Run, Count };
-const char* const kTabNames[] = { "Overview", "Assets", "Editor", "Run" };
+enum class Tab : uint8_t { Overview, Assets, Editor, Run, Budget, Count };
+const char* const kTabNames[] = { "Overview", "Assets", "Editor", "Run", "Budget" };
 
 // A console display line (a LogLine wrapped to the panel width). `diag` >= 0 indexes the parsed
 // compiler diagnostic it came from (clicking the line opens the file there).
@@ -420,9 +423,11 @@ struct StudioGame final : Game {
         phx_desktop_set_resizable(1);
         // Open bigger than the 640x360 minimum when the screen has room (an 800x450 canvas at the
         // chosen scale), unless --scale / a script / a shot asked for a fixed, reproducible size.
+        settings_load();
         int dw = 0, dh = 0;
+        if (auto_size && settings.scale > 0) phx_desktop_set_scale(settings.scale);   // the user's choice
         if (auto_size && phx_desktop_display_size(&dw, &dh)) {
-            if (dh >= 2000) phx_desktop_set_scale(3);
+            if (dh >= 2000 && settings.scale == 0) phx_desktop_set_scale(3);
             const int sc = phx_desktop_scale();
             if (dw >= 820 * sc && dh >= 480 * sc) phx_desktop_set_window_size(800 * sc, 450 * sc);
         }
@@ -466,7 +471,7 @@ struct StudioGame final : Game {
             refresh_bundles();
             select_initial_asset();
             ws.init(host);
-            ws.load_session(host, !fresh && initial_opens.empty());
+            ws.load_session(host, !fresh && initial_opens.empty() && settings.restore_session);
             open_initial_files();
             run_initial_launches();
             std::printf("phxstudio: engine development — %s: %zu modules, %d edges, %zu bundles, %zu names, %zu launches\n",
@@ -489,7 +494,7 @@ struct StudioGame final : Game {
     std::vector<Tab> visible_tabs() const {
         if (engine_dev) return { Tab::Overview, Tab::Assets, Tab::Editor, Tab::Run };
         if (!has_project) return {};
-        return { Tab::Editor, Tab::Assets, Tab::Run };      // the engine's module graph is not a project's business
+        return { Tab::Editor, Tab::Assets, Tab::Run, Tab::Budget };   // the engine's module graph is not a project's business
     }
     bool tab_visible(Tab t) const {
         for (Tab v : visible_tabs()) if (v == t) return true;
@@ -561,10 +566,37 @@ struct StudioGame final : Game {
         has_project = true;
         policy.project_dir = p.dir;
         ws_root = p.dir;
-        // launches: the project's own, run from its folder with $PHX_ROOT/$PHX_PROJECT
+        rebuild_launches();
+        last_launch = -1;
+        diags.clear();
+        names = NameBook{};
+        scan_names_in(p.dir, p.bundle_paths(), names);
+        refresh_bundles();
+        select_initial_asset();
+        ws.init(host);
+        ws.load_session(host, !fresh && initial_opens.empty() && settings.restore_session);
+        open_initial_files();
+        initial_opens.clear();
+        run_initial_launches();
+        initial_runs.clear();
+        prefab_dirty = true;
+        if (!tab_visible(tab)) tab = Tab::Editor;
+        note_recent_project(p.dir);
+        std::printf("phxstudio: project '%s' (%s) — %zu launches, %zu bundles\n", p.name.c_str(), p.dir.c_str(),
+                    launches.size(), bundle_paths.size());
+        return true;
+    }
+    // The Run view's launches: the project's own, run from its folder with $PHX_ROOT/$PHX_PROJECT,
+    // plus any standard launch the project predates (Export, Measure budgets ...), by label.
+    void rebuild_launches() {
+        const ProjectDoc& p = project;
         launches.clear();
         launch_missing.clear();
-        for (const ProjectLaunch& pl : p.launches) {
+        std::vector<ProjectLaunch> pls = p.launches;
+        for (const ProjectLaunch& sl : ProjectDoc::standard_launches())
+            if (std::none_of(pls.begin(), pls.end(), [&](const ProjectLaunch& x) { return x.label == sl.label; }))
+                pls.push_back(sl);
+        for (const ProjectLaunch& pl : pls) {
             Launch l;
             l.label = pl.label;
             l.group = pl.group == "build" ? Group::Build : pl.group == "test" ? Group::Test
@@ -576,24 +608,6 @@ struct StudioGame final : Game {
             launches.push_back(l);
             launch_missing.push_back(missing_need(l));
         }
-        last_launch = -1;
-        diags.clear();
-        names = NameBook{};
-        scan_names_in(p.dir, p.bundle_paths(), names);
-        refresh_bundles();
-        select_initial_asset();
-        ws.init(host);
-        ws.load_session(host, !fresh && initial_opens.empty());
-        open_initial_files();
-        initial_opens.clear();
-        run_initial_launches();
-        initial_runs.clear();
-        prefab_dirty = true;
-        if (!tab_visible(tab)) tab = Tab::Editor;
-        note_recent_project(p.dir);
-        std::printf("phxstudio: project '%s' (%s) — %zu launches, %zu bundles\n", p.name.c_str(), p.dir.c_str(),
-                    launches.size(), bundle_paths.size());
-        return true;
     }
     void close_project() {
         if (!has_project) return;
@@ -756,6 +770,194 @@ struct StudioGame final : Game {
         tg.text(cx, std::min(y + 4, r.bottom() - 14), "Working on the engine itself? Start the Studio with --engine-dev.", pal::faint, twk::kSubText, r.w - 20);
     }
 
+    // ---------------------------------------------------------------------------------------
+    // settings (File > Settings): the Studio's own, and the open project's phxproject.json
+    // ---------------------------------------------------------------------------------------
+    StudioSettings settings;
+    void settings_load() {
+        std::string text;
+        const std::string p = StudioSettings::path();
+        if (!p.empty() && read_text(p, text)) settings = StudioSettings::parse(text);
+        settings.apply_env();
+    }
+    bool settings_save() {
+        const std::string p = StudioSettings::path();
+        if (p.empty() || !script.empty() || !shot_path.empty()) return false;   // scripted runs leave no trace
+        std::error_code ec;
+        pfs::create_directories(pfs::path(p).parent_path(), ec);
+        const std::string t = settings.to_text();
+        FILE* f = std::fopen(p.c_str(), "wb");
+        if (!f) return false;
+        const bool ok = std::fwrite(t.data(), 1, t.size(), f) == t.size();
+        std::fclose(f);
+        return ok;
+    }
+    static std::string join_list(const std::vector<std::string>& v) {
+        std::string o;
+        for (size_t i = 0; i < v.size(); ++i) o += (i ? ", " : "") + v[i];
+        return o;
+    }
+    static std::vector<std::string> split_list(const std::string& s) {
+        std::vector<std::string> out;
+        size_t p = 0;
+        while (p <= s.size()) {
+            size_t e = s.find(',', p);
+            if (e == std::string::npos) e = s.size();
+            const std::string t = trim(s.substr(p, e - p));
+            if (!t.empty()) out.push_back(t);
+            p = e + 1;
+        }
+        return out;
+    }
+
+    void settings_dialog() {
+        struct St {
+            int tab = 0;
+            StudioSettings s;
+            ProjectDoc p;
+            std::string source, assets, bundles, needs;
+            int sel = 0, scroll = 0;
+            std::string err;
+        };
+        auto st = std::make_shared<St>();
+        st->s = settings;
+        st->p = project;
+        st->source = join_list(project.source);
+        st->assets = join_list(project.assets);
+        st->bundles = join_list(project.bundles);
+        push_modal("Settings", 500, 300, [this, st](twk::Gui& g, twk::Rect body) {
+            std::vector<std::string> tabs = { "Studio" };
+            if (has_project) tabs.push_back("Project");
+            const int t = g.tabs(twk::Rect{ body.x, body.y, body.w, 14 }, tabs, std::min(st->tab, int(tabs.size()) - 1));
+            if (t >= 0) st->tab = t;
+            int y = body.y + 20;
+            const int lw = 92, fx = body.x + lw, fw = body.w - lw;
+            auto label = [&](const char* s, const char* help) {
+                g.text(body.x, y + 3, s, pal::dim);
+                if (help) g.tip(twk::Rect{ body.x, y, lw, 13 }, help);
+            };
+            auto path_field = [&](const char* name, const char* env, std::string& v, const char* help) {
+                label(name, help);
+                const char* cur = std::getenv(env);
+                const std::string ph = cur && *cur && v.empty() ? std::string("(from the environment: ") + cur + ")" : "(not set)";
+                g.text_field(g.id(name), twk::Rect{ fx, y, fw, 13 }, v, ph.c_str(), 0, help);
+                y += 16;
+            };
+            if (st->tab == 0) {
+                label("UI scale", "Window pixels per canvas pixel (Ctrl+= / Ctrl+- change it live). 0 = pick by the display");
+                g.int_field(g.id("scale"), twk::Rect{ fx, y, 40, 13 }, st->s.scale, 0, 8, 1, "0 = automatic");
+                g.text(fx + 46, y + 3, st->s.scale ? "" : "automatic", pal::faint);
+                y += 16;
+                bool rs = st->s.restore_session;
+                if (g.checkbox(twk::Rect{ fx, y, fw, 13 }, "reopen the last session's documents", rs)) st->s.restore_session = rs;
+                y += 20;
+                g.text(body.x, y, "CONSOLE SDKS AND EMULATORS (environment variables for every launch)", pal::faint);
+                y += 12;
+                path_field("DEVKITPRO", "DEVKITPRO", st->s.devkitpro, "devkitPro's folder (devkitARM's parent), e.g. /opt/devkitpro");
+                path_field("DEVKITARM", "DEVKITARM", st->s.devkitarm, "devkitARM's folder (default: $DEVKITPRO/devkitARM)");
+                path_field("PSPDEV", "PSPDEV", st->s.pspdev, "pspsdk's folder: its bin/ goes on PATH (psp-g++)");
+                path_field("mGBA", "MGBA", st->s.mgba, "The mGBA executable (GBA ROM launches open it)");
+                path_field("PPSSPP", "PPSSPP", st->s.ppsspp, "The PPSSPP executable (PSP EBOOT launches open it)");
+            } else {
+                ProjectDoc& p = st->p;
+                label("name", "The game's name (its title, and build/<name> files)");
+                g.text_field(g.id("pname"), twk::Rect{ fx, y, fw, 13 }, p.name, "My Game");
+                y += 16;
+                label("description", nullptr);
+                g.text_field(g.id("pdesc"), twk::Rect{ fx, y, fw, 13 }, p.description, "");
+                y += 16;
+                label("source", "Folders of game code (comma-separated)");
+                g.text_field(g.id("psrc"), twk::Rect{ fx, y, fw, 13 }, st->source, "src");
+                y += 16;
+                label("assets", "Folders the bake reads (comma-separated)");
+                g.text_field(g.id("pass"), twk::Rect{ fx, y, fw, 13 }, st->assets, "assets");
+                y += 16;
+                label("bundles", "Baked bundles the Assets view shows (comma-separated)");
+                g.text_field(g.id("pbun"), twk::Rect{ fx, y, fw, 13 }, st->bundles, "build/<name>.phxp");
+                y += 20;
+                // the launches: a list, and the selected one's fields
+                g.text(body.x, y, "LAUNCHES (the Run view)", pal::faint);
+                y += 12;
+                const int n = int(p.launches.size());
+                const int rows = 5, lw2 = 150;
+                const twk::Rect list{ body.x, y, lw2, rows * 11 + 2 };
+                g.rect(list, pal::bar, twk::kSubWidget);
+                g.wheel_scroll(list, st->scroll, n, rows, 1);
+                for (int i = 0; i < rows && st->scroll + i < n; ++i) {
+                    const int k = st->scroll + i;
+                    const twk::Rect rr{ list.x + 1, list.y + 1 + i * 11, list.w - 2, 11 };
+                    if (k == st->sel) g.rect(rr, pal::hover, twk::kSubImage);
+                    g.text(rr.x + 3, rr.y + 2, p.launches[size_t(k)].label, pal::text, twk::kSubText, rr.w - 6);
+                    if (g.clicked(rr)) st->sel = k;
+                }
+                twk::Gui::Row row(twk::Rect{ body.x, list.bottom() + 3, lw2, 12 }, 3);
+                if (g.button(row.take(20), "+")) {
+                    p.launches.push_back(ProjectLaunch{ "New launch", "build", "make -C \"$PHX_ROOT\" game PROJECT=\"$PHX_PROJECT\"", "", {}, false });
+                    st->sel = int(p.launches.size()) - 1;
+                }
+                const bool have = st->sel >= 0 && st->sel < n;
+                if (g.button(row.take(30), "del", twk::Btn{ false, have }) && have) {
+                    p.launches.erase(p.launches.begin() + st->sel);
+                    st->sel = std::max(0, st->sel - 1);
+                }
+                if (have && st->sel < int(p.launches.size())) {
+                    ProjectLaunch& l = p.launches[size_t(st->sel)];
+                    const int lx = body.x + lw2 + 8, lfw = body.right() - lx - 50;
+                    int ly = y;
+                    auto lf = [&](const char* nm, std::string& v, const char* help) {
+                        g.text(lx, ly + 3, nm, pal::dim);
+                        g.text_field(g.id(nm, st->sel), twk::Rect{ lx + 50, ly, lfw, 13 }, v, "", 0, help);
+                        ly += 16;
+                    };
+                    lf("label", l.label, "Its name in the Run view");
+                    static const std::vector<std::string> kGroups = { "play", "build", "console", "test", "tool" };
+                    int gi = 0;
+                    for (size_t k = 0; k < kGroups.size(); ++k) if (kGroups[k] == l.group) gi = int(k);
+                    g.text(lx, ly + 3, "group", pal::dim);
+                    if (g.dropdown(g.id("lgroup", st->sel), twk::Rect{ lx + 50, ly, 80, 13 }, kGroups, gi, "Where the Run view lists it"))
+                        l.group = kGroups[size_t(gi)];
+                    bool wnd = l.windowed;
+                    if (g.checkbox(twk::Rect{ lx + 140, ly, 100, 13 }, "opens a window", wnd)) l.windowed = wnd;
+                    ly += 16;
+                    lf("command", l.command, "A shell command, run from the project folder ($PHX_ROOT, $PHX_PROJECT are set)");
+                    lf("blurb", l.blurb, "What it does (the Run view's tooltip)");
+                    std::string needs = join_list(l.needs);
+                    const std::string before = needs;
+                    lf("needs", needs, "Tools it requires (comma-separated; $VARS expand): the Run view greys it out without them");
+                    if (needs != before) l.needs = split_list(needs);
+                }
+                y = list.bottom() + 20;
+                g.text(body.x, std::min(y, body.bottom() - 30), "(a standard launch you delete comes back: the Studio adds any it lacks)",
+                       pal::faint, twk::kSubText, body.w);
+            }
+            if (!st->err.empty()) g.text(body.x, body.bottom() - 28, st->err, pal::bad, twk::kSubText, body.w);
+            const int by = body.bottom() - 14;
+            twk::Btn sb; sb.on = true;
+            if (g.button(twk::Rect{ body.x, by, 80, 14 }, "Save", sb)) {
+                if (has_project) {
+                    ProjectDoc p = st->p;
+                    p.source = split_list(st->source);
+                    p.assets = split_list(st->assets);
+                    p.bundles = split_list(st->bundles);
+                    if (p.name.empty()) { st->err = "the project needs a name"; st->tab = 1; return true; }
+                    std::string err;
+                    if (!p.save(&err)) { st->err = err; return true; }
+                    project = p;
+                }
+                const bool scale_changed = st->s.scale != settings.scale;
+                settings = st->s;
+                settings.apply_env();
+                if (scale_changed && settings.scale > 0) phx_desktop_set_scale(settings.scale);
+                settings_save();
+                if (has_project) { rebuild_launches(); refresh_bundles(); }
+                toast("settings saved", Toast::Good);
+                return false;
+            }
+            if (g.button(twk::Rect{ body.x + 86, by, 70, 14 }, "Cancel") || g.key(PHX_KEY_ESCAPE)) return false;
+            return true;
+        });
+    }
+
     void new_project_dialog() {
         struct St { std::string name = "My Game", where = "examples"; std::string err; bool first = true; };
         auto st = std::make_shared<St>();
@@ -915,6 +1117,7 @@ struct StudioGame final : Game {
         switch (a.type) {
         case AssetType::Texture: want = FileKind::Image; break;
         case AssetType::Font:    want = FileKind::Font; break;
+        case AssetType::Dialogue: want = FileKind::Dialogue; break;
         case AssetType::Sprite:  want = FileKind::Sprite; break;
         case AssetType::Tilemap: case AssetType::Spawns: want = FileKind::Map; break;
         case AssetType::Blob:    want = FileKind::Table; break;
@@ -1145,6 +1348,7 @@ struct StudioGame final : Game {
         case Tab::Assets:   draw_assets(r, lin); break;
         case Tab::Editor:   ws.draw(host, twk::Rect{ 0, kBodyY, kW, kBodyH }); break;
         case Tab::Run:      draw_run(lin); break;
+        case Tab::Budget:   if (has_project) draw_budget(); break;
         default: break;
         }
         gui.flush_hint();
@@ -1187,8 +1391,10 @@ struct StudioGame final : Game {
         if (tg.key('q', kCtrl)) request_quit();
         if (tg.key('b', kCtrl) && workspace) { ws.side_open = !ws.side_open; switch_tab(Tab::Editor); }
         for (size_t t = 0; t < vt.size(); ++t) if (tg.key(int32_t('1' + t), kCtrl)) switch_tab(vt[t]);
+        const int scale_was = phx_desktop_scale();
         if (tg.key('=', kCtrl) || tg.key('+', kCtrl) || tg.key('=', kCtrl | kShift)) phx_desktop_set_scale(phx_desktop_scale() + 1);
         if (tg.key('-', kCtrl)) phx_desktop_set_scale(std::max(1, phx_desktop_scale() - 1));
+        if (phx_desktop_scale() != scale_was) { settings.scale = phx_desktop_scale(); settings_save(); }   // remembered
         if (tg.key(PHX_KEY_F1)) show_shortcuts();
         if (tg.key(PHX_KEY_F5)) { if (last_launch >= 0) run_launch(last_launch); }
         if (d && modals.empty() && !tg.text_focus()) {
@@ -1494,6 +1700,8 @@ struct StudioGame final : Game {
             add(MenuItem{ "Revert to disk", "", ed }, [this, d] { std::string err; if (d && !d->reload(host, &err)) toast("revert failed: " + err, Toast::Bad); });
             add(MenuItem{ "Close tab", "Ctrl+W", ed, false, false, twk::kIconClose }, [this] { ws.close(host, ws.active); });
             sep();
+            add(MenuItem{ "Settings...", "", true, false, false, twk::kIconGear }, [this] { settings_dialog(); });
+            sep();
             add(MenuItem{ "Quit", "Ctrl+Q" }, [this] { request_quit(); });
             const int hit = tg.menu(m_file, items, 180);
             if (hit >= 0 && size_t(hit) < acts.size() && acts[size_t(hit)]) acts[size_t(hit)]();
@@ -1628,6 +1836,250 @@ struct StudioGame final : Game {
     void section(int x, int y, int w, const std::string& title, Rgba c = pal::dim) {
         gui.text(x, y, title, c, kLyText);
         gui.rect(Rect{ x + Gui::text_w(title) + 4, y + 4, std::max(0, w - Gui::text_w(title) - 4), 1 }, pal::line, kLyWidget);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // BUDGET (projects): what the game used on each target, measured, against what it allows
+    // ---------------------------------------------------------------------------------------
+    struct BudgetTarget { const char* key; const char* label; const char* bundle_suffix; BudgetReport rep; BundleFacts facts;
+                          int64_t stamp = 0; };
+    BudgetTarget budget_[3] = { { "desktop", "PC", ".phxp", {}, {}, 0 }, { "gba", "GBA", ".t0.phxp", {}, {}, 0 },
+                                { "psp", "PSP", ".t1.phxp", {}, {}, 0 } };
+    uint64_t budget_tick_ = ~uint64_t(0);
+    bool budget_stale_ = false;
+
+    // The project's bundle name: build/<slug>.phxp as the project lists it (else from its name).
+    std::string budget_slug() const {
+        for (const std::string& b : project.bundles) {
+            const std::string st = stem_of(b);
+            if (!st.empty() && b.find("build/") == 0) return st;
+        }
+        return project_slug(project.name);
+    }
+    // The newest file time under `dir` (file-clock counts can be negative, e.g. MinGW: hence `found`).
+    static bool newest_in(const std::string& dir, int64_t& t) {
+        bool found = false;
+        std::error_code ec;
+        for (auto it = pfs::recursive_directory_iterator(dir, ec); !ec && it != pfs::recursive_directory_iterator(); it.increment(ec))
+            if (it->is_regular_file(ec)) {
+                const int64_t s = file_stamp(it->path().string());
+                if (!found || s > t) t = s;
+                found = true;
+            }
+        return found;
+    }
+    void refresh_budget() {
+        if (budget_tick_ != ~uint64_t(0) && ticks - budget_tick_ < 60) return;   // once a second
+        budget_tick_ = ticks;
+        const std::string build = project.dir + "/build/", slug = budget_slug();
+        int64_t oldest = 0;
+        bool measured = false;
+        for (BudgetTarget& t : budget_) {
+            const std::string rp = build + "budget-" + t.key + ".json";
+            const int64_t st = file_stamp(rp);
+            if (st != t.stamp) {
+                t.stamp = st;
+                std::string text;
+                t.rep = BudgetReport{};
+                if (st && read_text(rp, text)) BudgetReport::parse(text, t.rep);
+            }
+            BundleDoc d;
+            t.facts = BundleDoc::load(build + slug + t.bundle_suffix, d) ? bundle_facts(d, &names) : BundleFacts{};
+            if (t.rep.ok && (!measured || st < oldest)) { oldest = st; measured = true; }
+        }
+        int64_t na = 0, ns = 0;
+        const bool fa = newest_in(project.dir + "/assets", na), fs = newest_in(project.dir + "/src", ns);
+        budget_stale_ = measured && ((fa && na > oldest) || (fs && ns > oldest));
+    }
+    bool run_launch_labelled(const std::string& label) {
+        for (size_t i = 0; i < launches.size(); ++i)
+            if (launches[i].label == label) {
+                if (!launch_missing[i].empty()) { toast(label + " needs " + launch_missing[i], Toast::Warn); return true; }
+                run_launch(int(i));
+                return true;
+            }
+        return false;
+    }
+
+    // ---- the Budget view's PROFILER half: build/trace.csv (the Profile launch plays with PHX_TRACE) ----
+    bool budget_profiler_ = false;
+    FrameTrace trace_;
+    int64_t trace_stamp_ = 0;
+    uint64_t trace_tick_ = ~uint64_t(0);
+
+    void refresh_trace() {
+        if (trace_tick_ != ~uint64_t(0) && ticks - trace_tick_ < 60) return;
+        trace_tick_ = ticks;
+        const std::string p = project.dir + "/build/trace.csv";
+        const int64_t st = file_stamp(p);
+        if (st == trace_stamp_) return;
+        trace_stamp_ = st;
+        std::string text;
+        trace_ = FrameTrace{};
+        if (st && read_text(p, text)) FrameTrace::parse(text, trace_);
+    }
+
+    void draw_profiler(int x0, int y) {
+        refresh_trace();
+        const bool running = std::any_of(launches.begin(), launches.end(), [&](const Launch& l) {
+            return l.label == "Profile" && jobs && jobs->running_id() == int(&l - launches.data());
+        });
+        if (gui.button(Rect{ x0, y, 110, 13 }, running ? "playing..." : "Profile", running, !running,
+                       "Play the game with PHX_TRACE=build/trace.csv: every frame's update / render / present time "
+                       "is recorded; quit the game to see it here")) {
+            if (!run_launch_labelled("Profile")) toast("this project has no 'Profile' launch", Toast::Warn);
+        }
+        const std::vector<FrameTrace::Row>& R = trace_.rows;
+        gui.text(x0 + 118, y + 3, R.empty() ? "no trace yet: press Profile, play a while, quit"
+                                            : fmt("%d frames of PC timings (this machine), build/trace.csv", int(R.size())),
+                 R.empty() ? pal::warn : pal::dim, kLyText, kW - x0 - 130);
+        y += 20;
+        if (R.empty()) return;
+        const uint32_t budget = R.front().budget;
+        // the graph: one column per frame (or the slowest of a bucket), stacked update / render / present
+        const Rect g{ x0, y, kW - 2 * x0, std::min(130, std::max(60, (kH - kBotH - y) / 2)) };
+        gui.rect(g, pal::bar, kLyWidget);
+        const uint32_t top = std::max(budget + budget / 4, std::min(budget * 4, trace_.stat(&FrameTrace::Row::total).max));
+        const size_t n = R.size();
+        const int cols = g.w;
+        for (int c = 0; c < cols; ++c) {
+            const size_t a = size_t(uint64_t(c) * n / uint64_t(cols)), b = std::max(a + 1, size_t(uint64_t(c + 1) * n / uint64_t(cols)));
+            if (a >= n) break;
+            size_t k = a;
+            for (size_t i = a; i < b && i < n; ++i) if (FrameTrace::work(R[i]) > FrameTrace::work(R[k])) k = i;
+            const FrameTrace::Row& r = R[k];
+            auto h = [&](uint32_t us) { return int(uint64_t(std::min(us, top)) * uint64_t(g.h) / top); };
+            int yb = g.bottom();
+            const int hu = h(r.update), hr = h(r.render), hp = h(r.present), ht = h(r.total);
+            gui.rect(Rect{ g.x + c, yb - hu, 1, hu }, pal::info, kLyImage);          yb -= hu;
+            gui.rect(Rect{ g.x + c, yb - hr, 1, hr }, pal::violet, kLyImage);        yb -= hr;
+            gui.rect(Rect{ g.x + c, yb - hp, 1, hp }, pal::faint, kLyImage);         yb -= hp;
+            if (FrameTrace::work(r) > r.budget) gui.rect(Rect{ g.x + c, g.bottom() - ht, 1, 2 }, pal::bad, kLyOver);
+            if (gui.hover(Rect{ g.x + c, g.y, 1, g.h }))
+                gui.hint = fmt("frame %u: %.2f ms (update %.2f, render %.2f, present %.2f), %d steps, %u entities, %u sprites",
+                               r.frame, r.total / 1000.0, r.update / 1000.0, r.render / 1000.0, r.present / 1000.0, r.steps, r.ents, r.sprites);
+        }
+        const int by = g.bottom() - int(uint64_t(budget) * uint64_t(g.h) / top);
+        for (int x = g.x; x < g.right(); x += 3) gui.rect(Rect{ x, by, 2, 1 }, pal::text, kLyOver);
+        gui.text(g.x + 2, by - 9, fmt("budget %.1f ms", budget / 1000.0), pal::text, kLyText);
+        gui.text(g.right() - 170, g.y + 2, "update", pal::info, kLyText);
+        gui.text(g.right() - 120, g.y + 2, "render", pal::violet, kLyText);
+        gui.text(g.right() - 70, g.y + 2, "present", pal::faint, kLyText);
+        y = g.bottom() + 8;
+        // the numbers
+        const size_t over = trace_.over_budget();
+        gui.text(x0, y, fmt("%d of %d frames did more work (update + render) than the %.1f ms step (%.1f%%)", int(over), int(n),
+                            budget / 1000.0, 100.0 * double(over) / double(n)),
+                 over * 100 > n * 5 ? pal::bad : over ? pal::warn : pal::good, kLyText);
+        y += 12;
+        struct { const char* name; uint32_t FrameTrace::Row::*f; } phases[] = {
+            { "frame", &FrameTrace::Row::total }, { "update", &FrameTrace::Row::update },
+            { "render", &FrameTrace::Row::render }, { "present", &FrameTrace::Row::present } };
+        gui.text(x0, y, "phase        avg     p50     p95     max  (ms)", pal::dim, kLyText);
+        y += 10;
+        for (const auto& ph : phases) {
+            const FrameTrace::Stat s = trace_.stat(ph.f);
+            gui.text(x0, y, fmt("%-9s %7.2f %7.2f %7.2f %7.2f", ph.name, s.avg / 1000.0, s.p50 / 1000.0, s.p95 / 1000.0, s.max / 1000.0),
+                     pal::text, kLyText);
+            y += 10;
+        }
+        const FrameTrace::Stat es = trace_.stat(&FrameTrace::Row::ents), ss = trace_.stat(&FrameTrace::Row::sprites);
+        gui.text(x0, y + 2, fmt("entities up to %u, sprites up to %u per frame", es.max, ss.max), pal::dim, kLyText);
+        // the slowest frames
+        const int wx = x0 + 330;
+        int wy = g.bottom() + 20;                          // under the summary line
+        if (wx + 150 < kW) {
+            gui.text(wx, wy, "most work (update + render)", pal::dim, kLyText);
+            wy += 10;
+            for (size_t i : trace_.worst(6)) {
+                const FrameTrace::Row& r = R[i];
+                gui.text(wx, wy, fmt("#%-6u %6.2f ms  (u %.2f r %.2f, %d steps)", r.frame, FrameTrace::work(r) / 1000.0,
+                                     r.update / 1000.0, r.render / 1000.0, r.steps),
+                         FrameTrace::work(r) > r.budget ? pal::bad : pal::text, kLyText, kW - wx - 8);
+                wy += 10;
+            }
+        }
+    }
+
+    void draw_budget() {
+        refresh_budget();
+        const int x0 = 8, y0 = kBodyY + 6;
+        {   // the two halves: memory/limits per target, and the PC frame timings
+            const Rect b1{ kW - 8 - 130, y0 - 2, 62, 12 }, b2{ kW - 8 - 64, y0 - 2, 64, 12 };
+            if (gui.button(b1, "budgets", !budget_profiler_, true, "Memory, entities, sprites and size, per target")) budget_profiler_ = false;
+            if (gui.button(b2, "profiler", budget_profiler_, true, "Frame timings recorded while playing (Profile)")) budget_profiler_ = true;
+            if (budget_profiler_) {
+                section(x0, y0, kW - 16 - 136, "PROFILER  (update / render / present, per frame)");
+                draw_profiler(x0, y0 + 14);
+                return;
+            }
+        }
+        section(x0, y0, kW - 16 - 136, "BUDGETS  (the game run headlessly as each target, with scripted play)");
+        int y = y0 + 14;
+        const bool any = budget_[0].rep.ok || budget_[1].rep.ok || budget_[2].rep.ok;
+        bool running = false;                            // a Measure (or any launch) in progress
+        for (size_t i = 0; i < launches.size(); ++i)
+            if (launches[i].label == "Measure budgets" && jobs && jobs->running_id() == int(i)) running = true;
+        if (gui.button(Rect{ x0, y, 110, 13 }, running ? "measuring..." : "Measure budgets", running, !running,
+                       "Bake for every tier, then run the game as PC, GBA (fixed point, PPU) and PSP for 30 s of play: "
+                       "make project-budget (see the Run view)")) {
+            if (!run_launch_labelled("Measure budgets")) toast("this project has no 'Measure budgets' launch", Toast::Warn);
+        }
+        std::string note = !any ? "not measured yet: press Measure (about a minute)"
+                         : budget_stale_ ? "the assets or code changed since: measure again" : "up to date with assets/ and src/";
+        gui.text(x0 + 118, y + 3, note, !any || budget_stale_ ? pal::warn : pal::good, kLyText, kW - x0 - 130);
+        y += 20;
+        const int gap = 8, cw = (kW - 2 * x0 - 2 * gap) / 3;
+        for (int k = 0; k < 3; ++k) {
+            const BudgetTarget& t = budget_[k];
+            const int cx = x0 + k * (cw + gap);
+            int cy = y;
+            gui.rect(Rect{ cx, cy, cw, kH - kBotH - cy - 6 }, pal::panel, kLyPanel);
+            gui.text(cx + 6, cy + 5, t.label, pal::accent, kLyText);
+            if (t.rep.ok) gui.text(cx + 40, cy + 5, fmt("%llu frames measured", (unsigned long long)t.rep.frames),
+                                   pal::faint, kLyText, cw - 46);
+            cy += 18;
+            const std::vector<BudgetLine> lines = budget_lines(t.key, t.rep, t.facts);
+            if (lines.empty()) { gui.text(cx + 6, cy, "no bundle or report yet", pal::faint, kLyText, cw - 12); continue; }
+            for (const BudgetLine& ln : lines) {
+                if (cy + 24 > kH - kBotH) break;
+                const Rgba col = ln.level == Level::Over ? pal::bad : ln.level == Level::Close ? pal::warn
+                               : ln.level == Level::Ok ? pal::good : pal::dim;
+                const std::string val = ln.limit ? (ln.bytes ? human_bytes(ln.used) + " / " + human_bytes(ln.limit)
+                                                             : fmt("%llu / %llu", (unsigned long long)ln.used, (unsigned long long)ln.limit))
+                                                 : (ln.bytes ? human_bytes(ln.used) : fmt("%llu", (unsigned long long)ln.used));
+                // the label, then its bar (when it has a limit) with the value at the right
+                gui.text(cx + 6, cy, ln.what, pal::text, kLyText, cw - 12);
+                cy += 10;
+                const int vw = Gui::text_w(val);
+                gui.text(cx + cw - 6 - vw, cy, val, col, kLyText);
+                if (ln.limit) {
+                    const Rect bar{ cx + 6, cy + 2, std::max(10, cw - 18 - vw), 4 };
+                    gui.rect(bar, pal::bar, kLyWidget);
+                    const int fw = int(std::min<uint64_t>(uint64_t(bar.w), ln.used * uint64_t(bar.w) / std::max<uint64_t>(1, ln.limit)));
+                    gui.rect(Rect{ bar.x, bar.y, fw, bar.h }, col, kLyImage);
+                }
+                cy += 10;
+                if (!ln.note.empty()) {
+                    for (const std::string& w : wrap(ln.note, std::max(10, (cw - 16) / Gui::text_w("x")))) {
+                        gui.text(cx + 10, cy, w, pal::faint, kLyText, cw - 16);
+                        cy += 9;
+                    }
+                }
+                cy += 4;
+            }
+            if (t.facts.ok && cy + 30 < kH - kBotH) {
+                gui.text(cx + 6, cy, "biggest assets", pal::dim, kLyText);
+                cy += 10;
+                for (const auto& bg : t.facts.biggest) {
+                    if (cy + 9 > kH - kBotH) break;
+                    gui.text(cx + 10, cy, bg.name, pal::faint, kLyText, cw - 70);
+                    const std::string v = human_bytes(bg.bytes);
+                    gui.text(cx + cw - 6 - Gui::text_w(v), cy, v, pal::faint, kLyText);
+                    cy += 9;
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -2021,6 +2473,7 @@ struct StudioGame final : Game {
         case AssetType::Tilemap: preview_tilemap(in, p, body); break;
         case AssetType::Sound:   preview_sound(idx, p, body); break;
         case AssetType::Spawns:  preview_spawns(*a, p, body); break;
+        case AssetType::Dialogue: preview_dialogue(*a, body); break;
         case AssetType::Blob:    preview_blob(*a, body); break;
         }
     }
@@ -2033,6 +2486,30 @@ struct StudioGame final : Game {
                 gui.rect(Rect{ x, y, std::min(c, r.x + r.w - x), std::min(c, r.y + r.h - y) },
                          odd ? rgba(58, 58, 74) : rgba(48, 48, 62), kLyWidget);
             }
+    }
+
+    // A Dialogue asset: its conversations and their lines, as baked.
+    void preview_dialogue(const AssetEntry& a, const Rect& body) {
+        DialogueInfo d;
+        if (!view_dialogue(a, d)) { gui.text(body.x + 4, body.y + 4, "malformed dialogue", pal::bad); return; }
+        int y = body.y + 4;
+        for (const phx::DlgConvDef& c : d.convs) {
+            if (y + 10 > body.bottom()) break;
+            const std::string* nm = names.find(c.name);
+            gui.text(body.x + 4, y, fmt("%s  (%u lines)", nm ? nm->c_str() : fmt("%08x", unsigned(c.name)).c_str(), unsigned(c.node_count)),
+                     pal::accent, kLyText, body.w - 8);
+            y += 11;
+            for (uint32_t i = 0; i < c.node_count && y + 10 <= body.bottom(); ++i) {
+                const phx::DlgNodeDef& n = d.nodes[c.first_node + i];
+                gui.text(body.x + 14, y, d.str(n.text), pal::text, kLyText, body.w - 20);
+                y += 10;
+                for (uint32_t k = 0; k < n.choice_count && y + 10 <= body.bottom(); ++k) {
+                    gui.text(body.x + 26, y, std::string("> ") + d.str(d.choices[n.first_choice + k].text), pal::dim, kLyText, body.w - 32);
+                    y += 10;
+                }
+            }
+            y += 4;
+        }
     }
 
     // A Font asset: its metrics and glyph table (the atlas is the Texture asset it names).
@@ -2780,7 +3257,8 @@ int main(int argc, char** argv) {
         else if (a == "--shot-frame" && i + 1 < argc) game.shot_frame = std::atoi(argv[++i]);
         else if (a == "--tab" && i + 1 < argc) {
             const std::string t = argv[++i];
-            game.tab = t == "assets" ? Tab::Assets : t == "run" ? Tab::Run : t == "overview" ? Tab::Overview : Tab::Editor;
+            game.tab = t == "assets" ? Tab::Assets : t == "run" ? Tab::Run : t == "overview" ? Tab::Overview
+                     : t == "budget" ? Tab::Budget : Tab::Editor;
         } else if (a == "--help" || a == "-h") { usage(); return 0; }
         else { std::fprintf(stderr, "phxstudio: unknown argument '%s'\n", a.c_str()); usage(); return 1; }
     }

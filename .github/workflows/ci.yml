@@ -25,6 +25,22 @@ jobs:
       - name: Determinism gate — identical outcomes + frame across scalar tiers
         run: make determinism
 
+  # Phoenix Studio through CMake: the editor, the standalone editors and phxnew configure and
+  # build against the engine's CMake modules with the SDL2 platform backend (no display needed
+  # to link them). The Makefile's `make studio` is the day-to-day path; this keeps CMake honest.
+  cmake-studio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools + SDL2
+        run: sudo apt-get update && sudo apt-get install -y g++ cmake python3 libsdl2-dev
+      - name: Configure (linux, SDL2 platform)
+        run: cmake -S . -B build/cmake-studio -DPHX_TARGET=linux -DPHX_USE_SDL=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build phxstudio, phxtmap, phxentity, phxnew
+        run: cmake --build build/cmake-studio -j"$(nproc)" --target phxstudio phxtmap phxentity phxnew
+      - name: phxnew makes a project
+        run: ./build/cmake-studio/tools/phxstudio/phxnew build/cmake-studio/demo "CMake Demo" && test -f build/cmake-studio/demo/phxproject.json
+
   # Sanitizer gate (M7): the full check suite under ASan + UBSan, no recover — any UB or
   # heap error fails the job. Runs in its own build root (build/asan).
   sanitize:

@@ -127,6 +127,7 @@ inline const char* asset_type_name(phx::AssetType t) {
     case phx::AssetType::Blob:    return "blob";
     case phx::AssetType::Sprite:  return "sprite";
     case phx::AssetType::Spawns:  return "spawns";
+    case phx::AssetType::Dialogue: return "dialogue";
     }
     return "?";
 }

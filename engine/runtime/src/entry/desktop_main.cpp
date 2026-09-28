@@ -7,10 +7,13 @@
 //   * PHX_PLAY_FROM="x,y": start the player there instead of at its spawn (the map editor's
 //     "Play from here"; phx/runtime/behaviours.h: set_start_override);
 //   * PHX_DUMP_COMPONENTS=file: write the game's reflected components as JSON (for Phoenix
-//     Studio; `make game` does it after linking) and exit without booting a window.
+//     Studio; `make game` does it after linking) and exit without booting a window;
+//   * an exported game (`make game-export`: the executable next to build/<name>.phxp) runs from its
+//     own folder whatever the working directory (phx_desktop_use_exe_dir).
 #include "phx/runtime/main.h"
 #include "phx/runtime/behaviours.h"
 #include "phx/runtime/devtools.h"
+#include "phx/platform/desktop.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +28,7 @@ int main() {
         int x = 0, y = 0;
         if (std::sscanf(at, "%d,%d", &x, &y) == 2) phx::set_start_override(x, y);
     }
+    phx_desktop_use_exe_dir("build");                         // a shipped game: find its bundle
     phx::Game& game = phx::game_instance();
     phx::App app(phx::game_config(game, phx::kTargetDesktop));
     phx::install_devtools(app);

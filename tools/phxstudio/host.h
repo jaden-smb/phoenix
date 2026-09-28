@@ -122,6 +122,7 @@ std::unique_ptr<DocView> make_table_view(Host&, const std::string& path, std::st
 std::unique_ptr<DocView> make_sfx_view(Host&, const std::string& path, std::string* err);
 std::unique_ptr<DocView> make_song_view(Host&, const std::string& path, std::string* err);
 std::unique_ptr<DocView> make_font_view(Host&, const std::string& path, std::string* err);
+std::unique_ptr<DocView> make_dialogue_view(Host&, const std::string& path, std::string* err);
 // A view over a document that exists only in memory yet (saved to `path` on the first save).
 std::unique_ptr<DocView> make_map_view_new(Host&, const std::string& path, const phxtool::TmapDoc& doc);
 std::unique_ptr<DocView> make_table_view_new(Host&, const std::string& path, const phxtool::BinDoc& doc);
@@ -146,6 +147,7 @@ inline std::unique_ptr<DocView> open_view(Host& h, const std::string& path, bool
     case FileKind::Sfx:    return make_sfx_view(h, path, err);
     case FileKind::Song:   return make_song_view(h, path, err);
     case FileKind::Font:   return make_font_view(h, path, err);
+    case FileKind::Dialogue: return make_dialogue_view(h, path, err);
     case FileKind::Code: case FileKind::Text: case FileKind::Other: return make_code_view(h, path, err);
     default: break;
     }
@@ -161,6 +163,7 @@ inline int kind_icon(FileKind k) {
     case FileKind::Sound: return twk::kIconFileSound;  case FileKind::Bundle: return twk::kIconLayers;
     case FileKind::Sfx: return twk::kIconFileSound;    case FileKind::Song: return twk::kIconFileSound;
     case FileKind::Font: return twk::kIconFileImage;
+    case FileKind::Dialogue: return twk::kIconFileCode;
     default: return twk::kIconFile;
     }
 }
@@ -170,7 +173,8 @@ inline Rgba kind_colour(const twk::Theme& th, FileKind k) {
     case FileKind::Sprite: return th.accent; case FileKind::Map: return th.good;    case FileKind::Table: return rgba(96, 212, 220);
     case FileKind::Sound: return th.violet; case FileKind::Bundle: return th.dim;
     case FileKind::Sfx: return th.violet;   case FileKind::Song: return th.violet;
-    case FileKind::Font: return th.accent;  default: return th.faint;
+    case FileKind::Font: return th.accent;  case FileKind::Dialogue: return th.good;
+    default: return th.faint;
     }
 }
 

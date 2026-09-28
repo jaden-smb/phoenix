@@ -33,16 +33,20 @@ struct TargetProfile {
     // > 0: the only resolution the target renders (applied AFTER on_configure).
     int32_t  screen_w;
     int32_t  screen_h;
+    // The target's hardware ceilings, for budget reports made off the target (a host run of the
+    // PSP profile has the PC tier's caps); 0 = the running tier's caps().
+    uint32_t max_sprites = 0;
+    uint32_t audio_channels = 0;
 };
 
 // PC (SDL window): the capability tier's budgets, any resolution.
-inline constexpr TargetProfile kTargetDesktop{ "desktop", 0, 0, 0, 0, 0 };
+inline constexpr TargetProfile kTargetDesktop{ "desktop", 0, 0, 0, 0, 0, 0, 0 };
 // GBA on the native PPU: a 160 KB EWRAM arena (the rest of EWRAM holds the PPU's streamed
 // tiles and the stack's neighbours), always the 240x160 LCD.
-inline constexpr TargetProfile kTargetGba{ "gba", 160u << 10, 4u << 10, 256, 240, 160 };
+inline constexpr TargetProfile kTargetGba{ "gba", 160u << 10, 4u << 10, 256, 240, 160, 128, 2 };
 // PSP (software renderer, 2x-scaled when the resolution fits): a 4 MB arena out of the
 // EBOOT's 16 MB heap; any resolution up to 480x272.
-inline constexpr TargetProfile kTargetPsp{ "psp", 4u << 20, 64u << 10, 1024, 0, 0 };
+inline constexpr TargetProfile kTargetPsp{ "psp", 4u << 20, 64u << 10, 1024, 0, 0, 1024, 8 };
 
 // The boot Config for `game` on `target`: the tier defaults, then the target's budgets, then
 // Game::on_configure, then the target's fixed resolution (if it has one).

@@ -21,7 +21,15 @@ LogLevel g_level = LogLevel::Trace;
 void log_set_sink(LogSink sink)     { g_sink = sink ? sink : default_sink; }
 void log_set_level(LogLevel level)  { g_level = level; }
 
+static uint32_t g_warns = 0, g_errors = 0;   // log_count()
+
+uint32_t log_count(LogLevel level) {
+    return level == LogLevel::Warn ? g_warns : level == LogLevel::Error ? g_errors : 0;
+}
+
 void log_emit(LogLevel level, const char* fmt, ...) {
+    if (level == LogLevel::Warn) ++g_warns;
+    else if (level == LogLevel::Error) ++g_errors;
     if (level < g_level) return;
     char buf[512];
     va_list ap;

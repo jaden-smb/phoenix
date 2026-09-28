@@ -24,6 +24,7 @@ enum class AssetType : uint16_t {
     Blob    = 5,
     Sprite  = 6,    // sprite sheet metadata: frame grid + named animation clips (-> anim)
     Spawns  = 7,    // object-layer spawn points (type hash + rect), e.g. from a Tiled map
+    Dialogue = 8,   // conversations: nodes, choices, conditions (a .dlg; phx/runtime/dialogue.h)
 };
 
 enum BundleFlags : uint8_t {
@@ -181,6 +182,63 @@ struct FontGlyphDef {
     uint8_t  pad;
 };
 
+// Dialogue (a `.dlg`, baked by builders.h build_dialogue): conversations of NODES (a speaker's
+// line) that chain by `next` or branch by CHOICES, gated by conditions and changing variables:
+//   [DialogueHeader][conv_count * DlgConvDef][speaker_count * DlgSpeakerDef][node_count * DlgNodeDef]
+//   [choice_count * DlgChoiceDef][op_count * DlgOp][strings_size bytes of NUL-terminated text]
+// Node / choice `next` is a node index (kDlgEnd = the conversation ends); text and names are string
+// offsets. Every section size is a multiple of 4, so the whole asset is read in place.
+constexpr uint32_t kDialogueMagic = 0x4C445850u;   // 'PXDL' (little-endian)
+constexpr uint16_t kDlgEnd        = 0xFFFF;
+constexpr uint16_t kDlgNoSpeaker  = 0xFFFF;
+// A test (`if coins >= 5`) or an effect (`do coins -= 5`) on a variable.
+enum DlgOpKind : uint8_t {
+    kDlgNone = 0,
+    kDlgEq = 1, kDlgNe = 2, kDlgLt = 3, kDlgLe = 4, kDlgGt = 5, kDlgGe = 6,   // tests
+    kDlgSet = 16, kDlgAdd = 17, kDlgSub = 18,                                 // effects
+};
+struct DlgOp {
+    NameHash var;          // the variable ("coins"_hash)
+    int16_t  value;
+    uint8_t  op;           // DlgOpKind
+    uint8_t  pad;
+};
+struct DialogueHeader {
+    uint32_t magic;
+    uint16_t conv_count, speaker_count;
+    uint16_t node_count, choice_count;
+    uint16_t op_count, pad;
+    uint32_t strings_size;
+};
+struct DlgConvDef {
+    NameHash name;         // "sign_intro"_hash
+    uint16_t first_node;   // its entry node (its nodes are first_node .. first_node + node_count - 1)
+    uint16_t node_count;
+};
+struct DlgSpeakerDef {
+    uint32_t name;         // string offset (shown above the box)
+    NameHash portrait;     // a texture asset (0 = none)
+};
+struct DlgNodeDef {
+    uint32_t text;         // string offset
+    uint16_t speaker;      // speaker index, or kDlgNoSpeaker
+    uint16_t next;         // node index, or kDlgEnd
+    DlgOp    cond;         // op kDlgNone = always; false = the node is skipped (on to `next`)
+    uint16_t first_choice;
+    uint8_t  choice_count;
+    uint8_t  op_count;     // effects applied when the node is shown
+    uint16_t first_op;
+    uint16_t pad;
+};
+struct DlgChoiceDef {
+    uint32_t text;
+    uint16_t next;
+    uint16_t first_op;     // effects applied when it is picked
+    DlgOp    cond;         // false = the choice is hidden
+    uint8_t  op_count;
+    uint8_t  pad[3];
+};
+
 // Spawn points authored in an object layer: a typed entity placement (the game switches on
 // `type` to spawn the right entity). Coordinates are in pixels (Tiled's object space).
 struct SpawnDef {
@@ -240,6 +298,12 @@ static_assert(sizeof(SpriteBlobHeader)  == 12, "SpriteBlobHeader layout changed"
 static_assert(sizeof(SpriteTransDef)    == 8,  "SpriteTransDef layout changed");
 static_assert(sizeof(FontBlobHeader)    == 12, "FontBlobHeader layout changed");
 static_assert(sizeof(FontGlyphDef)      == 10, "FontGlyphDef layout changed");
+static_assert(sizeof(DlgOp)             == 8,  "DlgOp layout changed");
+static_assert(sizeof(DialogueHeader)    == 20, "DialogueHeader layout changed");
+static_assert(sizeof(DlgConvDef)        == 8,  "DlgConvDef layout changed");
+static_assert(sizeof(DlgSpeakerDef)     == 8,  "DlgSpeakerDef layout changed");
+static_assert(sizeof(DlgNodeDef)        == 24, "DlgNodeDef layout changed");
+static_assert(sizeof(DlgChoiceDef)      == 20, "DlgChoiceDef layout changed");
 static_assert(sizeof(SpawnDef)          == 12, "SpawnDef layout changed");
 static_assert(sizeof(SpawnBlobHeader)   == 4,  "SpawnBlobHeader layout changed");
 static_assert(sizeof(SoundBlobHeader)   == 8,  "SoundBlobHeader layout changed");

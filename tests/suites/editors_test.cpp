@@ -33,6 +33,7 @@
 #include "../../tools/phxstudio/projectdoc.h"
 #include "../../tools/phxstudio/components.h"
 #include "../../tools/phxstudio/spawnart.h"
+#include "../../tools/phxstudio/settings.h"
 
 #include <cstdio>
 #include <cstring>
@@ -560,6 +561,27 @@ PHX_TEST(pixeldoc_png_file_round_trip) {
     CHECK(PixelDoc::load_png("build/e_pixel.png", r, &err) && r.w == 24 && r.h == 10 && r.px == d.px && !r.dirty);
 }
 
+PHX_TEST(studio_settings_round_trip_and_environment) {
+    using phxstudio::StudioSettings;
+    StudioSettings s;
+    s.scale = 3; s.restore_session = false;
+    s.devkitarm = "/opt/dkp/devkitARM"; s.pspdev = "/opt/pspdev"; s.mgba = "/usr/bin/mgba-qt";
+    const StudioSettings r = StudioSettings::parse(s.to_text());
+    CHECK(r.scale == 3 && !r.restore_session && r.devkitarm == s.devkitarm && r.pspdev == s.pspdev && r.mgba == s.mgba &&
+          r.devkitpro.empty() && r.ppsspp.empty());
+    CHECK(StudioSettings::parse("# comment\r\nscale=99\r\nnonsense\r\n").scale == 8);   // clamped, CRLF-tolerant
+    CHECK(StudioSettings{}.env().empty() && s.env().size() == 3 && s.env()[0].first == "DEVKITARM");
+    StudioSettings e;
+    e.devkitpro = "/phx/test/devkitpro"; e.pspdev = "/phx/test/pspdev";
+    e.apply_env();
+    const char* dkp = std::getenv("DEVKITPRO");
+    const char* path = std::getenv("PATH");
+    CHECK(dkp && std::string(dkp) == "/phx/test/devkitpro" && path && std::string(path).find("/phx/test/pspdev/bin") != std::string::npos);
+    e.apply_env();                                                 // idempotent: PATH gains the bin once
+    const std::string p2 = std::getenv("PATH");
+    CHECK(p2.find("/phx/test/pspdev/bin") == p2.rfind("/phx/test/pspdev/bin"));
+}
+
 PHX_TEST(sprdoc_round_trips_through_the_bake) {
     SprDoc s;
     s.sheet = "e_sheet.png"; s.frame_w = 8; s.frame_h = 8;
@@ -904,7 +926,10 @@ PHX_TEST(project_launch_command_and_discovery) {
     CHECK(found.size() == 1 && found[0] == base + "/examples/a");
     CHECK(ProjectDoc::is_project_dir(base + "/examples/a") && !ProjectDoc::is_project_dir(base + "/examples/b"));
     const std::vector<ProjectLaunch> std_l = ProjectDoc::standard_launches();
-    CHECK(std_l.size() == 5 && std_l[0].windowed && std_l[0].command.find("play PROJECT=") != std::string::npos);
+    CHECK(std_l.size() == 11 && std_l[0].windowed && std_l[0].command.find("play PROJECT=") != std::string::npos &&
+          std_l[5].label == "Export for PC" && std_l[5].command.find("game-export PROJECT=") != std::string::npos &&
+          std_l[5].command.find("EXPORT=pc") != std::string::npos && std_l[8].label == "Measure budgets" &&
+          std_l[8].command.find("project-budget PROJECT=") != std::string::npos);
     CHECK(std_l[3].group == "console" && std_l[3].command.find("play-gba PROJECT=") != std::string::npos &&
           std_l[4].group == "console" && std_l[4].command.find("play-psp PROJECT=") != std::string::npos);
 }
@@ -920,7 +945,7 @@ PHX_TEST(map_editor_draws_spawns_as_their_prefab_sprites) {
     for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
         if (it->is_regular_file(ec)) files.push_back(fs::relative(it->path(), dir, ec).generic_string());
     const std::map<std::string, SpawnArt> art = resolve_spawn_art(dir, files);
-    CHECK(art.size() == 4 && art.count("player") && art.count("coin") && art.count("slime") && art.count("door"));
+    CHECK(art.size() == 5 && art.count("player") && art.count("coin") && art.count("slime") && art.count("door") && art.count("sign"));
     if (art.count("door")) CHECK(art.at("door").w == 16 && art.at("door").h == 16);   // a plain PNG: the whole image
     if (art.count("player")) {
         const SpawnArt& p = art.at("player");                // hero.sprdef: 16x16 frames, "idle" starts at 0
@@ -982,7 +1007,7 @@ PHX_TEST(new_project_template_is_complete_and_bakeable) {
     CHECK(create_project(dir, "Test Quest", &err));
     CHECK(!create_project(dir, "Test Quest", &err) && !err.empty());                                // refuses a non-empty folder
     ProjectDoc p;
-    CHECK(ProjectDoc::load(dir, p, &err) && p.name == "Test Quest" && p.launches.size() == 5 &&
+    CHECK(ProjectDoc::load(dir, p, &err) && p.name == "Test Quest" && p.launches.size() == 11 &&
           p.bundles.size() == 1 && p.bundles[0] == "build/test_quest.phxp");
     std::string main_cpp;
     {
@@ -1013,7 +1038,7 @@ PHX_TEST(new_project_template_is_complete_and_bakeable) {
         if (f) { char b[65536]; size_t n; while ((n = std::fread(b, 1, sizeof(b), f)) > 0) tmj.append(b, n); std::fclose(f); }
     }
     phxtool::TiledMap tm;
-    CHECK(phxtool::tiled_load(tmj, tm, &err) && tm.tileset == "tiles" && tm.layers.size() == 2 && tm.spawns.size() == 6);
+    CHECK(phxtool::tiled_load(tmj, tm, &err) && tm.tileset == "tiles" && tm.layers.size() == 2 && tm.spawns.size() == 7);
     {   // the prefab table names every spawn type the level places, and the map editor offers them
         std::string pj;
         FILE* f = std::fopen((dir + "/assets/prefabs.json").c_str(), "rb");
@@ -1021,7 +1046,8 @@ PHX_TEST(new_project_template_is_complete_and_bakeable) {
         phxtool::BinDoc pd;
         CHECK(phxtool::BinDoc::load(pj, pd));
         const std::vector<std::string> types = pd.name_column();
-        CHECK(types.size() == 4 && types[0] == "player" && types[1] == "coin" && types[2] == "slime" && types[3] == "door");
+        CHECK(types.size() == 5 && types[0] == "player" && types[1] == "coin" && types[2] == "slime" && types[3] == "door" &&
+              types[4] == "sign");
         // the game flow: title -> level1 (the map) -> end, with a game over that retries
         std::string fj;
         if (FILE* ff = std::fopen((dir + "/assets/flow.json").c_str(), "rb")) {
@@ -1056,6 +1082,10 @@ PHX_TEST(new_project_template_is_complete_and_bakeable) {
         CHECK(phxtool::load_fontdef(read_head(dir + "/assets/font.font", 1u << 20), dir + "/assets/font.font", fdef) &&
               fdef.proportional && fdef.image == "font.png" && phxtool::build_font(sw, dir + "/assets/font.font"));
         CHECK(kind_for("assets/font.font") == FileKind::Font && kind_for("x.fnt") == FileKind::Text);
+        phxtool::DlgDoc dd;                                // the sign's conversation (the Talk prefab names it)
+        CHECK(phxtool::dlg_from_json(read_head(dir + "/assets/dialogue.dlg", 1u << 20), dd) && dd.find_conv("sign") == 0 &&
+              !phxtool::dlg_has_errors(phxtool::dlg_validate(dd)) && phxtool::build_dialogue(sw, dir + "/assets/dialogue.dlg"));
+        CHECK(kind_for("assets/dialogue.dlg") == FileKind::Dialogue);
         phxtool::BinDoc fd;
         CHECK(phxtool::BinDoc::load(read_head(dir + "/assets/flow.json", 1u << 20), fd));
         size_t music = fd.fields.size();

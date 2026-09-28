@@ -314,8 +314,19 @@ Supported surfaces:
   `UI::text_width` / `glyph_advance` measure text, and `text()`, `button()` and the dialogue
   wrap all lay out with them. Each glyph is one sprite on every tier, proportional or not.
 - **HUD** — `bar()`, `image()`, `text_fmt()` for score/health/lives; cheap, per-frame.
-- **Dialogue** — typewriter reveal driven by `reveal_t`, fed from `phxbin` dialogue
-  tables; portrait via `image()`.
+- **Dialogue** — `UI::dialogue()` is the box: a typewriter reveal driven by `reveal_t`,
+  word-wrapped, with a portrait. `phx::DialogueRunner` (`phx/runtime/dialogue.h`) plays
+  conversations authored as data: a `.dlg` baked to a Dialogue asset.
+  - A conversation is a list of lines (speaker, text, `next`) and choices.
+  - `if` conditions skip a line or hide a choice. `do` effects set, add to or subtract from
+    variables. The game flow's counter totals are the variables, so `coins` is the coins
+    collected.
+  - A shows the rest of a line, then goes on. Up/Down and A pick a choice.
+  - The state is integer, so the same conversation reveals the same character on the same tick
+    on every tier.
+  - The flow plays conversations on "talk" screens (cutscenes) and when the player presses Up at
+    a `Talk` component. Phoenix Studio's dialogue editor plays them the same way; the dialogue
+    suite checks its simulator against the runner.
 
 GBA constraints baked in: glyphs are 8×8 tiles drawn as BG/OBJ; the UI batches into the
 same ≤128 OBJ budget and warns (via `RenderStats`) if a HUD-heavy frame would overflow.

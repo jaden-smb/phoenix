@@ -25,6 +25,7 @@
 #include "json.h"                  // tools/phxpack — the one JSON parser
 #include "synth.h"                 // tools/phxpack — the template's .sfx sounds and .song music
 #include "font.h"                  // tools/phxpack — the template's .font
+#include "dialogue.h"              // tools/phxpack — the template's .dlg
 #include "project.h"
 #include "pixeldoc.h"
 #include "../phxtmap/editor.h"     // TmapDoc (the template level)
@@ -242,6 +243,22 @@ public:
                            { "$DEVKITARM/bin/arm-none-eabi-g++" }, true },
             ProjectLaunch{ "PSP EBOOT", "console", mk + "-s play-psp PROJECT=\"$PHX_PROJECT\"",
                            "pspsdk -> build/psp/EBOOT.PBP, opened in PPSSPP if installed", { "psp-g++" }, true },
+            ProjectLaunch{ "Export for PC", "build", mk + "-s game-export PROJECT=\"$PHX_PROJECT\" EXPORT=pc",
+                           "A release build + its assets (+ DLLs on Windows) -> dist/<name>-<os>/ and a .zip for players",
+                           { "sdl2-config" }, false },
+            ProjectLaunch{ "Export for GBA", "console", mk + "-s game-export PROJECT=\"$PHX_PROJECT\" EXPORT=gba",
+                           "The size-gated ROM -> dist/<name>-gba/ and a .zip", { "$DEVKITARM/bin/arm-none-eabi-g++" }, false },
+            ProjectLaunch{ "Export for PSP", "console", mk + "-s game-export PROJECT=\"$PHX_PROJECT\" EXPORT=psp",
+                           "PSP/GAME/<NAME>/EBOOT.PBP -> dist/<name>-psp/ and a .zip", { "psp-g++" }, false },
+            ProjectLaunch{ "Measure budgets", "test", mk + "-s project-budget PROJECT=\"$PHX_PROJECT\"",
+                           "Run the game headlessly as PC, GBA and PSP: memory, entities, sprites -> the Budget view",
+                           {}, false },
+            ProjectLaunch{ "Profile", "test", "export PHX_TRACE=build/trace.csv; " + mk + "-s play PROJECT=\"$PHX_PROJECT\"",
+                           "Play, recording every frame's timings to build/trace.csv -> the Budget view's Profiler",
+                           { "sdl2-config" }, true },
+            ProjectLaunch{ "Debug", "test", mk + "-s game-debug PROJECT=\"$PHX_PROJECT\"",
+                           "Play under gdb: a crash prints every thread's backtrace (file:line links) in the log",
+                           { "sdl2-config", "gdb" }, true },
         };
     }
 };
@@ -441,6 +458,17 @@ inline PixelDoc door() {
     return d;
 }
 
+// The sign: one 16x16 frame (a Talk: walk up to it and press Up).
+inline PixelDoc sign() {
+    PixelDoc d = PixelDoc::blank(16, 16, 0);
+    const uint32_t wood = px_rgba(186, 132, 78), dark = px_rgba(110, 70, 38), ink = px_rgba(70, 44, 24);
+    d.rect(7, 9, 8, 15, dark, true);                       // the post
+    d.rect(1, 2, 14, 9, wood, true);                       // the board
+    d.rect(1, 2, 14, 9, dark, false);
+    d.line(3, 4, 11, 4, ink); d.line(3, 6, 9, 6, ink);     // some writing
+    return d;
+}
+
 // The font sheet the flow's screens and HUD write with: printable ASCII in 8x8 cells, 16 per row.
 inline PixelDoc font() {
     PixelDoc f = PixelDoc::blank(phxtool::kAsciiFontW, phxtool::kAsciiFontH, 0);
@@ -482,24 +510,27 @@ inline std::string flow_json(const std::string& name) {
 // The prefab table (a phxbin table, edited in the Studio's table editor): what each spawn type in
 // the level is made of. The engine's level loader reads these columns by name (phx/runtime/level.h),
 // and `components` attaches behaviours (phx/runtime/behaviours.h, or your own PHX_COMPONENTs) tuned
-// by `Component_field` columns. Collision: the player (layer 1) reports coins (2), slimes (4) and
-// the door (8).
+// by `Component_field` columns. Collision: the player (layer 1) reports coins (2), slimes (4), the
+// door (8) and the sign (16).
 inline const char* prefabs_json() {
     return "{ \"struct\":\"Prefab\",\n"
            "  \"fields\":[{\"name\":\"type\",\"type\":\"str16\"}, {\"name\":\"sprite\",\"type\":\"str16\"},"
            " {\"name\":\"w\",\"type\":\"u8\"}, {\"name\":\"h\",\"type\":\"u8\"}, {\"name\":\"body\",\"type\":\"u8\"},"
            " {\"name\":\"layer\",\"type\":\"u16\"}, {\"name\":\"mask\",\"type\":\"u16\"},"
            " {\"name\":\"components\",\"type\":\"str64\"}, {\"name\":\"Pickup_value\",\"type\":\"i16\"},"
-           " {\"name\":\"Pickup_sound\",\"type\":\"str16\"}, {\"name\":\"Patrol_range\",\"type\":\"i16\"}],\n"
+           " {\"name\":\"Pickup_sound\",\"type\":\"str16\"}, {\"name\":\"Patrol_range\",\"type\":\"i16\"},"
+           " {\"name\":\"Talk_conversation\",\"type\":\"str16\"}],\n"
            "  \"records\":[\n"
-           "    {\"type\":\"player\", \"sprite\":\"hero\", \"w\":10, \"h\":16, \"body\":1, \"layer\":1, \"mask\":14,"
+           "    {\"type\":\"player\", \"sprite\":\"hero\", \"w\":10, \"h\":16, \"body\":1, \"layer\":1, \"mask\":30,"
            " \"components\":\"PlatformerController CameraFollow\"},\n"
            "    {\"type\":\"coin\", \"sprite\":\"coin\", \"w\":8, \"h\":8, \"body\":0, \"layer\":2, \"mask\":1,"
            " \"components\":\"Pickup\", \"Pickup_value\":1, \"Pickup_sound\":\"coin\"},\n"
            "    {\"type\":\"slime\", \"sprite\":\"slime\", \"w\":12, \"h\":16, \"body\":1, \"layer\":4, \"mask\":1,"
            " \"components\":\"Patrol Hazard\", \"Patrol_range\":24},\n"
            "    {\"type\":\"door\", \"sprite\":\"door\", \"w\":12, \"h\":16, \"body\":0, \"layer\":8, \"mask\":1,"
-           " \"components\":\"Exit\"}\n"
+           " \"components\":\"Exit\"},\n"
+           "    {\"type\":\"sign\", \"sprite\":\"sign\", \"w\":12, \"h\":16, \"body\":0, \"layer\":16, \"mask\":1,"
+           " \"components\":\"Talk\", \"Talk_conversation\":\"sign\"}\n"
            "  ] }\n";
 }
 
@@ -548,6 +579,8 @@ inline phxtool::TmapDoc level() {
     d.spawns.back().name = "slime";
     d.add_spawn("door", 228, 128);              // the exit: the level ends here (Exit)
     d.spawns.back().name = "door";
+    d.add_spawn("sign", 64, 128);               // talks (Talk: Up plays assets/dialogue.dlg's "sign")
+    d.spawns.back().name = "sign";
     return d;
 }
 
@@ -619,6 +652,9 @@ inline bool create_project(const std::string& dir, const std::string& name, std:
     if (!slime_spr.save(dir + "/assets/slime.sprdef", &e)) return fail(e);
     PixelDoc door = tmpl::door();
     if (!door.save_png(dir + "/assets/door.png", &e)) return fail(e);
+    PixelDoc sign = tmpl::sign();
+    if (!sign.save_png(dir + "/assets/sign.png", &e)) return fail(e);
+    if (!write("assets/dialogue.dlg", phxtool::dlg_to_json(phxtool::dlg_starter()))) return fail("cannot write assets/dialogue.dlg");
     PixelDoc font = tmpl::font();
     if (!font.save_png(dir + "/assets/font.png", &e)) return fail(e);
     if (!write("assets/font.font", phxtool::fontdef_to_json(tmpl::font_def()))) return fail("cannot write assets/font.font");
@@ -637,7 +673,7 @@ inline bool create_project(const std::string& dir, const std::string& name, std:
         "A Phoenix game project (open it in Phoenix Studio: `phxstudio --project " + dir + "`).\n\n"
         "| Folder | What lives there |\n|---|---|\n"
         "| `src/` | the game's C++ (it uses the engine's public API, `phx/...`, only) |\n"
-        "| `assets/` | author files: sprites (`.png` + `.sprdef`), maps (`.tmj`), sound effects (`.sfx`), music (`.song`), sounds (`.wav`), fonts (`.font`), data tables (`.json`) |\n"
+        "| `assets/` | author files: sprites (`.png` + `.sprdef`), maps (`.tmj`), sound effects (`.sfx`), music (`.song`), sounds (`.wav`), fonts (`.font`), dialogue (`.dlg`), data tables (`.json`) |\n"
         "| `build/` | what the build makes: the game (`build/" + slug + "`) and its bundle (`build/" + slug + ".phxp`) |\n\n"
         "From the Phoenix checkout: `make play PROJECT=" + dir + "` builds, bakes and runs it;\n"
         "`make game` / `make game-assets` do one step each.\n";

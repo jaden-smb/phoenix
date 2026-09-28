@@ -49,7 +49,7 @@ make phxpack            # builds build/phxpack (and runs its CLI smoke)
 
 | Kind | Extensions | Becomes |
 |------|-----------|---------|
-| sources (baked directly) | `.png` `.ppm` → Texture · `.tmj` (Tiled) → Tilemap + Spawns · `.tmcsv` → Tilemap · `.sprdef`/sprite `.json` → Texture + Sprite · `.wav` → Sound | engine assets |
+| sources (baked directly) | `.png` `.ppm` → Texture · `.tmj` (Tiled) → Tilemap + Spawns · `.tmcsv` → Tilemap · `.sprdef`/sprite `.json` → Texture + Sprite · `.wav` / `.sfx` / `.song` → Sound · `.font` / `.fnt` → Texture + Font · `.dlg` → Dialogue | engine assets |
 | intermediates (merged) | `.phxspr` `.phxtmap` `.phxsnd` `.phxbin` `.phxp` | their contained assets, re-added by hash |
 
 Asset names default to the input file's stem (e.g. `hero.sprdef` → `"hero"`).

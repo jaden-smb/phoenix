@@ -234,3 +234,4 @@ extern "C" void phx_desktop_clipboard_set(const char* utf8) {
     std::snprintf(g_dev_clip, sizeof(g_dev_clip), "%s", utf8 ? utf8 : "");
 }
 extern "C" const char* phx_desktop_drop_path(void) { return ""; }
+extern "C" int phx_desktop_use_exe_dir(const char*) { return 0; }

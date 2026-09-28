@@ -20,7 +20,7 @@ namespace phxstudio {
 
 namespace pfs = std::filesystem;
 
-enum class FileKind : uint8_t { Dir, Code, Text, Image, Sprite, Map, Table, Sound, Sfx, Song, Font, Bundle, Other };
+enum class FileKind : uint8_t { Dir, Code, Text, Image, Sprite, Map, Table, Sound, Sfx, Song, Font, Dialogue, Bundle, Other };
 
 inline const char* kind_name(FileKind k) {
     switch (k) {
@@ -28,6 +28,7 @@ inline const char* kind_name(FileKind k) {
     case FileKind::Image: return "image";  case FileKind::Sprite: return "sprite"; case FileKind::Map: return "map";
     case FileKind::Table: return "table";  case FileKind::Sound: return "sound";   case FileKind::Bundle: return "bundle";
     case FileKind::Sfx: return "sound effect"; case FileKind::Song: return "song"; case FileKind::Font: return "font";
+    case FileKind::Dialogue: return "dialogue";
     default: return "file";
     }
 }
@@ -72,6 +73,7 @@ inline FileKind kind_for(const std::string& path, const std::string& json_head =
     if (e == ".sfx") return FileKind::Sfx;                         // tools/phxpack/synth.h
     if (e == ".song") return FileKind::Song;
     if (e == ".font") return FileKind::Font;                       // tools/phxpack/font.h
+    if (e == ".dlg") return FileKind::Dialogue;                    // tools/phxpack/dialogue.h
     if (e == ".fnt") return FileKind::Text;                        // a BMFont import: baked, edited as text
     if (e == ".phxp") return FileKind::Bundle;
     if (e == ".json") {

@@ -9,6 +9,7 @@ converters `make check` covers on every author file it finds, then the assembler
     .tmj                    -> phxtile
     .wav / .sfx / .song     -> phxsnd     (.sfx: a sound effect's parameters, .song: a tracker song)
     phxbin table .json      -> phxbin     (+ a generated header in build/gen/<name>.gen.h)
+    .dlg                    -> baked directly by phxpack (conversations: no other files to follow)
     any other .png          -> baked directly by phxpack (tilesets, portraits, UI art)
 
 Output: <project>/build/<slug>.phxp (tier 2, PC) or <slug>.t<N>.phxp for --tier 0/1. Asset names
@@ -121,6 +122,8 @@ def main():
             out = os.path.join(inter, stem + ".phxsnd")
             run([tool("phxsnd"), "--out", out, "--name", stem] + tier + [p])
             pack_inputs.append(out)
+        elif ext == ".dlg":
+            pack_inputs.append(p)
         elif ext == ".png":
             pngs.append(p)
 

@@ -15,6 +15,7 @@
 #include "editor.h"                        // phxtmap's document model (load/edit/save .tmj)
 #include "../../tools/phxentity/editor.h"     // phxentity's document model (phxbin JSON tables)
 #include "../../tools/phxstudio/model.h"      // Phoenix Studio's headless model
+#include "../../tools/phxstudio/budget.h"     // ... and its Budget view
 
 #include "fixtures/png_fixtures.h"
 #include "ascii_font.h"                  // tools/common: the font sheet the font tests bake
@@ -986,6 +987,75 @@ int main() {
         const std::string oob = "common lineHeight=10\npage id=0 file=\"p_font.png\"\nchar id=65 x=200 y=0 width=8 height=8 xadvance=8\n";
         write_file("build/p_oob.fnt", oob.data(), oob.size());
         check(!build_font(w, "build/p_oob.fnt"), "font: a glyph outside the sheet fails the bake");
+    }
+
+    // ---- the Studio's Budget view model (tools/phxstudio/budget.h) ----
+    {
+        using namespace phxstudio;
+        const char* kRep =
+            "{ \"budget\": 1, \"target\": \"gba\", \"title\": \"T\", \"frames\": 900, \"width\": 240, \"height\": 160,\n"
+            "  \"arena\": { \"used\": 150000, \"capacity\": 160000 },\n"
+            "  \"frame_scratch\": { \"peak\": 0, \"capacity\": 4096 },\n"
+            "  \"entities\": { \"peak\": 300, \"max\": 256 },\n"
+            "  \"sprites\": { \"peak\": 40, \"max\": 128, \"dropped\": 0 },\n"
+            "  \"tiles_peak\": 118, \"batches_peak\": 1,\n"
+            "  \"audio\": { \"sounds\": 3, \"peak\": 9000, \"channels\": 2 },\n"
+            "  \"log\": { \"warnings\": 2, \"errors\": 0 } }\n";
+        BudgetReport r;
+        check(BudgetReport::parse(kRep, r) && r.target == "gba" && r.frames == 900 && r.arena_used == 150000 &&
+              r.ents_max == 256 && r.sprites_max == 128 && r.warnings == 2, "budget: a report parses");
+        check(!BudgetReport::parse("{ \"nope\": 1 }", r) && !BudgetReport::parse("not json", r), "budget: other JSON is refused");
+        BudgetReport ok_rep;
+        BudgetReport::parse(kRep, ok_rep);
+        // a tier-0 bundle with a texture the GBA cannot hold as 4bpp tiles (more than 15 colours in a tile)
+        std::vector<uint32_t> px(16 * 16);
+        for (size_t i = 0; i < px.size(); ++i) px[i] = 0xFF000000u | uint32_t(i * 2654435761u & 0x00FFFFFFu);
+        phxtool::BundleWriter w0(0);
+        w0.add_texture("noisy", px.data(), 16, 16);
+        check(w0.write("build/p_budget.t0.phxp"), "budget: write a tier-0 bundle");
+        BundleDoc bd;
+        check(BundleDoc::load("build/p_budget.t0.phxp", bd), "budget: load it");
+        const BundleFacts f = bundle_facts(bd);
+        check(f.ok && f.not_tiles.size() == 1 && f.biggest.size() == 1 && f.texture_bytes > 0,
+              "budget: bundle facts (a texture kept RGBA8 on tier 0 is flagged)");
+        const std::vector<BudgetLine> lines = budget_lines("gba", ok_rep, f);
+        auto find = [&](const char* w) -> const BudgetLine* {
+            for (const BudgetLine& l : lines) if (l.what.find(w) == 0) return &l;
+            return nullptr;
+        };
+        const BudgetLine* mem = find("memory");
+        const BudgetLine* ents = find("entities");
+        const BudgetLine* spr = find("sprites");
+        const BudgetLine* log = find("engine warnings");
+        const BudgetLine* rom = find("ROM");
+        const BudgetLine* tiles = find("textures not in GBA");
+        check(mem && mem->level == Level::Close && ents && ents->level == Level::Over && spr && spr->level == Level::Ok &&
+              log && log->level == Level::Close && rom && rom->level == Level::Ok && tiles && tiles->used == 1,
+              "budget: verdicts (94% memory close, entities over, sprites ok, warnings flagged, ROM ok, tile warning)");
+        BudgetReport dropped = ok_rep;
+        dropped.sprites_dropped = 5;
+        const auto dl = budget_lines("gba", dropped, BundleFacts{});
+        bool over = false;
+        for (const BudgetLine& l : dl) if (l.what == "sprites per frame") over = l.level == Level::Over;
+        check(over, "budget: dropped sprites are over budget");
+        check(budget_lines("psp", BudgetReport{}, BundleFacts{}).empty(), "budget: nothing measured, no bundle: no lines");
+
+        // the profiler's trace (PHX_TRACE): work = update + render judged against the step
+        const char* kTrace =
+            "frame,update_us,render_us,present_us,frame_us,budget_us,steps,entities,sprites\n"
+            "0,0,0,0,0,16666,0,0,0\n"
+            "1,100,200,16300,16600,16666,1,5,10\n"
+            "2,9000,9000,100,18100,16666,1,6,12\n"
+            "3,300,400,15900,16600,16666,1,7,11\n"
+            "4,50,60,16";                                        // cut short by a crash: skipped
+        FrameTrace ft;
+        check(FrameTrace::parse(kTrace, ft) && ft.rows.size() == 3 && ft.rows[1].update == 9000 && ft.rows[2].ents == 7,
+              "profiler: a trace parses (frame 0 and a torn last line skipped)");
+        check(ft.over_budget() == 1 && ft.worst(1).size() == 1 && ft.worst(1)[0] == 1,
+              "profiler: one frame's work overran the step; it is the worst");
+        const FrameTrace::Stat us = ft.stat(&FrameTrace::Row::update);
+        check(us.max == 9000 && us.avg == (100 + 9000 + 300) / 3 && us.p50 == 300, "profiler: per-phase avg / p50 / max");
+        check(!FrameTrace::parse("not,a,trace\n1,2,3\n", ft), "profiler: other CSV is refused");
     }
 
     plat->shutdown();

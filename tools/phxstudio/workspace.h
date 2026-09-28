@@ -48,6 +48,7 @@ public:
     void new_font(Host& h, const std::string& dir);
     void new_sfx(Host& h, const std::string& dir);
     void new_song(Host& h, const std::string& dir);
+    void new_dialogue(Host& h, const std::string& dir);
     std::string selected_dir() const { return sel_dir_; }
 
     void poll_disk(Host& h);                   // external changes (call ~once a second)

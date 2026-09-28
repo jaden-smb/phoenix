@@ -114,6 +114,7 @@ auto map = ctx->res->tilemap("level1"_hash).unwrap();         // zero-copy view
 | Tilemap  | `uint16` index layers + optional per-layer Q16 parallax table + optional per-tile collision-flags table (solid/oneway/hazard, from Tiled tileset properties) | same       | same             |
 | Sound SFX| mono 16-bit PCM **resampled to the 18157 Hz device rate at bake** | mono 16-bit PCM @ source rate | mono 16-bit PCM @ source rate |
 | Music    | (same PCM path as SFX today)         | same                      | same             |
+| Dialogue | conversations: lines, choices, conditions and effects as index tables + a string table (`DialogueHeader` …, read in place; every index checked at load) | same | same |
 | Font     | a glyph table (`FontBlobHeader` + `FontGlyphDef`: each character's rect, offset, advance; read in place) over its atlas, a separate Texture asset that encodes like any texture | same | same |
 
 `phxpack --target 0|1|2` chooses the encoder (`tools/phxpack/tex_encode.h` mirrors the

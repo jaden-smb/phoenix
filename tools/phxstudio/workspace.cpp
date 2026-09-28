@@ -5,6 +5,7 @@
 #include "../phxentity/editor.h"
 #include "font.h"                  // tools/phxpack: New font
 #include "synth.h"                 // tools/phxpack: New sound effect / New song
+#include "dialogue.h"              // tools/phxpack: New dialogue
 #include "ascii_font.h"            // tools/common: the new font's starting glyphs
 
 #include <algorithm>
@@ -532,6 +533,7 @@ void Workspace::explorer_context(Host& h) {
     items.push_back(MenuItem{ "New font here...", "", true, false, false, kIconFileImage });
     items.push_back(MenuItem{ "New sound effect here...", "", true, false, false, kIconFileSound });
     items.push_back(MenuItem{ "New song here...", "", true, false, false, kIconFileSound });
+    items.push_back(MenuItem{ "New dialogue here...", "", true, false, false, kIconFileCode });
     items.push_back(MenuItem{ "New file here...", "", true, false, false, kIconFileCode });
     items.push_back(MenuItem::sep());
     items.push_back(MenuItem{ "Copy path", "", true, false, false, kIconCopy });
@@ -552,8 +554,9 @@ void Workspace::explorer_context(Host& h) {
     case 7: new_font(h, dir); break;
     case 8: new_sfx(h, dir); break;
     case 9: new_song(h, dir); break;
-    case 10: new_code(h, dir); break;
-    case 12: phx_desktop_clipboard_set(ctx_path_.c_str()); h.toast("copied " + ctx_path_); break;
+    case 10: new_dialogue(h, dir); break;
+    case 11: new_code(h, dir); break;
+    case 13: phx_desktop_clipboard_set(ctx_path_.c_str()); h.toast("copied " + ctx_path_); break;
     default: break;
     }
 }
@@ -588,6 +591,7 @@ void Workspace::draw_welcome(Host& h, const Rect& r) {
         { "New font", kIconFileImage, "A .font over a glyph sheet PNG (starts as a 5x7 ASCII font)", 5 },
         { "New sound effect", kIconFileSound, "A .sfx: a jump, coin, laser... from presets", 6 },
         { "New song", kIconFileSound, "A .song: a small tracker for the game's music", 7 },
+        { "New dialogue", kIconFileCode, "A .dlg: conversations with choices (Talk NPCs, cutscenes)", 8 },
         { "New code file", kIconFileCode, "C++, Markdown, a script...", 4 },
     };
     for (const Item& it : create) {
@@ -597,7 +601,7 @@ void Workspace::draw_welcome(Host& h, const Rect& r) {
             if (it.what == 0) new_sprite(h, dir); else if (it.what == 1) new_map(h, dir);
             else if (it.what == 2) new_table(h, dir); else if (it.what == 3) new_image(h, dir);
             else if (it.what == 5) new_font(h, dir); else if (it.what == 6) new_sfx(h, dir);
-            else if (it.what == 7) new_song(h, dir); else new_code(h, dir);
+            else if (it.what == 7) new_song(h, dir); else if (it.what == 8) new_dialogue(h, dir); else new_code(h, dir);
         }
         yy += 16;
     }
@@ -872,6 +876,33 @@ void Workspace::new_song(Host& h, const std::string& dir0) {
             open(h, p);
             h.file_saved(p);
             h.toast("created " + rel(h, p) + " - the flow table's music column plays it", Toast::Good);
+            return false;
+        }
+        return true;
+    });
+}
+
+void Workspace::new_dialogue(Host& h, const std::string& dir0) {
+    struct St { std::string name = "dialogue", dir; std::string err; };
+    auto st = std::make_shared<St>();
+    st->dir = dir0;
+    h.modal("New dialogue", 340, 118, [this, &h, st](Gui& g, Rect body) {
+        Form f(g, body);
+        g.text_field(g.id("nd-name"), f.row("name"), st->name, "e.g. dialogue");
+        g.text_field(g.id("nd-dir"), f.row("folder"), st->dir, "(repo root)");
+        const std::string stem = clean_stem(st->name);
+        f.note("The game flow plays assets/dialogue.dlg (a talk screen, a Talk component).", g.th.faint);
+        if (!st->err.empty()) f.note(st->err, g.th.bad);
+        const int b = f.buttons("Create", !stem.empty());
+        if (b < 0) return false;
+        if (b > 0) {
+            const std::string p = join_path(h.root(), join_path(st->dir, stem + ".dlg"));
+            if (!create_text(h, p, phxtool::dlg_to_json(phxtool::dlg_starter()), st->err)) return true;
+            refresh_tree();
+            tree.reveal(rel(h, p));
+            open(h, p);
+            h.file_saved(p);
+            h.toast("created " + rel(h, p), Toast::Good);
             return false;
         }
         return true;

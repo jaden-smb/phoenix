@@ -37,6 +37,23 @@ struct FontView {
     const FontGlyphDef* glyphs      = nullptr;
 };
 
+// A baked dialogue (bundle.h: DialogueHeader + its sections), read in place. Every index was
+// bounds-checked at load: a node's next/choices/ops and a string offset always land inside.
+struct DialogueData {
+    const DlgConvDef*    convs = nullptr;    uint16_t conv_count = 0;
+    const DlgSpeakerDef* speakers = nullptr; uint16_t speaker_count = 0;
+    const DlgNodeDef*    nodes = nullptr;    uint16_t node_count = 0;
+    const DlgChoiceDef*  choices = nullptr;  uint16_t choice_count = 0;
+    const DlgOp*         ops = nullptr;      uint16_t op_count = 0;
+    const char*          strings = nullptr;  uint32_t strings_size = 0;
+    const char* str(uint32_t off) const { return off < strings_size ? strings + off : ""; }
+    // The conversation named `name`, or -1.
+    int32_t find(NameHash name) const {
+        for (uint16_t i = 0; i < conv_count; ++i) if (convs[i].name == name) return i;
+        return -1;
+    }
+};
+
 struct TilemapView {
     const uint16_t* indices = nullptr;
     uint16_t        width   = 0;     // in tiles
@@ -190,6 +207,7 @@ public:
     Result<TilemapView> tilemap(NameHash);
     Result<SpriteView>  sprite(NameHash);
     Result<FontView>    font(NameHash);
+    Result<DialogueData> dialogue(NameHash);
     Result<SpawnsView>  spawns(NameHash);
     Result<SoundDataView> sound(NameHash);
     Result<BlobView>    blob(NameHash);

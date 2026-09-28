@@ -289,6 +289,48 @@ Result<FontView> ResourceCache::font(NameHash name) {
     return Result<FontView>::good(v);
 }
 
+Result<DialogueData> ResourceCache::dialogue(NameHash name) {
+    const TocEntry* e = find(name, AssetType::Dialogue);
+    if (!e) return Result<DialogueData>::fail(Status::NotFound);
+    const uint8_t* p = resolve(e);
+    if (!p) return Result<DialogueData>::fail(Status::IoError);
+    if (e->usize < sizeof(DialogueHeader)) return Result<DialogueData>::fail(Status::Corrupt);
+    DialogueHeader h;
+    std::memcpy(&h, p, sizeof(h));
+    if (h.magic != kDialogueMagic) return Result<DialogueData>::fail(Status::Corrupt);
+    uint64_t at = sizeof(DialogueHeader);
+    DialogueData d;
+    d.convs    = reinterpret_cast<const DlgConvDef*>(p + at);    at += uint64_t(h.conv_count) * sizeof(DlgConvDef);
+    d.speakers = reinterpret_cast<const DlgSpeakerDef*>(p + at); at += uint64_t(h.speaker_count) * sizeof(DlgSpeakerDef);
+    d.nodes    = reinterpret_cast<const DlgNodeDef*>(p + at);    at += uint64_t(h.node_count) * sizeof(DlgNodeDef);
+    d.choices  = reinterpret_cast<const DlgChoiceDef*>(p + at);  at += uint64_t(h.choice_count) * sizeof(DlgChoiceDef);
+    d.ops      = reinterpret_cast<const DlgOp*>(p + at);         at += uint64_t(h.op_count) * sizeof(DlgOp);
+    d.strings  = reinterpret_cast<const char*>(p + at);          at += h.strings_size;
+    if (at > e->usize) return Result<DialogueData>::fail(Status::Corrupt);
+    d.conv_count = h.conv_count; d.speaker_count = h.speaker_count; d.node_count = h.node_count;
+    d.choice_count = h.choice_count; d.op_count = h.op_count; d.strings_size = h.strings_size;
+    // every index inside its section (a hand-edited or truncated asset never drives a bad read)
+    auto next_ok = [&](uint16_t n) { return n == kDlgEnd || n < d.node_count; };
+    for (uint16_t i = 0; i < d.conv_count; ++i)
+        if (d.convs[i].first_node >= d.node_count && d.convs[i].node_count) return Result<DialogueData>::fail(Status::Corrupt);
+    for (uint16_t i = 0; i < d.node_count; ++i) {
+        const DlgNodeDef& n = d.nodes[i];
+        if (!next_ok(n.next) || (n.speaker != kDlgNoSpeaker && n.speaker >= d.speaker_count) ||
+            uint32_t(n.first_choice) + n.choice_count > d.choice_count || uint32_t(n.first_op) + n.op_count > d.op_count ||
+            n.text >= d.strings_size)
+            return Result<DialogueData>::fail(Status::Corrupt);
+    }
+    for (uint16_t i = 0; i < d.choice_count; ++i) {
+        const DlgChoiceDef& c = d.choices[i];
+        if (!next_ok(c.next) || uint32_t(c.first_op) + c.op_count > d.op_count || c.text >= d.strings_size)
+            return Result<DialogueData>::fail(Status::Corrupt);
+    }
+    for (uint16_t i = 0; i < d.speaker_count; ++i)
+        if (d.speakers[i].name >= d.strings_size) return Result<DialogueData>::fail(Status::Corrupt);
+    if (d.strings_size && d.strings[d.strings_size - 1] != 0) return Result<DialogueData>::fail(Status::Corrupt);
+    return Result<DialogueData>::good(d);
+}
+
 Result<SpawnsView> ResourceCache::spawns(NameHash name) {
     const TocEntry* e = find(name, AssetType::Spawns);
     if (!e) return Result<SpawnsView>::fail(Status::NotFound);

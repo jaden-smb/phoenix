@@ -139,7 +139,7 @@ APP_SRC := engine/core/src/assert.cpp \
            engine/runtime/src/game_main.cpp
 
 # The smoke binary: the loop + its own main.
-SMOKE_SRC := $(APP_SRC) engine/audio/src/mixer.cpp engine/runtime/src/component_schema.cpp \
+SMOKE_SRC := $(APP_SRC) engine/audio/src/mixer.cpp engine/runtime/src/component_schema.cpp engine/runtime/src/budget.cpp \
              engine/runtime/src/devtools.cpp tests/suites/smoke_app.cpp
 SMOKE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(SMOKE_SRC))
 
@@ -471,10 +471,18 @@ BEHAV     := $(BUILD)/phx_behaviours
 
 # The flow suite: the game flow (phx/runtime/flow.h) — screens, levels, lives, pause, HUD — from data.
 FLOW_SRC := $(APP_SRC) engine/resource/src/cache.cpp engine/runtime/src/level.cpp \
-            engine/runtime/src/behaviours.cpp engine/runtime/src/flow.cpp engine/audio/src/mixer.cpp \
+            engine/runtime/src/behaviours.cpp engine/runtime/src/flow.cpp engine/runtime/src/dialogue.cpp engine/audio/src/mixer.cpp \
             tests/suites/flow_test.cpp
 FLOW_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(FLOW_SRC))
 FLOW     := $(BUILD)/phx_flow
+
+# The dialogue suite: .dlg -> Dialogue asset -> DialogueRunner (phx/runtime/dialogue.h), the Studio's
+# simulator in lockstep with it, and a flow with a cutscene + a Talk NPC played from data.
+DIALOGUE_SRC := $(APP_SRC) engine/resource/src/cache.cpp engine/runtime/src/level.cpp \
+                engine/runtime/src/behaviours.cpp engine/runtime/src/flow.cpp engine/runtime/src/dialogue.cpp \
+                engine/audio/src/mixer.cpp tests/suites/dialogue_test.cpp
+DIALOGUE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(DIALOGUE_SRC))
+DIALOGUE     := $(BUILD)/phx_dialogue
 
 EDITORS_SRC := $(APP_SRC) tests/suites/editors_test.cpp
 EDITORS_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(EDITORS_SRC))
@@ -505,16 +513,16 @@ GU_SRC := $(patsubst engine/render/src/soft/soft_renderer.cpp,engine/render/src/
             $(patsubst tests/suites/render_test.cpp,tests/suites/gu_test.cpp,$(RENDER_SRC)))
 GU_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(GU_SRC))
 
-.PHONY: studio test smoke render ppu gu playable physics level behaviours flow anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl miracle miracle-headless miracle-test gba-miracle-ppu size-gate-miracle tinyllm tinyllm-sdl tinyllm-test tinyllm-fixture tinyllm-model gba-tinyllm-ppu size-gate-tinyllm sdl gl sdl-verify gl-verify audio-verify game-audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline editors tools game game-check game-assets play game-src-check game-console-check game-gba play-gba game-psp play-psp project-check project-run project-schema phxnew size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
+.PHONY: project-budget game-export game-debug studio test smoke render ppu gu playable physics level behaviours flow dialogue anim scene ui platformer emberwing emberwing-ppu emberwing-sdl emberwing-gl miracle miracle-headless miracle-test gba-miracle-ppu size-gate-miracle tinyllm tinyllm-sdl tinyllm-test tinyllm-fixture tinyllm-model gba-tinyllm-ppu size-gate-tinyllm sdl gl sdl-verify gl-verify audio-verify game-audio-verify gba gba-ppu gba-platformer gba-platformer-ppu gba-emberwing gba-emberwing-ppu psp psp-platformer psp-emberwing psp-gu psp-audio gba-audio audio texcache png sprite tiled resource phxpack pipeline editors tools game game-check game-assets play game-src-check game-console-check game-gba play-gba game-psp play-psp project-check project-run project-schema phxnew size-gate check build clean depcheck version docs dist dist-win dist-gba dist-psp
 
 # Run everything: unit + loop smoke + render(soft+ppu+gu) + gameplay slices + capstones + audio + resource + dep gate.
-check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test audio texcache png sprite tiled resource phxpack pipeline editors level behaviours flow tools project-check depcheck
+check: test smoke render ppu gu playable physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test audio texcache png sprite tiled resource phxpack pipeline editors level behaviours flow dialogue tools project-check depcheck
 
 # --- M7 release gates --------------------------------------------------------------------------
 # Determinism gate: the SAME suites under scalar=float (pc) and scalar=fixed16 (gba_sim) must
 # print identical outcomes AND render the byte-identical frame. Cheap to run: the per-tier
 # object dirs mean the second tier is mostly relinks. This is a named release gate (docs/09 §5).
-DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test level behaviours flow
+DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test level behaviours flow dialogue
 determinism:
 	@echo "determinism gate: pc (scalar=float) vs gba_sim (scalar=fixed16)"
 	@$(MAKE) -s $(DET_SUITES) TIER=pc      | grep -aE "PASS|FAIL" > $(BUILD)/det-pc.log
@@ -739,8 +747,8 @@ GAME_HAS_MAIN = $(shell grep -lE '^[[:space:]]*int[[:space:]]+main[[:space:]]*[$
 PUBLIC_INCLUDES := $(addprefix -I,$(wildcard engine/*/include))
 GAME_ENGINE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) \
                    engine/resource/src/cache.cpp engine/audio/src/mixer.cpp engine/audio/src/stream.cpp \
-                   engine/runtime/src/level.cpp engine/runtime/src/behaviours.cpp engine/runtime/src/flow.cpp \
-                   engine/runtime/src/component_schema.cpp engine/runtime/src/devtools.cpp)
+                   engine/runtime/src/level.cpp engine/runtime/src/behaviours.cpp engine/runtime/src/flow.cpp engine/runtime/src/dialogue.cpp \
+                   engine/runtime/src/component_schema.cpp engine/runtime/src/devtools.cpp engine/runtime/src/budget.cpp)
 GAME_ENTRY_OBJ  := $(HOSTOBJ)/engine/runtime/src/entry/desktop_main.o
 GAME_NULL_OBJ   := $(HOSTOBJ)/engine/platform/src/null/null_platform.o
 
@@ -766,6 +774,13 @@ game-assets: game-check $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXPACK)
 play: game game-assets
 	@echo "running $(GAME_NAME) (from $(GAME_DIR))"
 	@cd "$(GAME_DIR)" && "./build/$(GAME_NAME)"
+
+# Run a project under gdb (a debug build: asserts on, -g): when it crashes, every thread's backtrace
+# lands in the log with file:line (Phoenix Studio's Debug launch; its Run view links them).
+game-debug: game game-assets
+	@command -v gdb >/dev/null 2>&1 || { echo "gdb not found: install it (MSYS2: pacman -S mingw-w64-ucrt-x86_64-gdb; Linux: your package manager)"; exit 1; }
+	@echo "debugging $(GAME_NAME) under gdb (a crash prints its backtrace here)"
+	@cd "$(GAME_DIR)" && gdb -q -batch -ex run -ex "thread apply all bt" --args "./build/$(GAME_NAME)"
 
 # --- GUI editors (SDL) ----------------------------------------------------------------------
 # phxtmap / phxentity: Phoenix Studio's own map and table panels (tools/phxstudio/ed_map.cpp,
@@ -797,6 +812,7 @@ entity: $(ENTITY_OBJ) $(SDL_PLATFORM_OBJ)
 STUDIO_TOOL_SRC := tools/phxstudio/main.cpp tools/phxstudio/workspace.cpp tools/phxstudio/ed_code.cpp \
                    tools/phxstudio/ed_sprite.cpp tools/phxstudio/ed_map.cpp tools/phxstudio/ed_table.cpp \
                    tools/phxstudio/ed_sfx.cpp tools/phxstudio/ed_song.cpp tools/phxstudio/ed_font.cpp \
+                   tools/phxstudio/ed_dialogue.cpp \
                    tools/phxstudio/winjob.cpp
 STUDIO_ENGINE   := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) engine/audio/src/mixer.cpp
 STUDIO_OBJ      := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(STUDIO_ENGINE) $(STUDIO_TOOL_SRC))
@@ -1347,7 +1363,7 @@ GAME_CONSOLE_ENGINE := engine/core/src/assert.cpp engine/core/src/fixed.cpp engi
                        engine/render/src/renderer.cpp engine/physics/src/physics.cpp \
                        engine/anim/src/anim.cpp engine/scene/src/scene.cpp engine/ui/src/ui.cpp \
                        engine/runtime/src/app.cpp engine/runtime/src/game_main.cpp engine/runtime/src/level.cpp \
-                       engine/runtime/src/behaviours.cpp engine/runtime/src/flow.cpp \
+                       engine/runtime/src/behaviours.cpp engine/runtime/src/flow.cpp engine/runtime/src/dialogue.cpp \
                        engine/resource/src/cache.cpp engine/audio/src/mixer.cpp
 GAME_GBA_OBJ := $(patsubst %.cpp,$(BUILD)/gba/%.o,$(GAME_CONSOLE_ENGINE) engine/render/src/gba/gba_ppu.cpp \
                   engine/platform/src/gba/gba_platform.cpp engine/runtime/src/entry/gba_main.cpp)
@@ -1441,15 +1457,52 @@ GAME_RENDER ?= soft
 PROJRUN_OBJ = $(if $(filter ppu,$(GAME_RENDER)),$(patsubst %/soft/soft_renderer.o,%/gba/gba_ppu.o,$(GAME_ENGINE_OBJ)),$(GAME_ENGINE_OBJ)) \
               $(PROJRUN_ENTRY) $(GAME_NULL_OBJ)
 PROJRUN_DIR = $(GAME_OUT)/run-$(PROFILE)
+# BUDGET_REPORT=file: also write the run's budget report there (phx/runtime/budget.h), and report
+# (not fail on) engine warnings: a budget run measures, project-check judges.
+BUDGET_REPORT ?=
 project-run: game-console-check $(PROJRUN_OBJ)
 	@mkdir -p "$(PROJRUN_DIR)/build"
 	@$(CXX) $(CXXFLAGS) $(PUBLIC_INCLUDES) -I"$(GAME_DIR)/src" -I"$(GAME_OUT)/gen" $(GAME_SRC) $(PROJRUN_OBJ) \
 	  -o "$(PROJRUN_DIR)/game"
 	@cp "$(GAME_OUT)/$(GAME_NAME).$(BUNDLE)" "$(PROJRUN_DIR)/build/$(GAME_NAME).phxp"
-	@cd "$(PROJRUN_DIR)" && PHX_MAX_FRAMES=$(PROJCHECK_FRAMES) PHX_PROFILE=$(PROFILE) PHX_EXPECT_AUDIO=1 ./game > run.log 2>&1; \
-	  rc=$$?; if [ $$rc -ne 0 ] || grep -qE '\]\[(ERROR|WARN)' run.log; then \
+	@cd "$(PROJRUN_DIR)" && PHX_MAX_FRAMES=$(PROJCHECK_FRAMES) PHX_PROFILE=$(PROFILE) \
+	  $(if $(BUDGET_REPORT),PHX_BUDGET_REPORT="$(BUDGET_REPORT)" PHX_BUDGET_FRAMES=$(PROJCHECK_FRAMES),PHX_EXPECT_AUDIO=1) \
+	  ./game > run.log 2>&1; \
+	  rc=$$?; if [ $$rc -ne 0 ] || { [ -z "$(BUDGET_REPORT)" ] && grep -qE '\]\[(ERROR|WARN)' run.log; }; then \
 	    cat run.log; echo "  FAIL $(GAME_NAME) on the $(PROFILE) profile (exit $$rc)"; exit 1; fi
 	@echo "  ok   $(GAME_NAME): $(PROJCHECK_FRAMES) frames on the $(PROFILE) profile ($(TIER), $(GAME_RENDER), .$(BUNDLE))"
+
+# A project, EXPORTED for players: a folder + zip under <project>/dist/ that runs without the engine
+# (tools/common/export_project.py).
+#   make game-export PROJECT=path [EXPORT=pc|gba|psp]
+#   pc:  a release build (PHX_BUILD_RELEASE) + its bundle + the DLLs it loads (Windows) + README
+#   gba: the size-gated ROM (devkitARM)          psp: PSP/GAME/<NAME>/EBOOT.PBP (pspsdk)
+EXPORT ?= pc
+game-export: game-check
+	@case "$(EXPORT)" in \
+	  pc)  $(MAKE) --no-print-directory game-assets PROJECT="$(GAME_DIR)" TIER=2 && \
+	       $(MAKE) --no-print-directory game PROJECT="$(GAME_DIR)" RELEASE=1 ;; \
+	  gba) $(MAKE) --no-print-directory game-gba PROJECT="$(GAME_DIR)" ;; \
+	  psp) $(MAKE) --no-print-directory game-psp PROJECT="$(GAME_DIR)" ;; \
+	  *)   echo "EXPORT must be pc, gba or psp"; exit 1 ;; \
+	esac
+	@python3 tools/common/export_project.py "$(GAME_DIR)" --target $(EXPORT) --name "$(GAME_NAME)"
+
+# A project's BUDGETS, measured: bake it for every tier, then run it headlessly under each target's
+# profile (PC, GBA on the PPU model in fixed point, PSP) for BUDGET_FRAMES frames of scripted play,
+# writing <project>/build/budget-<target>.json (phx/runtime/budget.h: arena, frame scratch,
+# entities, sprites per frame, sounds, warnings) for Phoenix Studio's Budget view.
+#   make project-budget PROJECT=path [BUDGET_FRAMES=1800]
+BUDGET_FRAMES ?= 1800
+project-budget: game-console-check $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) $(PHXPACK)
+	@for t in 2 0 1; do $(MAKE) -s --no-print-directory game-assets PROJECT="$(GAME_DIR)" TIER=$$t >/dev/null || exit 1; done
+	@$(MAKE) -s --no-print-directory project-run PROJECT="$(GAME_DIR)" PROFILE=desktop BUNDLE=phxp \
+	  PROJCHECK_FRAMES=$(BUDGET_FRAMES) BUDGET_REPORT="$(GAME_OUT)/budget-desktop.json"
+	@$(MAKE) -s --no-print-directory project-run PROJECT="$(GAME_DIR)" PROFILE=gba BUNDLE=t0.phxp TIER=gba_sim GAME_RENDER=ppu \
+	  PROJCHECK_FRAMES=$(BUDGET_FRAMES) BUDGET_REPORT="$(GAME_OUT)/budget-gba.json"
+	@$(MAKE) -s --no-print-directory project-run PROJECT="$(GAME_DIR)" PROFILE=psp BUNDLE=t1.phxp \
+	  PROJCHECK_FRAMES=$(BUDGET_FRAMES) BUDGET_REPORT="$(GAME_OUT)/budget-psp.json"
+	@echo "budget: $(GAME_OUT)/budget-desktop.json, budget-gba.json, budget-psp.json (Phoenix Studio: Budget)"
 
 resource: $(RESOURCE)
 	@./$(RESOURCE)
@@ -1521,6 +1574,9 @@ behaviours: $(BEHAV)
 
 flow: $(FLOW)
 	@./$(FLOW)
+
+dialogue: $(DIALOGUE)
+	@./$(DIALOGUE)
 
 # Studio / editor document models + widget kit, headless (no SDL, no display).
 editors: $(EDITORS)
@@ -1764,6 +1820,10 @@ $(FLOW): $(FLOW_OBJ)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(FLOW_OBJ) -o $@
 
+$(DIALOGUE): $(DIALOGUE_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(DIALOGUE_OBJ) -o $@
+
 $(HOSTOBJ)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
@@ -1779,7 +1839,7 @@ $(TIERSTAMP):
 HOST_BINS := $(BIN) $(SMOKE) $(RENDER) $(PPU) $(GU) $(PLAYABLE) $(PHYSICS) $(ANIM) $(SCENE) \
              $(UI) $(PLATFORMER) $(PLATAPP) $(EMBERWING) $(EMBERWING_PPU) $(EWAPP) \
              $(AUDIO) $(TEXCACHE) $(PNG) $(SPRITE) $(TILED) \
-             $(RESOURCE) $(PIPELINE) $(LEVEL) $(BEHAV) $(FLOW) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) \
+             $(RESOURCE) $(PIPELINE) $(LEVEL) $(BEHAV) $(FLOW) $(DIALOGUE) $(PHXPACK) $(PHXSPRITE) $(PHXTILE) $(PHXSND) $(PHXBIN) \
              $(PLATBAKE) $(EWBAKE)
 $(HOST_BINS): $(TIERSTAMP)
 

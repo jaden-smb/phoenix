@@ -16,6 +16,7 @@ changed, and the engine's own sources are out of reach. Engine maintainers start
 | **Editor** (Ctrl+1 in a project; Ctrl+3 with `--engine-dev`) | An **Explorer** over the project (the whole checkout with `--engine-dev`) and tabs of open documents, each in its own editor: **Code**, **Sprite / Pixel**, **Tilemap**, **Data table**. New sprites, maps, tables, images and code files from templates. **Quick open** (Ctrl+P) finds any project file or engine API header. |
 | **Overview** (`--engine-dev` only) | The module dependency graph as built (layers from `tools/common/depcheck.py`, edges from the real `#include`s). Click a module for its summary, headers, backends, size and edges. The GBA / PSP / PC capability tiers from `caps.h` sit below. |
 | **Assets** (Ctrl+2) | The project's bundles (every `.phxp` with `--engine-dev`), validated the way `ResourceCache::mount()` validates it. Live previews: textures re-encoded per render tier, animated sprite clips, tilemaps through the real parallax path, sounds on the real mixer, spawn tables and blob hex. **Edit source** opens the file an asset was baked from, and **bake** rebakes the project and reloads. |
+| **Budget** (Ctrl+4, projects) | **budgets** / **profiler** at the top right switch the view. **Profiler**: the frame timings of a **Profile** run (Play with `PHX_TRACE=build/trace.csv`). It shows a graph of every frame's update, render and present time against the step budget, and how many frames did more **work** (update + render) than the step; present is left out because it holds the vsync wait. It also shows avg / p50 / p95 / max per phase and the frames with the most work (hover the graph for any frame). **Budgets**: what the game **uses** on each target against what the target **allows**, measured. **Measure budgets** runs `make project-budget`: it bakes every tier, then runs the game headlessly as PC, GBA (fixed-point, on the PPU model, at the GBA budget) and PSP for 30 s of scripted play. Each target gets a card: memory (the arena), peak entities, sprites per frame (and any the target dropped), frame scratch, the engine warnings and errors logged, and the bundle (the GBA: ROM size against the 32 MB cartridge, and textures that won't store as 4bpp tiles), plus the biggest assets. Green is fine, yellow is over 90%, red is over. It flags reports older than the assets or code. The GBA memory figure is measured on the host, whose 64-bit pointers make it a little higher than on the console. |
 | **Run** (Ctrl+3 in a project) | The project's launches from its `phxproject.json`: Play, Build, Bake, tests, console builds. With `--engine-dev`: the engine's games, editors, gates (`check`, `determinism`, `sanitize`, ...), every `make check` suite as a pass/fail chip, and its console builds. Output streams into a colour-coded console. **Compiler errors are links**: click one to open the file at that line. |
 
 Everything the editors write is an ordinary **author file** that the bake reads: `.png`, `.sprdef`
@@ -79,7 +80,21 @@ make game-gba    PROJECT=path/to/project        # devkitARM -> build/<name>.gba 
 make play-gba    PROJECT=path/to/project        # ... and open it in mGBA if installed (MGBA=path overrides)
 make game-psp    PROJECT=path/to/project        # pspsdk -> build/psp/EBOOT.PBP
 make play-psp    PROJECT=path/to/project        # ... and open it in PPSSPP if installed (PPSSPP=path overrides)
+make game-export PROJECT=path/to/project [EXPORT=pc|gba|psp]   # a folder + .zip for players under dist/
+make project-budget PROJECT=path/to/project [BUDGET_FRAMES=1800]  # measure it as PC, GBA and PSP (the Budget view)
 ```
+
+**Exporting** (Run > **Export for PC / GBA / PSP**, or `make game-export`) makes what you hand to
+players, in `<project>/dist/`:
+- **PC**: a release build (`PHX_BUILD_RELEASE`), `build/<name>.phxp` beside it, and on Windows
+  every DLL it loads from the toolchain (SDL2 and the C++ runtime, found by following the
+  import tables), plus a README with the controls. The game finds its bundle from its own
+  folder, so it runs when double-clicked, from any working directory, without MSYS2 on the
+  PATH. On Linux it needs the system's SDL2.
+- **GBA**: the size-gated `.gba`.
+- **PSP**: `PSP/GAME/<NAME>/EBOOT.PBP`, ready to copy to a memory stick.
+
+Each also comes as a `.zip` (`tools/common/export_project.py`).
 
 **One game, every target.** A game names its `Game` once with `PHX_GAME(MyGame);`
 (`phx/runtime/main.h`) and has no `main()`: the engine supplies one per target
@@ -162,12 +177,15 @@ properties.
 | `Checkpoint` | touched by the player: becomes the respawn point | `sound` |
 | `Exit` | touched by the player: `behaviours.exit()` returns its `target` (load that level) | `target` |
 | `CameraFollow` | the camera follows it, inside the level | `offset_y` |
+| `Talk` | touched by the player: Up plays its conversation (the flow shows "UP: TALK"); with `auto_start`, the first touch does | `conversation` `auto_start` |
 
 "The player" is the first `PlatformerController`. A contact needs the two colliders' layers
 and masks to match (the player's `mask` includes the others' `layer`s). Game code reads
 `behaviours.counter("coins"_hash)`, `behaviours.hits()` and `behaviours.exit()`.
 
-**GBA ROM** and **PSP EBOOT** in a new project's Run view are `play-gba` and `play-psp`. They
+**GBA ROM** and **PSP EBOOT** in a new project's Run view are `play-gba` and `play-psp`. A project
+made before a launch existed (Export, Measure budgets) still gets it: the Studio adds any standard
+launch the project's `phxproject.json` lacks. They
 need devkitARM (`$DEVKITARM`) and pspsdk (`psp-g++` on `PATH`). `make phxnew` builds `phxnew DIR
 [NAME]`, which is File > New project on the command line. `make project-check` (part of `make
 check`) creates the template, bakes it for all three tiers, and runs it headlessly under each
@@ -195,7 +213,7 @@ Options:
 
 ```bash
 ./build/phxstudio --project mygame --open src/main.cpp --open assets/hero.sprdef   # open documents
-./build/phxstudio --tab assets                  # start on another view (editor|assets|run; overview: --engine-dev)
+./build/phxstudio --tab assets                  # start on another view (editor|assets|run|budget; overview: --engine-dev)
 ./build/phxstudio --fresh                       # don't reopen the last session's documents
 ./build/phxstudio --scale 3                     # UI scale (window pixels per canvas pixel)
 ./build/phxstudio --engine-dev --tab assets --bundle build/emberwing.phxp --asset sprite:hero
@@ -245,6 +263,7 @@ view and click **edit source** (or double-click the asset) to open the file it w
 | tilemap, spawns | the `.tmj` in the map editor |
 | blob | the phxbin table `.json` |
 | font | its `.font` in the [font editor](#font-editor) (a `.fnt` opens as text) |
+| dialogue | its `.dlg` in the [dialogue editor](#dialogue-editor) |
 | sound | its `.sfx` in the [sound effect editor](#sound-effect-editor) or its `.song` in the [song editor](#song-editor) (a `.wav` has no editor; the Studio names it) |
 
 The bake names each asset after its file (`hero` is `assets/hero.sprdef`), which is how the
@@ -430,6 +449,36 @@ shows the prefab vocabulary (the `type`/`name` column), duplicate names, and the
   from those columns. A placed spawn's property `Enemy_range` overrides the value for that one
   spawn. Code reads it with `world.get<Enemy>(entity)`.
 
+### Dialogue editor
+
+A `.dlg` holds a game's conversations. The game flow plays those in `assets/dialogue.dlg`.
+- A **talk screen** (a flow row of kind `talk`, with a `dialogue` column naming the
+  conversation) is a cutscene; the flow moves on when it ends.
+- A **`Talk` component** (a prefab with `Talk` in `components` and a `Talk_conversation`
+  column) plays its conversation when the player touches it and presses Up. The level waits
+  meanwhile.
+
+The template's sign is a `Talk`.
+
+- **Conversations** (left): add, duplicate, delete, rename. **Speakers**: a name, plus a
+  portrait (a texture asset, drawn left of the text).
+- **Lines** (middle): one card per line, with these fields:
+  - its **id**, the **speaker** and the **text**;
+  - **->** where it goes next: the following line, `end`, or a line id;
+  - **if**, a condition that *skips* the line when false: `coins >= 5`, `key`, `!key`;
+  - **do**, effects applied when it shows: `key = 1`, `coins -= 5`, `met`.
+
+  **+ choice** adds choices, each with its text, where it leads, an `if` that *hides* it and a
+  `do` for when it is picked. Lines move up and down, and renaming an id updates everything
+  that points at it.
+- **Play** (right) runs the conversation with the game's rules. **Variables** lists every
+  variable the file reads or writes: set their starting values and watch them change. In the
+  game they are the flow's totals, so `coins` is the coins collected, and a `do` on them
+  changes the HUD. **Problems** lists what the bake would refuse (an unknown `next`, a bad
+  expression, a duplicate id) and warnings (a line nothing reaches).
+
+**New dialogue** (Explorer or welcome page) starts from the sign's conversation.
+
 ### Font editor
 
 A `.font` is a font over a grid sheet PNG: `assets/font.font` is the font the template's title
@@ -569,6 +618,28 @@ make studio BUILD=build/asan EXTRA_CXXFLAGS="-fsanitize=address,undefined -fno-o
 ASAN_OPTIONS=detect_leaks=0 ./build/asan/phxstudio --project mygame --script "open assets/level.tmj; drag 250 150 300 170; key ctrl+z; quit"
 ```
 
+## Settings
+
+**File > Settings** has two tabs:
+- **Studio**: the UI scale (Ctrl+= / Ctrl+- also change it, and the Studio remembers it), whether
+  to reopen the last session's documents, and where the console SDKs and emulators live
+  (`DEVKITPRO`, `DEVKITARM`, `PSPDEV`, mGBA, PPSSPP). Those become environment variables for every
+  launch, and `$PSPDEV/bin` is added to PATH, so the GBA and PSP launches work without editing a
+  shell profile. They are kept in `~/.config/phxstudio/settings.txt` (on Windows without `HOME`,
+  `%APPDATA%\phxstudio\settings.txt`).
+- **Project** (with a project open): its name, description, source, assets and bundle folders,
+  and its **launches**. For each launch you can set the label, group, whether it opens a window,
+  the shell command, the blurb, and the tools it needs. Saving writes `phxproject.json` and
+  refreshes the Run view. A standard launch you delete comes back, because the Studio adds any
+  standard launch a project lacks.
+
+## Debugging a crash
+
+**Debug** in the Run view (`make game-debug PROJECT=...`) plays the game under **gdb**. The
+default host build keeps asserts on and `-g`. When the game crashes, every thread's backtrace
+prints in the log, and the `file:line` frames are links. Install gdb first: MSYS2
+`pacman -S mingw-w64-ucrt-x86_64-gdb`, or your Linux package manager.
+
 ## Developer tools in the running game
 
 A game built with `make game` / Play (the engine's desktop entry) has developer tools built in
@@ -577,9 +648,13 @@ A game built with `make game` / Play (the engine's desktop entry) has developer 
 | Key | Does |
 |---|---|
 | F1 | show / hide the overlay |
+| F2 | outline every collider (coloured by layer) and the level's collision tiles (grey solid, blue one-way, red hazard) |
+| F3 | slow motion: full speed, 1/2, 1/4 |
 | F5 | pause / resume the simulation (drawing goes on) |
 | F6 | advance exactly one fixed step |
 | F7 / F8, click | select the previous / next entity, or the one under the pointer |
+| F9 | halt on warnings: pause the moment the engine logs a warning or an error |
+| PgUp / PgDn, - / = | move the inspector's cursor over the entity's values, and change the one under it (Shift: x10; a bool toggles), live |
 
 The overlay is a live **inspector** of the selected entity:
 - its prefab type and spawn;
@@ -587,8 +662,10 @@ The overlay is a live **inspector** of the selected entity:
 - every reflected component it has (the stock behaviours and your `PHX_COMPONENT`s), with its
   fields' current values.
 
-The entity's collider is outlined in the world. The overlay is drawn over the game's frame and
-uses none of its sprites or budgets.
+The entity's collider is outlined in the world. A **frame-time graph** (bottom right) plots each
+frame's work (update + render) against the step budget. The overlay is drawn over the game's frame
+and uses none of its sprites or budgets. `PHX_TRACE=file` records every frame's timings as CSV
+(what **Profile** does).
 
 ## Notes & limits
 

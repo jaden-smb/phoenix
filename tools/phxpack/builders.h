@@ -12,7 +12,8 @@
 #include "wav.h"
 #include "json.h"
 #include "synth.h"
-#include "font.h"          // .font / .fnt -> a glyph table (also Phoenix Studio's font editor)         // .sfx / .song -> PCM (the SFX generator and the tracker)
+#include "font.h"
+#include "dialogue.h"      // .dlg -> a Dialogue asset (also Phoenix Studio's dialogue editor)          // .font / .fnt -> a glyph table (also Phoenix Studio's font editor)         // .sfx / .song -> PCM (the SFX generator and the tracker)
 #include "analyze.h"       // tools/phxviz — offline visualization-track analysis (build_viz)
 
 #include <cctype>
@@ -480,6 +481,26 @@ inline bool build_font(BundleWriter& w, const std::string& in, const std::string
     return true;
 }
 
+// ---- dialogue: a .dlg -> a Dialogue asset (conversations, choices, conditions) ----
+inline bool build_dialogue(BundleWriter& w, const std::string& in, const std::string& name = "") {
+    std::vector<uint8_t> bytes;
+    if (!read_file(in, bytes)) { std::fprintf(stderr, "phx: cannot read '%s'\n", in.c_str()); return false; }
+    DlgDoc doc;
+    DlgCompiled c;
+    std::string err;
+    if (!dlg_from_json(std::string(bytes.begin(), bytes.end()), doc, &err) || !dlg_compile(doc, c, &err)) {
+        std::fprintf(stderr, "phx: bad dialogue '%s': %s\n", in.c_str(), err.c_str());
+        return false;
+    }
+    for (const DlgProblem& p : dlg_validate(doc))
+        if (!p.error) std::fprintf(stderr, "phx: dialogue '%s': warning: %s\n", in.c_str(), p.what.c_str());
+    const std::string nm = name.empty() ? stem(in) : name;
+    w.add_dialogue(nm, c.blob());
+    std::printf("  + dialog  %-12s %u conversations, %u lines, %u choices  (%s)\n", nm.c_str(), unsigned(c.convs.size()),
+                unsigned(c.nodes.size()), unsigned(c.choices.size()), in.c_str());
+    return true;
+}
+
 // ---- data tables: JSON -> flat binary + generated accessor header (phxbin) ----
 // Schema: { "struct": "<Name>", "fields": [ {"name","type"} ... ], "records": [ {field: value} ] }.
 // Field types: u8/i8/u16/i16/u32/i32/f32, plus str8/str16/str32/str64 — an inline NUL-terminated
@@ -626,6 +647,7 @@ inline bool build_from_source(BundleWriter& w, const std::string& in) {
     if (ends_with(in, ".song"))   return build_song(w, in);
     if (ends_with(in, ".sprdef")) return build_sprite(w, in);
     if (ends_with(in, ".font") || ends_with(in, ".fnt")) return build_font(w, in);
+    if (ends_with(in, ".dlg"))    return build_dialogue(w, in);
     std::fprintf(stderr, "phx: unknown source type '%s'\n", in.c_str());
     return false;
 }

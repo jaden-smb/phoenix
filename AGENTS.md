@@ -38,7 +38,8 @@ contributor guide.
 `make check` runs many separate suite binaries (`smoke render ppu gu playable physics anim scene ui
 platformer emberwing emberwing-ppu audio texcache png sprite tiled resource phxpack pipeline tools`,
 plus `level`: the engine level loader over baked map/prefabs/sprite, `behaviours`: the stock
-behaviours played from prefab data alone, `flow`: the data-driven game flow, and `project-check`: the Studio's
+behaviours played from prefab data alone, `flow`: the data-driven game flow, `dialogue`: .dlg conversations (the
+runtime vs the Studio's simulator, a talk screen, a Talk NPC), and `project-check`: the Studio's
 new-project template baked and run headlessly on the PC, GBA and PSP profiles). Each is its own Make
 target that builds and runs one binary — e.g. `make physics`, `make ppu`, `make pipeline`. **To run
 a single suite, run its target.** There is no per-test-case filter; the unit harness
@@ -82,6 +83,7 @@ make sdl / make gl              # build the windowed SW / OpenGL example (opens 
 make sdl-verify / make gl-verify  # render through real SDL/GL, read back, diff vs software golden
 make audio-verify               # open a real SDL audio device, confirm non-silent mixer output
 make tmap / make entity         # the GUI editors (phxtmap tilemap / phxentity table editor)
+# CMake: -DPHX_USE_SDL=ON also builds phxstudio / phxtmap / phxentity (phxnew always)
 ```
 
 `PHX_MAX_FRAMES=N ./build/<binary>` gives any windowed binary a bounded, clean-exit smoke run.
@@ -100,6 +102,9 @@ make win-verify           # run the Windows unit-suite exe under Wine (native or
 make size-gate            # GBA ROM/IWRAM/EWRAM budget gate (MVP gate; CI job)
 make gba-save / psp-save  # console save-path smoke ROM/EBOOT (verify on mGBA / PPSSPP)
 make game-gba | game-psp PROJECT=path   # a game project (PHX_GAME, no main()) -> .gba / EBOOT.PBP
+make game-export PROJECT=path EXPORT=pc|gba|psp   # -> <project>/dist/<name>-<target>/ + .zip for players
+make project-budget PROJECT=path        # run it headlessly as PC/GBA/PSP -> build/budget-*.json (Studio: Budget)
+make game-debug PROJECT=path            # play it under gdb: a crash prints every thread's backtrace
 ```
 
 Game projects (folders with `phxproject.json`) name their Game with `PHX_GAME` (`phx/runtime/main.h`);

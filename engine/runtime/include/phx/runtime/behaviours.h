@@ -15,6 +15,8 @@
 //   | Checkpoint           | touched by the player: becomes the respawn point                    |
 //   | Exit                 | touched by the player: exit() reports its `target` (a level name)   |
 //   | CameraFollow         | the camera centres on it, kept inside the level                     |
+//   | Talk                 | touched by the player + Up (or at once, auto_start): talk() reports |
+//   |                      | its `conversation` (the game flow plays it: phx/runtime/dialogue.h)  |
 //
 // "The player" is the first PlatformerController. Collisions come from the entities' colliders
 // (the prefab's layer/mask: give the player a mask that includes the others' layers).
@@ -82,6 +84,10 @@ struct Hazard     { NameHash sound = 0; };  // played when the player is sent ba
 struct Checkpoint { NameHash sound = 0; };
 struct Exit       { NameHash target = 0; }; // the level to go to (the game loads it)
 struct CameraFollow { int16_t offset_y = 0; };
+struct Talk {
+    NameHash conversation = 0;             // a conversation in the game's dialogue (.dlg)
+    bool     auto_start   = false;         // start on the first touch, without Up (then as usual)
+};
 
 class Behaviours {
 public:
@@ -108,6 +114,11 @@ public:
     // The target of the Exit the player touched (0: none yet). clear_exit() after acting on it.
     NameHash    exit() const { return exit_; }
     void        clear_exit() { exit_ = 0; }
+    // The conversation of the Talk the player asked to hear (0: none). clear_talk() after starting
+    // it. can_talk(): the player is touching a Talk this step (a game shows "Up: talk").
+    NameHash    talk() const { return talk_; }
+    void        clear_talk() { talk_ = 0; }
+    bool        can_talk() const { return can_talk_; }
     // This step's contacts (from the physics step), for the game's own rules.
     Span<const Hit> hits() const { return Span<const Hit>{ hits_, hit_count_ }; }
     // Send the player back to the respawn point (what a Hazard does).
@@ -129,6 +140,8 @@ private:
     vec2            respawn_{};
     Camera2D        camera_{};
     NameHash        exit_ = 0;
+    NameHash        talk_ = 0;
+    bool            can_talk_ = false;
     Hit             hits_[kMaxHits];
     uint32_t        hit_count_ = 0;
     NameHash        counter_names_[kMaxCounters]{};

@@ -35,6 +35,8 @@ Status GameFlow::start(App& app, ResourceCache& res, const FlowOptions& opt) {
     if (!load_font(app.render(), res, opt.font, font_))
         PHX_LOG_WARN("flow: no font (assets/font.font or font.png): screens show no text");
     for (uint32_t i = 0; i < kMaxTotals; ++i) { total_names_[i] = 0; total_vals_[i] = 0; }
+    vars_.f = this;
+    dlg_.load(app.render(), res, opt.dialogue);           // optional: a game may have no dialogue
     enter(app, 0);
     return Status::Ok;
 }
@@ -77,6 +79,12 @@ void GameFlow::enter(App& app, int32_t row) {
             const int32_t vol = table_.get_int(row, "music_vol"_hash, 60);
             app.audio().play_music(to_sound(s.unwrap()), float(vol < 0 ? 0 : vol > 100 ? 100 : vol) / 100.0f);
         }
+    dlg_.stop();
+    if (table_.get_hash(row, "kind"_hash) == "talk"_hash) {   // a cutscene: its conversation
+        const NameHash c = table_.get_hash(row, "dialogue"_hash);
+        dlg_.start(c ? c : table_.get_hash(row, "name"_hash), vars_);
+        return;
+    }
     if (table_.get_hash(row, "kind"_hash) != "level"_hash) return;
     const NameHash map = table_.get_hash(row, "map"_hash);
     LevelOptions lo;
@@ -102,6 +110,12 @@ void GameFlow::update(App& app, scalar dt) {
     if (row_ < 0) return;
     ++ticks_;
     const InputState& in = app.input();
+    if (dlg_.active()) {                                    // a conversation: everything else waits
+        dlg_.update(in, vars_);
+        if (!dlg_.active() && !in_level_ && table_.get_hash(row_, "kind"_hash) == "talk"_hash)
+            enter(app, next_row(row_));
+        return;
+    }
     if (!in_level_) {                                       // a title / end screen (or a failed level)
         if (ticks_ > 10 && (in.just(Button::Start) || in.just(Button::A))) {
             if (table_.get_hash(row_, "kind"_hash) == "end"_hash) {
@@ -121,6 +135,11 @@ void GameFlow::update(App& app, scalar dt) {
         leave_level(app, false);
         const int32_t over = find_row("gameover"_hash);
         enter(app, over >= 0 ? over : row_);                // no game-over screen: try again
+        return;
+    }
+    if (const NameHash t = beh_.talk()) {                   // the player talked to a Talk
+        beh_.clear_talk();
+        dlg_.start(t, vars_);
         return;
     }
     if (const NameHash ex = beh_.exit()) {
@@ -180,12 +199,16 @@ void GameFlow::render(App& app) {
             }
             if (ticks_ < 120) text_lines(app, table_.get_str(row_, "text"_hash), h / 3, true);   // the banner
             if (paused_) ui_.text(at((w - UI::text_width(font_, "PAUSED")) / 2, h / 2 - 4), font_, "PAUSED", kText);
+            if (beh_.can_talk() && !dlg_.active() && !paused_)
+                ui_.text(at((w - UI::text_width(font_, "UP: TALK")) / 2, h - 12), font_, "UP: TALK", kDim);
         } else {
-            text_lines(app, table_.get_str(row_, "text"_hash), h / 3, true);
-            if ((ticks_ / 30) % 2 == 0)
+            const bool talk = table_.get_hash(row_, "kind"_hash) == "talk"_hash;
+            text_lines(app, table_.get_str(row_, "text"_hash), talk ? 16 : h / 3, true);
+            if (!dlg_.active() && (ticks_ / 30) % 2 == 0)
                 ui_.text(at((w - UI::text_width(font_, "PRESS START")) / 2, h - 24), font_, "PRESS START", kDim);
         }
     }
+    if (dlg_.active()) dlg_.render(ui_, font_, w, h, cam.pos);
     ui_.end();
     r.end_frame();
 }

@@ -148,6 +148,11 @@ public:
         push(name, phx::AssetType::Sprite, std::move(blob));
     }
 
+    // A compiled dialogue (tools/phxpack/dialogue.h DlgCompiled::blob()).
+    void add_dialogue(const std::string& name, std::vector<uint8_t> blob) {
+        push(name, phx::AssetType::Dialogue, std::move(blob));
+    }
+
     // A font's glyph table over a (separately added) atlas texture (bundle.h FontBlobHeader).
     void add_font(const std::string& name, const phx::FontBlobHeader& hdr, const std::vector<phx::FontGlyphDef>& glyphs) {
         phx::FontBlobHeader h = hdr;

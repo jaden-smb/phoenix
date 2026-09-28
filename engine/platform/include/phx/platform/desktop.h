@@ -125,6 +125,12 @@ void        phx_desktop_clipboard_set(const char* utf8);
 /* The file path of the most recent PHX_DEV_DROP_FILE ("" if none). */
 const char* phx_desktop_drop_path(void);
 
+/* A shipped game's folder: when `rel` (a path relative to the running executable's folder) exists
+ * there but not in the working directory, make the executable's folder the working directory, so a
+ * game started by double-clicking it, or from anywhere else, still finds its build/<name>.phxp.
+ * Returns 1 when it changed the working directory. The null backend does nothing (0). */
+int phx_desktop_use_exe_dir(const char* rel);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

@@ -41,6 +41,8 @@ phoenix/
 │   │   │                         target profiles, run_game: the engine-owned entry for game projects)
 │   │   │                         · audio.h (GameAudio = App::audio(): mixer + queue + the seam's
 │   │   │                         device, started on first play; headless mix where there's none)
+│   │   │                         · dialogue.h (DialogueRunner: .dlg conversations — lines, choices,
+│   │   │                         if/do on variables — in a typewriter box; Talk NPCs, talk screens)
 │   │   │                         · flow.h (GameFlow: the flow table's screens — title, levels,
 │   │   │                         lives, pause, HUD, end — run from data)
 │   │   │                         · font.h (load_font: a baked Font asset -> a ui BitmapFont,
@@ -53,7 +55,8 @@ phoenix/
 │   │   │                         from the prefab table; SpriteRenderer, PrefabRef, draw_sprites)
 │   │   └── src/                  app.cpp (boot -> loop w/ per-phase profiling -> teardown) ·
 │   │                             game_main.cpp (profile -> Config) · component_schema.cpp (host:
-│   │                             reflected components -> JSON for the Studio) · level.cpp (linked by projects
+│   │                             reflected components -> JSON for the Studio) · budget.cpp (host: a run's
+│   │                             App::peaks() vs the target's limits -> JSON, `make project-budget`) · level.cpp (linked by projects
 │   │                             + the level suite) · entry/{desktop,gba,psp}_main.cpp
 │   │                             (each target's main(), linked only by `make game|game-gba|game-psp`)
 │   ├── render/                   One 2D-intent API; backends per render tier; LRU texture cache
@@ -82,6 +85,7 @@ phoenix/
 │   │                             builders.h = the ONE shared bake path (DEFLATE/PNG/JSON/Tiled/WAV importers);
 │   │                             synth.h = .sfx (sound-effect generator) / .song (tracker) -> PCM;
 │   │                             font.h = .font grid sheets / BMFont .fnt -> a Font glyph table;
+│   │                             dialogue.h = .dlg conversations: validate, compile, simulate;
 │   │                             bundle_writer.h does the per-target encode; bundle_reader.h merges.
 │   ├── phxsprite/                CONVERTER: PNG + .sprdef/json sidecar -> .phxspr (atlas + animation clips);
 │   │                             also fonts: .font / .fnt -> the sheet + a Font asset
@@ -96,7 +100,10 @@ phoenix/
 │   ├── phxentity/                GUI data-table editor: the Studio's table panel (ed_table.cpp) standalone.
 │   │                             editor.h = the headlessly-tested phxbin JSON document model
 │   ├── phxstudio/                Phoenix Studio — THE editor: Explorer + tabs of documents in the CODE,
-│   │                             SPRITE/PIXEL, TILEMAP, DATA-TABLE, SOUND-EFFECT, SONG and FONT editors
+│   │                             SPRITE/PIXEL, TILEMAP, DATA-TABLE, SOUND-EFFECT, SONG, FONT and DIALOGUE editors;
+│   │                             budget.h (the Budget + Profiler views' model) · settings.h (File >
+│   │                             Settings: scale, session, SDK/emulator paths -> launch env) ·
+│   │                             CMakeLists.txt (phxnew; phxstudio/phxtmap/phxentity with PHX_USE_SDL)
 │   │                             (ed_*.cpp; workspace.cpp),
 │   │                             plus the module graph + caps tiers, the bundle browser with per-render-
 │   │                             tier previews, and one-click games/editors/gates/suites/console builds.
@@ -116,6 +123,8 @@ phoenix/
 │                                 ascii_font.h (full-ASCII 5x7 tool font) · twk.h (+ twk_geom.h,
 │                                 twk_icons.h: the tool widget kit) · png_write.h (PNG encoder) ·
 │                                 bake_project.py (a game project's assets -> one .phxp, `make game-assets`) ·
+│                                 export_project.py (a built project -> dist/<name>-<target>/ + .zip,
+│                                 `make game-export`: the release exe + bundle + DLLs, the ROM, the EBOOT) ·
 │                                 doxyfilter.py (promotes '//' header comments for `make docs`)
 │
 ├── examples/

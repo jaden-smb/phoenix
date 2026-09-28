@@ -546,7 +546,7 @@ inline void scan_names_in(const std::string& dir, const std::vector<std::string>
             std::string text;
             if (read_text(p.string(), text)) book.add_literals(text);
         }
-        if (ext == ".png" || ext == ".wav" || ext == ".sfx" || ext == ".song" || ext == ".font" || ext == ".fnt" || ext == ".tmj" || ext == ".json" || ext == ".sprdef")
+        if (ext == ".png" || ext == ".wav" || ext == ".sfx" || ext == ".song" || ext == ".font" || ext == ".fnt" || ext == ".dlg" || ext == ".tmj" || ext == ".json" || ext == ".sprdef")
             book.add(p.stem().string());
         const std::string n = p.filename().string();
         if (n.size() > 13 && n.compare(n.size() - 13, 13, ".manifest.txt") == 0) {
@@ -574,7 +574,7 @@ inline void scan_names(const std::string& root, NameBook& book) {
                 std::string text;
                 if (read_text(p.string(), text)) book.add_literals(text);
             }
-            if (ext == ".png" || ext == ".wav" || ext == ".sfx" || ext == ".song" || ext == ".font" || ext == ".fnt" || ext == ".tmj" || ext == ".json" || ext == ".sprdef")
+            if (ext == ".png" || ext == ".wav" || ext == ".sfx" || ext == ".song" || ext == ".font" || ext == ".fnt" || ext == ".dlg" || ext == ".tmj" || ext == ".json" || ext == ".sprdef")
                 book.add(p.stem().string());
         }
     }
@@ -602,6 +602,7 @@ inline const char* type_name(phx::AssetType t) {
     case phx::AssetType::Blob:    return "blob";
     case phx::AssetType::Sprite:  return "sprite";
     case phx::AssetType::Spawns:  return "spawns";
+    case phx::AssetType::Dialogue: return "dialogue";
     }
     return "?";
 }
@@ -880,6 +881,39 @@ inline int font_text_width(const FontInfo& f, const std::string& s) {
     return w;
 }
 
+// A Dialogue asset's tables (bundle.h DialogueHeader ...), bounds-checked like the runtime's load.
+struct DialogueInfo {
+    phx::DialogueHeader hdr{};
+    std::vector<phx::DlgConvDef> convs;
+    std::vector<phx::DlgNodeDef> nodes;
+    std::vector<phx::DlgChoiceDef> choices;
+    std::string strings;
+    const char* str(uint32_t off) const { return off < strings.size() ? strings.c_str() + off : ""; }
+};
+inline bool view_dialogue(const AssetEntry& a, DialogueInfo& v) {
+    if (a.type != phx::AssetType::Dialogue || a.data.size() < sizeof(phx::DialogueHeader)) return false;
+    v = DialogueInfo{};
+    std::memcpy(&v.hdr, a.data.data(), sizeof(v.hdr));
+    if (v.hdr.magic != phx::kDialogueMagic) return false;
+    size_t at = sizeof(v.hdr);
+    const size_t need = at + v.hdr.conv_count * sizeof(phx::DlgConvDef) + v.hdr.speaker_count * sizeof(phx::DlgSpeakerDef) +
+                        v.hdr.node_count * sizeof(phx::DlgNodeDef) + v.hdr.choice_count * sizeof(phx::DlgChoiceDef) +
+                        v.hdr.op_count * sizeof(phx::DlgOp) + v.hdr.strings_size;
+    if (need > a.data.size()) return false;
+    auto take = [&](auto& vec, size_t n) {
+        vec.resize(n);
+        if (n) std::memcpy(vec.data(), a.data.data() + at, n * sizeof(vec[0]));
+        at += n * sizeof(vec[0]);
+    };
+    take(v.convs, v.hdr.conv_count);
+    at += v.hdr.speaker_count * sizeof(phx::DlgSpeakerDef);
+    take(v.nodes, v.hdr.node_count);
+    take(v.choices, v.hdr.choice_count);
+    at += v.hdr.op_count * sizeof(phx::DlgOp);
+    v.strings.assign(reinterpret_cast<const char*>(a.data.data() + at), v.hdr.strings_size);
+    return true;
+}
+
 struct SoundInfo {
     const int16_t* samples = nullptr;
     uint32_t frames = 0, rate = 0;
@@ -910,6 +944,13 @@ inline bool view_spawns(const AssetEntry& a, std::vector<phx::SpawnDef>& out) {
 inline std::string describe(const AssetEntry& a) {
     char b[96];
     switch (a.type) {
+    case phx::AssetType::Dialogue: {
+        DialogueInfo d;
+        if (!view_dialogue(a, d)) return "malformed dialogue";
+        std::snprintf(b, sizeof(b), "%u conversation%s, %u lines, %u choices", unsigned(d.convs.size()),
+                      d.convs.size() == 1 ? "" : "s", unsigned(d.nodes.size()), unsigned(d.choices.size()));
+        return b;
+    }
     case phx::AssetType::Font: {
         FontInfo f;
         if (!view_font(a, f)) return "malformed font";

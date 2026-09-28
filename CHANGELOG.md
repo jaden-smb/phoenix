@@ -8,6 +8,73 @@ All notable changes to Phoenix are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Debugger, profiler and settings.**
+  - **In-game developer tools** (`phx/runtime/devtools.h`) gain:
+    - **F2**: every collider, plus the level's collision tiles.
+    - **F3**: slow motion (1/2, 1/4).
+    - **F9**: halt on warnings (pause when the engine logs a warning or an error).
+    - **Live editing**: PgUp/PgDn and -/= change the selected entity's Transform, velocity and
+      reflected fields while the game runs.
+    - A **frame-time graph** of each frame's work against the step budget.
+    - `PHX_TRACE=file`: a per-frame timing CSV. `DevHooks` gains `stop`, called at teardown.
+  - **Phoenix Studio**:
+    - A **Profiler**, in the Budget view: a Profile launch records `build/trace.csv`. The view
+      shows a per-frame update/render/present graph, frames whose work overran the step, per-phase
+      avg/p50/p95/max and the heaviest frames.
+    - A **Debug** launch (`make game-debug`): plays under gdb and prints every thread's backtrace
+      on a crash.
+    - **File > Settings**:
+      - Studio tab: UI scale (Ctrl+= / Ctrl+- are remembered too), session restore, and the SDK
+        and emulator paths, which become the launches' environment.
+      - Project tab: `phxproject.json`'s name, folders, bundles and launches, edited in place.
+  - **CMake builds the Studio:** `phxnew` always, and `phxstudio` / `phxtmap` / `phxentity` with
+    `-DPHX_USE_SDL=ON`. A new `cmake-studio` CI job builds them on Linux.
+- **Exporting games.** `make game-export PROJECT=... EXPORT=pc|gba|psp` builds a project and
+  packages it for players in `<project>/dist/<name>-<target>/` plus a `.zip`
+  (`tools/common/export_project.py`).
+  - **PC:** a release build, its bundle, and, on Windows, every DLL it loads from the toolchain
+    (SDL2 and the C++ runtime, found by walking the import tables), with a README.
+  - **GBA:** the size-gated ROM.
+  - **PSP:** `PSP/GAME/<NAME>/EBOOT.PBP`.
+  - A new desktop seam call, `phx_desktop_use_exe_dir()`, lets an exported game find
+    `build/<name>.phxp` from its own folder, so it runs when double-clicked or started from any
+    directory. This was verified with only the Windows system PATH.
+  - Phoenix Studio adds **Export for PC / GBA / PSP** launches.
+- **Measured budgets.**
+  - `App::peaks()` tracks each run's high-water marks: entities, sprites per frame, dropped
+    sprites, tiles, frame scratch and the arena.
+  - `phx::write_budget_report()` (`phx/runtime/budget.h`) writes them as JSON against the target's
+    limits, together with the engine warnings and errors logged (`log_count()`).
+    `TargetProfile` gains the target's sprite and audio-channel ceilings.
+  - `make project-budget PROJECT=...` bakes every tier and runs the game headlessly as PC, GBA
+    (fixed-point, PPU model, GBA budget) and PSP for 30 s of scripted play, writing
+    `build/budget-<target>.json`.
+  - Phoenix Studio's new **Budget** view shows each target's card: memory, entities, sprites per
+    frame, frame scratch, warnings, ROM or bundle size, textures the GBA can't store as tiles, and
+    the biggest assets. Each figure is marked ok, close (over 90%) or over, and the view flags
+    reports older than the project's assets or code.
+  - Projects made before a standard launch existed get it in the Studio's Run view.
+- **Dialogue.** A `.dlg` holds conversations: lines (speaker, text, `next`) and choices.
+  - `if` conditions skip a line or hide a choice (`coins >= 5`, `key`, `!key`). `do` effects set,
+    add to or subtract from variables (`coins -= 5, key = 1`).
+  - It bakes to a new **Dialogue** asset (`AssetType::Dialogue`): index tables and strings read
+    in place, with every index bounds-checked at load (`ResourceCache::dialogue()`). The
+    compiler, validation and a simulator live in `tools/phxpack/dialogue.h`.
+  - **`phx::DialogueRunner`** (`phx/runtime/dialogue.h`) plays a conversation in a box along the
+    bottom: speaker tab, portrait, typewriter reveal, and a choice panel (Up/Down + A). Its
+    variables come through `DialogueVars`.
+  - `GameFlow` gains a **`talk`** screen kind (a cutscene: its `dialogue` column) and plays the
+    new stock **`Talk`** component's conversation when the player presses Up at it (with an
+    "UP: TALK" hint). Conversation variables are the flow's totals, so `do coins -= 2` changes
+    the HUD.
+  - Phoenix Studio gains a **dialogue editor**: conversations and speakers; line cards with
+    speaker, text, next, `if` / `do` and choices; a play panel running the compiled
+    conversation by the runtime's rules, with editable variables; and the bake's
+    problems/warnings. There is also a **New dialogue** command, and the asset view lists a
+    Dialogue's conversations.
+  - New projects get `assets/dialogue.dlg` and a talking sign in the level.
+  - A new `dialogue` suite (in `check` and `determinism`) checks the runner against the Studio's
+    simulator step by step, and plays a talk screen and a Talk NPC trading coins from data.
 - **Fonts.**
   - **Author formats:** a `.font` over a grid sheet PNG, or an imported BMFont text `.fnt`. The
     Font asset (formerly reserved) now bakes a glyph table: each character's rect, offset and
@@ -270,6 +337,13 @@ All notable changes to Phoenix are documented here. The format follows
   also reachable as `phx_desktop_set_scale()`).
 
 ### Fixed
+- `FrameProfile` (`App::profile()`) reported milliseconds in its `*_us` fields: the loop's
+  ns-to-µs multiply-shift used 4295/2^32 (10^-6) instead of 4294967/2^32 (10^-3). Every figure was
+  1000x too small, so a 16.7 ms frame read as 17 µs, the profile overlay's ms readout showed 0.0,
+  and the budget tick was never reached.
+- The `emberwing` and `emberwing-ppu` suites wrote the same bundle and save file, so under
+  `make check -j` one run could clobber the other's save ("the goal run's clear was persisted").
+  The PPU build now uses its own `build/emberwing_ppu.*`.
 - Phoenix Studio on Windows: opened files kept native `\` separators, so a sprite def naming its
   sheet by bare file name (every template sprite) failed to open with "the sheet is outside the
   project". Opened paths and bundle listings now always use `/`.

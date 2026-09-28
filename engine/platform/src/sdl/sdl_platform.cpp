@@ -21,6 +21,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sys/stat.h>
+#if defined(_WIN32)
+#include <direct.h>          // _chdir
+#else
+#include <unistd.h>          // chdir
+#endif
 
 // The real audio device (defined at the bottom), also offered through the seam's audio().
 extern "C" int  phx_sdl_audio_start(int rate, phx_audio_fill fill, void* user);
@@ -562,6 +568,24 @@ extern "C" const char* phx_desktop_clipboard_get(void) {
 extern "C" void phx_desktop_clipboard_set(const char* utf8) { SDL_SetClipboardText(utf8 ? utf8 : ""); }
 
 extern "C" const char* phx_desktop_drop_path(void) { return g_dt.drop_path; }
+
+extern "C" int phx_desktop_use_exe_dir(const char* rel) {
+    if (!rel || !*rel) return 0;
+    struct stat st;
+    if (stat(rel, &st) == 0) return 0;                       // found from here: leave it
+    char* base = SDL_GetBasePath();                          // "<exe folder>/" (callable before SDL_Init)
+    if (!base) return 0;
+    char there[1024];
+    std::snprintf(there, sizeof(there), "%s%s", base, rel);
+    int changed = 0;
+#if defined(_WIN32)
+    if (stat(there, &st) == 0 && _chdir(base) == 0) changed = 1;
+#else
+    if (stat(there, &st) == 0 && chdir(base) == 0) changed = 1;
+#endif
+    SDL_free(base);
+    return changed;
+}
 
 // Software-tier graphics contract: hand the render backend our CPU framebuffer.
 extern "C" phx_soft_fb phx_gfx_soft_lock(phx_gfx* gfx) {
