@@ -186,6 +186,9 @@ compile-time capability tier and render tier via `cmake/caps_select.cmake` → `
   headlessly unit-tested document model (`tools/<editor>/editor.h`, covered in the pipeline suite)
   from a thin GUI shell (`main.cpp`). Every tool folder has an `instructions.md` with usage,
   formats, and controls.
+  Phoenix Studio's text is JetBrains Mono, rasterized with stb_truetype and drawn at window
+  resolution through the desktop seam's overlay (`phx_desktop_overlay_begin`) on the same 6px/10px
+  canvas grid as the 5x7 bitmap font it falls back to (`tools/common/instructions.md`).
 - **The platformer** (`examples/platformer/`) is the MVP gate: a full game slice using **only**
   engine systems. Nothing gameplay-relevant is hardcoded — level/spawns come from a Tiled map
   (incl. per-layer parallax factors), hero anim from a Sprite asset, SFX from baked WAVs.

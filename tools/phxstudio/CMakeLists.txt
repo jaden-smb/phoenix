@@ -8,7 +8,7 @@
 set(_studio_inc
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_SOURCE_DIR}/tools/phxpack          # json.h, png.h, synth.h, font.h, dialogue.h, tex_encode.h
-  ${CMAKE_SOURCE_DIR}/tools/common           # twk.h (the widget kit), png_write.h, ascii_font.h
+  ${CMAKE_SOURCE_DIR}/tools/common           # twk.h (the widget kit), ttf_text.h, png_write.h, ascii_font.h
   ${CMAKE_SOURCE_DIR}/tools/phxtmap          # editor.h: the tilemap document model
   ${CMAKE_SOURCE_DIR}/tools/phxentity        # editor.h: the data-table document model
   ${CMAKE_SOURCE_DIR}/tools/phxviz)          # builders.h -> analyze.h (header-only)
@@ -24,7 +24,8 @@ if(PHX_USE_SDL)
                 phx_platform phx_memory phx_core Threads::Threads)
 
   set(_studio_src main.cpp workspace.cpp ed_code.cpp ed_sprite.cpp ed_map.cpp ed_table.cpp
-                  ed_sfx.cpp ed_song.cpp ed_font.cpp ed_dialogue.cpp)
+                  ed_sfx.cpp ed_song.cpp ed_font.cpp ed_dialogue.cpp
+                  ${CMAKE_SOURCE_DIR}/tools/common/ttf_text.cpp)   # the Studio's TrueType text (stb_truetype)
   if(WIN32)
     list(APPEND _studio_src winjob.cpp)      # launches in a Job Object (tools/phxstudio/winjob.h)
   endif()

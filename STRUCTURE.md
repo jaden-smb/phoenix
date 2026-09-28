@@ -121,7 +121,9 @@ phoenix/
 │   └── common/                   depcheck.py (layering gate) · size_gate.py (GBA budget gate) ·
 │                                 bin2s.py (portable asset embedding) · debug_font.h (shared tool font) ·
 │                                 ascii_font.h (full-ASCII 5x7 tool font) · twk.h (+ twk_geom.h,
-│                                 twk_icons.h: the tool widget kit) · png_write.h (PNG encoder) ·
+│                                 twk_icons.h: the tool widget kit) · ttf_text.h/.cpp + text_raster.h +
+│                                 jetbrains_mono_data.h (the Studio's TrueType text; fonts/ = the OFL
+│                                 face, third_party/ = stb_truetype) · png_write.h (PNG encoder) ·
 │                                 bake_project.py (a game project's assets -> one .phxp, `make game-assets`) ·
 │                                 export_project.py (a built project -> dist/<name>-<target>/ + .zip,
 │                                 `make game-export`: the release exe + bundle + DLLs, the ROM, the EBOOT) ·

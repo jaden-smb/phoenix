@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace {
 
@@ -227,6 +228,21 @@ extern "C" int  phx_desktop_fb_size(int* w, int* h) {
 }
 extern "C" int  phx_desktop_display_size(int* w, int* h) { if (w) *w = 0; if (h) *h = 0; return 0; }
 extern "C" void phx_desktop_set_window_size(int, int) {}
+// The native-resolution overlay is real here too (a CPU buffer nobody presents), so a tool's text path
+// is testable headlessly: phx_null_overlay_peek() reads back what the last frame drew into it.
+namespace { std::vector<uint32_t> g_ov_px; int g_ov_w = 0, g_ov_h = 0; }
+extern "C" int phx_desktop_overlay_begin(phx_overlay* out) {
+    if (!out || g_gfx.fb.w <= 0) return 0;
+    g_ov_w = g_gfx.fb.w * g_dev_scale; g_ov_h = g_gfx.fb.h * g_dev_scale;
+    g_ov_px.assign(size_t(g_ov_w) * size_t(g_ov_h), 0u);
+    out->pixels = g_ov_px.data(); out->w = g_ov_w; out->h = g_ov_h;
+    return 1;
+}
+extern "C" const uint32_t* phx_null_overlay_peek(int* w, int* h) {
+    if (w) *w = g_ov_w;
+    if (h) *h = g_ov_h;
+    return g_ov_px.empty() ? nullptr : g_ov_px.data();
+}
 extern "C" void phx_desktop_set_title(const char*) {}
 extern "C" void phx_desktop_set_cursor(int) {}
 extern "C" const char* phx_desktop_clipboard_get(void) { return g_dev_clip; }

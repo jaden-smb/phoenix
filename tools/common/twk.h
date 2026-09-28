@@ -29,6 +29,7 @@
 #include "phx/platform/desktop.h"
 
 #include "ascii_font.h"
+#include "text_raster.h"
 #include "twk_geom.h"
 #include "twk_icons.h"
 
@@ -248,7 +249,9 @@ constexpr int kSubImageSpan = 16;
 constexpr uint8_t kPlaneBase[5] = { 100, 130, 160, 190, 220 };
 enum Plane : int { kPlaneMain = 0, kPlanePopup = 1, kPlaneModal = 2, kPlaneModalPopup = 3, kPlaneTip = 4 };
 
-// Text metrics of the 5x7 ASCII font on a 6px pitch.
+// Text metrics on the canvas grid: a 6px pitch, a 10px line, an 8px glyph cell whose baseline is at
+// its bottom. The 5x7 ASCII bitmap font is drawn in that cell, and so is a TextRaster's face
+// (Gui::set_text_raster), whose em is 10px so its advance is the same 6px.
 constexpr int kAdv = 6, kLineH = 10, kGlyph = 8;
 
 struct MenuItem {
@@ -290,6 +293,14 @@ public:
 
     TextureId font = kNoTexture, icons = kNoTexture, checker = kNoTexture;
 
+    // Draw text with a TrueType-style rasterizer at WINDOW resolution instead of the 5x7 bitmap font
+    // (null = the bitmap font, the default). Glyphs go to the platform's native-resolution overlay
+    // (phx_desktop_overlay_begin), so they are smooth at any UI scale; where the platform has none
+    // (headless, GL tier) or `ui == nullptr`, text falls back to the bitmap font for that frame.
+    // The layout is identical either way: same 6px advance, same 10px line.
+    void set_text_raster(TextRaster* r) { raster_ = r; }
+    bool native_text() const { return native_; }   // this frame's text goes to the overlay
+
     // ---- setup -------------------------------------------------------------------------------
     // Build the font / icon / stipple textures (static storage: the soft backend samples RGBA8
     // zero-copy, so the pixels must outlive the renderer).
@@ -318,6 +329,18 @@ public:
         ox = cam_x; oy = cam_y;
         if (ui_r && app_in) { ui_.begin(*ui_r, *app_in); draw_ = true; r_ = ui_r; }
         else { draw_ = false; r_ = nullptr; }
+        native_ = false;
+        nglyphs_.clear();
+        covers_.clear();
+        if (draw_ && raster_) {
+            const int sc = phx_desktop_scale();
+            phx_overlay o{};
+            // the layer is (framebuffer x scale); a canvas size that disagrees (mid-resize) draws
+            // this one frame with the bitmap font rather than misplace the text
+            if (phx_desktop_overlay_begin(&o) && sc >= 1 && o.w == W * sc && o.h == H * sc) {
+                ov_ = o; ov_scale_ = sc; native_ = true;
+            }
+        }
         ++frame;
         hint.clear();
         cursor = PHX_CURSOR_ARROW;
@@ -350,6 +373,7 @@ public:
             tip_prev_rect_ = tip_rect_;
             if (tip_frames_ > 30 && !(in->held & kMouseL)) draw_tooltip();
         } else tip_frames_ = 0;
+        flush_native_text();                       // after the tooltip: it is text too
         // A focused widget that was not drawn this frame loses focus (tab switched away).
         if (focus_ && !focus_seen_) { focus_ = 0; focus_text_ = false; }
         if (draw_) ui_.end();
@@ -392,6 +416,7 @@ public:
         if (!draw_) return;
         const Rect r = intersect(r0, clip());
         if (r.empty()) return;
+        note_cover(r, sub, false);
         ui_.rect(phx::UIRect{ v2(r.x + ox, r.y + oy), v2(r.w, r.h) }, c, layer(sub));
     }
     void frame_rect(const Rect& r, Rgba c, uint8_t sub = kSubWidget) {
@@ -404,6 +429,7 @@ public:
     void stipple(const Rect& r0, Rgba c, uint8_t sub = kSubOver) {
         if (!draw_) return;
         const Rect r = intersect(r0, clip());
+        note_cover(r, sub, true);                  // native text under it shows at half strength
         // 62px blocks from the 64x64 checker, source offset by coordinate parity so the pattern
         // is anchored to the screen (adjacent stipples line up seamlessly).
         for (int y = r.y; y < r.bottom(); y += 62)
@@ -520,6 +546,13 @@ public:
     void glyph(int x, int y, char ch, Rgba c, uint8_t sub = kSubText, int scale = 1) {
         int g = int(static_cast<unsigned char>(ch)) - 32;
         if (g == 0) return;
+        if (native_) {
+            // queued, then blended at window resolution in end() once every cover is known
+            const Rect cell{ x, y, kAdv * scale, 12 * scale };     // 12 = the em's ascent + descent, in canvas px
+            if (intersect(cell, clip()).empty()) return;
+            nglyphs_.push_back(NGlyph{ x, y, static_cast<unsigned char>(ch), scale, c, plane_, sub, clip() });
+            return;
+        }
         if (g < 0 || g >= phxtool::kAsciiGlyphs) g = phxtool::kAsciiGlyphs - 1;
         image(Rect{ x, y, kGlyph * scale, kGlyph * scale }, font, (g % 16) * 8, (g / 16) * 8, 8, 8, c, sub);
     }
@@ -1127,8 +1160,70 @@ private:
 
     static phx::vec2 v2(int x, int y) { return phx::vec2{ phx::s_from_int(x), phx::s_from_int(y) }; }
 
+    // What native text must respect. Text is drawn last, over the whole upscaled canvas, so it has to
+    // be hidden where the renderer would have drawn something ABOVE it: a rect/image on a higher
+    // plane, or on a higher sub-layer of the same plane (the bars over a scrolling body). Only those
+    // can ever matter, so the rest are not recorded. A stipple only dims (half strength).
+    struct NGlyph { int x, y; unsigned char ch; int k; Rgba c; int plane; uint8_t sub; Rect clip; };
+    struct Cover { Rect r; int plane; uint8_t sub; bool dim; };
+
+    void note_cover(const Rect& r, uint8_t sub, bool dim) {
+        if (!native_ || r.empty() || (plane_ == 0 && sub <= kSubText)) return;
+        covers_.push_back(Cover{ r, plane_, sub, dim });
+    }
+
+    // Blend every queued glyph into the overlay (window pixels): coverage * colour alpha, minus the
+    // covers above it. Straight-alpha "over", since glyph edges and neighbours can overlap.
+    void flush_native_text() {
+        if (!native_ || !raster_) { nglyphs_.clear(); covers_.clear(); return; }
+        const int sc = ov_scale_;
+        std::vector<const Cover*> above;
+        for (const NGlyph& g : nglyphs_) {
+            const RasterGlyph* rg = raster_->glyph(g.ch, g.k * sc);
+            if (!rg) continue;
+            const Rect vis = intersect(g.clip, Rect{ 0, 0, W, H });
+            const int gx0 = std::max(g.x * sc + rg->left, vis.x * sc);
+            const int gy0 = std::max((g.y + kGlyph * g.k) * sc + rg->top, vis.y * sc);
+            const int gx1 = std::min(g.x * sc + rg->left + rg->w, vis.right() * sc);
+            const int gy1 = std::min((g.y + kGlyph * g.k) * sc + rg->top + rg->h, vis.bottom() * sc);
+            if (gx0 >= gx1 || gy0 >= gy1) continue;
+            above.clear();
+            for (const Cover& cv : covers_) {
+                if (cv.plane < g.plane || (cv.plane == g.plane && cv.sub <= g.sub)) continue;
+                if (cv.r.x * sc >= gx1 || cv.r.right() * sc <= gx0 || cv.r.y * sc >= gy1 || cv.r.bottom() * sc <= gy0) continue;
+                above.push_back(&cv);
+            }
+            const uint32_t cr = phx::rgba_r(g.c), cg = phx::rgba_g(g.c), cb = phx::rgba_b(g.c), ca = phx::rgba_a(g.c);
+            const int ax = g.x * sc + rg->left, ay = (g.y + kGlyph * g.k) * sc + rg->top;
+            for (int y = gy0; y < gy1; ++y) {
+                const uint8_t* row = rg->cov + size_t(y - ay) * size_t(rg->w);
+                uint32_t* dst = ov_.pixels + size_t(y) * size_t(ov_.w);
+                for (int x = gx0; x < gx1; ++x) {
+                    uint32_t a = row[x - ax];
+                    if (!a) continue;
+                    if (ca != 255) a = a * ca / 255;
+                    for (const Cover* cv : above)
+                        if (x >= cv->r.x * sc && x < cv->r.right() * sc && y >= cv->r.y * sc && y < cv->r.bottom() * sc) {
+                            if (cv->dim) a /= 2; else { a = 0; break; }
+                        }
+                    if (!a) continue;
+                    const uint32_t d = dst[x], da = d >> 24;
+                    if (da == 0) { dst[x] = (a << 24) | (cb << 16) | (cg << 8) | cr; continue; }
+                    const uint32_t oa = a * 255 + da * (255 - a);                 // out alpha * 255
+                    const uint32_t wn = a * 255, wo = da * (255 - a);              // weights of new / old colour
+                    auto mixc = [&](uint32_t n, uint32_t o) { return (n * wn + o * wo + oa / 2) / oa; };
+                    dst[x] = (((oa + 127) / 255) << 24) | (mixc(cb, (d >> 16) & 255) << 16)
+                           | (mixc(cg, (d >> 8) & 255) << 8) | mixc(cr, d & 255);
+                }
+            }
+        }
+        nglyphs_.clear();
+        covers_.clear();
+    }
+
     void blit(const Rect& d, TextureId t, int sx, int sy, int sw, int sh, Rgba tint, uint8_t sub, uint16_t flags) {
         if (d.empty()) return;
+        if (t != checker) note_cover(d, sub, false);      // (a stipple is noted once, whole, by stipple())
         phx::DrawSprite s{};
         s.tex = t;
         s.sx = int16_t(sx); s.sy = int16_t(sy); s.sw = int16_t(sw); s.sh = int16_t(sh);
@@ -1167,6 +1262,13 @@ private:
         text(r.x + 4, r.y + 3, tip_text_, th.text, kSubText, r.w - 6);
         set_plane(saved);
     }
+
+    TextRaster* raster_ = nullptr;
+    bool native_ = false;
+    phx_overlay ov_{};
+    int  ov_scale_ = 1;
+    std::vector<NGlyph> nglyphs_;
+    std::vector<Cover> covers_;
 
     phx::UI ui_;
     phx::Renderer* r_ = nullptr;

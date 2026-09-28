@@ -484,7 +484,7 @@ DIALOGUE_SRC := $(APP_SRC) engine/resource/src/cache.cpp engine/runtime/src/leve
 DIALOGUE_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(DIALOGUE_SRC))
 DIALOGUE     := $(BUILD)/phx_dialogue
 
-EDITORS_SRC := $(APP_SRC) tests/suites/editors_test.cpp
+EDITORS_SRC := $(APP_SRC) tools/common/ttf_text.cpp tests/suites/editors_test.cpp
 EDITORS_OBJ := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(EDITORS_SRC))
 EDITORS     := $(BUILD)/phx_editors
 
@@ -813,7 +813,7 @@ STUDIO_TOOL_SRC := tools/phxstudio/main.cpp tools/phxstudio/workspace.cpp tools/
                    tools/phxstudio/ed_sprite.cpp tools/phxstudio/ed_map.cpp tools/phxstudio/ed_table.cpp \
                    tools/phxstudio/ed_sfx.cpp tools/phxstudio/ed_song.cpp tools/phxstudio/ed_font.cpp \
                    tools/phxstudio/ed_dialogue.cpp \
-                   tools/phxstudio/winjob.cpp
+                   tools/phxstudio/winjob.cpp tools/common/ttf_text.cpp
 STUDIO_ENGINE   := $(filter-out engine/platform/src/null/null_platform.cpp,$(APP_SRC)) engine/audio/src/mixer.cpp
 STUDIO_OBJ      := $(patsubst %.cpp,$(HOSTOBJ)/%.o,$(STUDIO_ENGINE) $(STUDIO_TOOL_SRC))
 

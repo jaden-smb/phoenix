@@ -37,6 +37,7 @@
 #include "phx/platform/desktop.h"
 
 #include "twk.h"          // tools/common: the tool widget kit
+#include "ttf_text.h"     // tools/common: JetBrains Mono, rasterized at window resolution
 #include "model.h"
 #include "jobs.h"
 #include "host.h"
@@ -316,6 +317,7 @@ struct StudioGame final : Game {
     std::unique_ptr<JobRunner> jobs;
 
     // gui
+    phxtool::TtfText ttf;                             // the Studio's typeface (declared before tg: outlives it)
     twk::Gui tg;                                      // the widget kit (every view + the chrome)
     twk::Input tin;                                   // this frame's pointer + keyboard
     Gui gui;                                          // legacy-view adapter over tg
@@ -415,6 +417,7 @@ struct StudioGame final : Game {
         app_ = &app;
         host.s = this;
         tg.init(r);
+        if (ttf.ok()) tg.set_text_raster(&ttf);           // else (or with no overlay layer) the 5x7 bitmap font
         gui.g = &tg;
         // The desktop extension: Esc belongs to dialogs/editors, closing the window asks about
         // unsaved work, and the canvas follows the window size.
@@ -1361,9 +1364,10 @@ struct StudioGame final : Game {
         tg.end();
         r.end_frame();
         render_avg.push(uint32_t((plat->clock_ns() - t0) / 1000u));   // record + rasterize, in µs
-        if (!pending_shot.empty()) { write_shot(pending_shot); pending_shot.clear(); }
+        const int shot_scale = tg.native_text() ? phx_desktop_scale() : 1;   // the TrueType text is window-res
+        if (!pending_shot.empty()) { write_shot(pending_shot, shot_scale); pending_shot.clear(); }
         if (!shot_path.empty() && app.frame() >= uint64_t(shot_frame)) {
-            write_shot(shot_path);
+            write_shot(shot_path, shot_scale);
             app.request_quit();
         }
     }
@@ -1623,13 +1627,15 @@ struct StudioGame final : Game {
     }
 
     // --shot: read the PRESENTED frame back through the SDL backend and write a binary PPM
-    // (docs, bug reports, and a scriptable visual check of every view).
-    static void write_shot(const std::string& path) {
-        std::vector<uint32_t> px(size_t(kW) * size_t(kH));
-        if (phx_sdl_readback(px.data(), kW, kH) != 0) { std::fprintf(stderr, "phxstudio: readback failed\n"); return; }
+    // (docs, bug reports, and a scriptable visual check of every view). `scale` 1 writes the canvas
+    // (kW x kH); the UI scale writes every window pixel, which is what shows the smooth text.
+    static void write_shot(const std::string& path, int scale) {
+        const int w = kW * scale, h = kH * scale;
+        std::vector<uint32_t> px(size_t(w) * size_t(h));
+        if (phx_sdl_readback(px.data(), w, h) != 0) { std::fprintf(stderr, "phxstudio: readback failed\n"); return; }
         FILE* f = std::fopen(path.c_str(), "wb");
         if (!f) { std::fprintf(stderr, "phxstudio: cannot write %s\n", path.c_str()); return; }
-        std::fprintf(f, "P6\n%d %d\n255\n", kW, kH);
+        std::fprintf(f, "P6\n%d %d\n255\n", w, h);
         for (uint32_t c : px) { const uint8_t rgb[3] = { rgba_r(c), rgba_g(c), rgba_b(c) }; std::fwrite(rgb, 1, 3, f); }
         std::fclose(f);
         std::printf("phxstudio: wrote %s\n", path.c_str());

@@ -7,6 +7,24 @@ All notable changes to Phoenix are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Phoenix Studio's text is now a real typeface, not pixel art.** Every label, menu, editor line
+  and log line is JetBrains Mono (SIL OFL 1.1), anti-aliased and drawn at window resolution, so it
+  stays sharp at any UI scale.
+  - The layout is unchanged: the face is sized so each character still advances exactly 6 canvas
+    pixels on a 10-pixel line, so no widget, column or caret moved.
+  - Text goes to a new **native-resolution overlay** in the desktop seam
+    (`phx_desktop_overlay_begin`, `phx/platform/desktop.h`): an RGBA layer with one pixel per
+    window pixel, alpha-blended over the upscaled canvas at present. The SDL backend implements it;
+    the null backend keeps it in memory so tests can read it back. Games never call it.
+  - `twk::Gui::set_text_raster()` opts a tool in (`tools/common/text_raster.h`; the rasterizer is
+    `tools/common/ttf_text.h`, over the vendored public-domain `stb_truetype.h`). Text is hidden
+    where something on a higher plane or sub-layer covers it, and dimmed under a modal's backdrop.
+    Tools that do not opt in (`phxtmap`, `phxentity`) and any platform without an overlay keep the
+    5x7 bitmap font.
+  - `phxstudio --shot` now writes every window pixel (1280x720 at the default scale) instead of the
+    640x360 canvas.
+
 ### Added
 - **Debugger, profiler and settings.**
   - **In-game developer tools** (`phx/runtime/devtools.h`) gain:

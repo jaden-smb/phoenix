@@ -680,8 +680,11 @@ and uses none of its sprites or budgets. `PHX_TRACE=file` records every frame's 
   `PATH` when they are missing, so it also works when started from Explorer. A need such as
   `/opt/devkitpro/...` is looked for under the MSYS2 folder. **Stop** ends the whole process
   tree (a Job Object), and quitting the Studio ends its running job.
-- The fonts are ASCII 5×7 on a 6-pixel pitch. Other UTF-8 characters display as a look-alike
-  (— as -, → as >) or as a box, but are kept byte-for-byte on save.
+- The Studio's typeface is JetBrains Mono, ASCII only, drawn smooth at window resolution (so it stays
+  sharp at any UI scale) on the canvas's 6-pixel character pitch. Other UTF-8 characters display
+  as a look-alike (— as -, → as >) or as a box, but are kept byte-for-byte on save. Where the
+  platform has no native-resolution layer, the text falls back to a 5×7 pixel font with the same
+  layout.
 - The code editor has no language server: highlighting is lexical, and errors come from real
   builds.
 - The Assets view's texture tier previews re-encode in memory; the Studio never writes a bundle.

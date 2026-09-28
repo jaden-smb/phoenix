@@ -18,7 +18,11 @@
 #include "phx_test.h"
 
 #include "phx/platform/desktop.h"
+#include "phx/platform/gfx_soft.h"
+#include "phx/render/renderer.h"
+#include "phx/input/input.h"
 #include "twk.h"
+#include "ttf_text.h"                               // the Studio's TrueType text (tools/common)
 #include "builders.h"                               // the bake's loaders (sprite defs, bin tables)
 #include "tiled.h"
 #include "png.h"
@@ -35,6 +39,7 @@
 #include "../../tools/phxstudio/spawnart.h"
 #include "../../tools/phxstudio/settings.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -43,6 +48,7 @@
 
 extern "C" void phx_null_desktop_push(const phx_desktop_event* e);
 extern "C" void phx_null_desktop_set_mouse(int x, int y, uint32_t buttons, uint16_t mods);
+extern "C" const uint32_t* phx_null_overlay_peek(int* w, int* h);
 
 using namespace phxstudio;
 
@@ -309,6 +315,151 @@ PHX_TEST(twk_key_matching_folds_cmd_into_ctrl) {
     in.key('s');
     frame(g, in, [&] { saved = g.key('s', twk::kCtrl); });
     CHECK(!saved);                                                  // exact modifiers
+}
+
+// =============================================================================================
+// native-resolution text: the TrueType rasterizer + twk::Gui's overlay path
+// =============================================================================================
+PHX_TEST(ttf_text_rasterizes_on_the_canvas_grid) {
+    phxtool::TtfText t;
+    CHECK(t.ok());
+    for (int scale = 1; scale <= 4; ++scale) {
+        const twk::RasterGlyph* a = t.glyph('A', scale);
+        CHECK(a && a->cov && a->w > 0 && a->h > 0);
+        if (!a) continue;
+        // em = 10 canvas px: a capital is ~7.3 px tall, sits on the baseline, and fits the 6 px advance
+        CHECK(a->h >= 7 * scale - 1 && a->h <= 8 * scale + 1);
+        CHECK(a->top < 0 && a->top + a->h <= 1);
+        CHECK(a->left >= 0 && a->left + a->w <= twk::kAdv * scale);
+        int lit = 0;
+        for (int i = 0; i < a->w * a->h; ++i) lit += a->cov[i] != 0;
+        CHECK(lit > a->w);                                          // has ink, and is anti-aliased (not a box)
+        const twk::RasterGlyph* g = t.glyph('g', scale);
+        CHECK(g && g->top + g->h > 1);                              // descenders drop below the baseline
+    }
+    CHECK(t.glyph(' ', 2) == nullptr);                              // nothing to draw
+    CHECK(t.glyph(200, 2) != nullptr && t.glyph(-5, 2) != nullptr); // outside ASCII: the missing-glyph box
+    CHECK(t.glyph('A', 2) == t.glyph('A', 2));                      // cached
+    CHECK(t.glyph('A', 0) == nullptr);
+}
+
+namespace {
+// Lit-pixel count and max alpha of the null backend's overlay inside a window-pixel rect.
+struct Ink { int lit = 0; int max_a = 0; };
+Ink overlay_ink(int x0, int y0, int x1, int y1) {
+    int w = 0, h = 0;
+    const uint32_t* px = phx_null_overlay_peek(&w, &h);
+    Ink k;
+    if (!px) return k;
+    for (int y = std::max(0, y0); y < std::min(h, y1); ++y)
+        for (int x = std::max(0, x0); x < std::min(w, x1); ++x) {
+            const int a = int(px[size_t(y) * size_t(w) + size_t(x)] >> 24);
+            if (a) { ++k.lit; k.max_a = std::max(k.max_a, a); }
+        }
+    return k;
+}
+} // namespace
+
+PHX_TEST(twk_native_text_draws_at_window_resolution_and_respects_covers) {
+    const phx_platform* plat = phx_platform_get();
+    phx_platform_desc desc{};
+    desc.title = "editors_test"; desc.width = 128; desc.height = 64;
+    CHECK_EQ(plat->init(&desc), 0);
+    phx_desktop_set_scale(2);
+    static uint8_t arena_buf[8 << 20];
+    phx::ArenaAllocator arena;
+    arena.init(arena_buf, sizeof(arena_buf));
+    auto rr = phx::Renderer::create(plat->gfx(), arena, phx::caps());
+    CHECK(rr.ok());
+    if (!rr.ok()) { plat->shutdown(); return; }
+    phx::Renderer* r = rr.unwrap();
+
+    phxtool::TtfText ttf;
+    twk::Gui g;
+    twk::Input in;
+    phx::InputState app_in{};
+    g.init(*r);
+    const phx::Rgba white = phx::rgba(255, 255, 255);
+    const phx::Rgba dark = phx::rgba(20, 20, 30);
+    auto draw = [&](int w, int h, auto body) {
+        r->begin_frame(phx::Camera2D{});
+        g.begin(r, &app_in, in, w, h);
+        body();
+        g.end();
+        r->end_frame();
+        in.reset_frame();
+    };
+
+    // no rasterizer set: the bitmap font, no overlay use
+    draw(128, 64, [&] { CHECK(!g.native_text()); });
+
+    g.set_text_raster(&ttf);
+    // "HI" at canvas (4,4): window (scale 2) cells x 8..32, baseline y = (4+8)*2 = 24, no descenders
+    draw(128, 64, [&] { CHECK(g.native_text()); g.text(4, 4, "HI", white); });
+    int w = 0, h = 0;
+    CHECK(phx_null_overlay_peek(&w, &h) != nullptr && w == 256 && h == 128);   // one pixel per WINDOW pixel
+    const Ink text = overlay_ink(0, 0, 256, 128);
+    CHECK(text.lit > 40 && text.max_a == 255);
+    CHECK_EQ(overlay_ink(8, 8, 32, 26).lit, text.lit);              // nothing outside the cells / below the baseline
+
+    // the clip rect trims glyphs in window pixels: a 6 px (canvas) clip keeps only the start of the 'H'
+    draw(128, 64, [&] { g.push_clip(twk::Rect{ 0, 0, 6, 64 }); g.text(4, 4, "HI", white); g.pop_clip(); });
+    const Ink clipped = overlay_ink(0, 0, 256, 128);
+    CHECK(clipped.lit > 0 && clipped.lit < text.lit / 2 && overlay_ink(12, 0, 256, 128).lit == 0);
+
+    // an opaque rect on a HIGHER plane hides the text under it, with no leftover pixels
+    draw(128, 64, [&] {
+        g.text(4, 4, "HI", white);
+        g.set_plane(1);
+        g.rect(twk::Rect{ 0, 0, 20, 64 }, dark, twk::kSubFill);
+        g.set_plane(0);
+    });
+    CHECK_EQ(overlay_ink(0, 0, 256, 128).lit, 0);
+    // ... text ON that plane, above the rect's sub-layer, is shown
+    draw(128, 64, [&] {
+        g.set_plane(1);
+        g.rect(twk::Rect{ 0, 0, 20, 64 }, dark, twk::kSubFill);
+        g.text(4, 4, "HI", white);
+        g.set_plane(0);
+    });
+    CHECK_EQ(overlay_ink(0, 0, 256, 128).lit, text.lit);
+    // same plane: a rect on a HIGHER sub-layer (a bar over a scrolling body) covers the text too ...
+    draw(128, 64, [&] {
+        g.text(4, 4, "HI", white);
+        g.rect(twk::Rect{ 0, 0, 20, 64 }, dark, twk::kSubTop);
+    });
+    CHECK_EQ(overlay_ink(0, 0, 256, 128).lit, 0);
+    // ... and one on a LOWER sub-layer (a panel behind it) does not
+    draw(128, 64, [&] {
+        g.text(4, 4, "HI", white);
+        g.rect(twk::Rect{ 0, 0, 20, 64 }, dark, twk::kSubFill);
+    });
+    CHECK_EQ(overlay_ink(0, 0, 256, 128).lit, text.lit);
+    // only the covered part goes: a rect over the 'I' (canvas x >= 10) leaves the 'H'
+    draw(128, 64, [&] {
+        g.text(4, 4, "HI", white);
+        g.set_plane(1);
+        g.rect(twk::Rect{ 10, 0, 20, 64 }, dark, twk::kSubFill);
+        g.set_plane(0);
+    });
+    const Ink half = overlay_ink(0, 0, 256, 128);
+    CHECK(half.lit > 0 && half.lit < text.lit && overlay_ink(20, 0, 256, 128).lit == 0);
+
+    // a modal's stipple backdrop dims what is under it to half strength
+    draw(128, 64, [&] {
+        g.text(4, 4, "HI", white);
+        g.begin_modal("m", 60, 30);                                 // centred: x 34..94, clear of the text
+        g.end_modal();
+    });
+    const Ink dimmed = overlay_ink(8, 8, 32, 26);
+    CHECK(dimmed.lit == text.lit && dimmed.max_a > 0 && dimmed.max_a <= 128);
+
+    // a canvas size that disagrees with the overlay (mid-resize) falls back to the bitmap font
+    draw(100, 64, [&] { CHECK(!g.native_text()); });
+
+    g.set_text_raster(nullptr);
+    draw(128, 64, [&] { CHECK(!g.native_text()); });
+    plat->shutdown();
 }
 
 // =============================================================================================

@@ -74,6 +74,24 @@ struct DesktopState {
 };
 DesktopState g_dt;
 
+#if !defined(PHX_HAVE_GL)
+// The native-resolution overlay (phx_desktop_overlay_begin): a CPU layer at window resolution and
+// the streaming texture it is uploaded to; `live` = begun this frame, shown by the next present().
+struct OverlayState {
+    uint32_t*    px  = nullptr;
+    int          w = 0, h = 0;
+    SDL_Texture* tex = nullptr;
+    bool         live = false;
+};
+OverlayState g_ov;
+
+void overlay_free() {
+    std::free(g_ov.px); g_ov.px = nullptr;
+    if (g_ov.tex) SDL_DestroyTexture(g_ov.tex);
+    g_ov.tex = nullptr; g_ov.w = g_ov.h = 0; g_ov.live = false;
+}
+#endif
+
 void dt_push(const phx_desktop_event& e) {
     if (g_dt.count == kEvCap) { g_dt.head = (g_dt.head + 1) % kEvCap; --g_dt.count; }
     g_dt.ring[(g_dt.head + g_dt.count) % kEvCap] = e;
@@ -223,6 +241,7 @@ void sdl_shutdown(void) {
     if (g.glctx) SDL_GL_DeleteContext(g.glctx);
     g.glctx = nullptr;
 #else
+    overlay_free();
     std::free(g.fb.pixels); g.fb.pixels = nullptr;
     if (g.tex) SDL_DestroyTexture(g.tex);
     if (g.ren) SDL_DestroyRenderer(g.ren);
@@ -308,6 +327,18 @@ int sdl_pump_events(void) {
     return g.quit ? 0 : 1;
 }
 
+#if !defined(PHX_HAVE_GL)
+// Blend this frame's overlay (if a tool began one) over the framebuffer just copied. The texture
+// is fb * scale texels drawn into the fb-sized logical rect, i.e. exactly one texel per window pixel.
+void overlay_draw() {
+    if (!g_ov.live || !g_ov.tex) return;
+    if (g_ov.w != g.fb.w * g_scale || g_ov.h != g.fb.h * g_scale) return;   // resized since begin: skip a frame
+    SDL_UpdateTexture(g_ov.tex, nullptr, g_ov.px, g_ov.w * int(sizeof(uint32_t)));
+    const SDL_Rect dst{ 0, 0, g.fb.w, g.fb.h };
+    SDL_RenderCopy(g.ren, g_ov.tex, nullptr, &dst);
+}
+#endif
+
 void sdl_present(void) {
 #if defined(PHX_HAVE_GL)
     SDL_GL_SwapWindow(g.win);            // the GL backend already drew into the back buffer
@@ -315,7 +346,9 @@ void sdl_present(void) {
     SDL_UpdateTexture(g.tex, nullptr, g.fb.pixels, g.fb.w * int(sizeof(uint32_t)));
     SDL_RenderClear(g.ren);
     SDL_RenderCopy(g.ren, g.tex, nullptr, nullptr);
+    overlay_draw();
     SDL_RenderPresent(g.ren);
+    g_ov.live = false;
 #endif
 }
 
@@ -543,6 +576,29 @@ extern "C" void phx_desktop_set_window_size(int w, int h) {
 #endif
 }
 
+extern "C" int phx_desktop_overlay_begin(phx_overlay* out) {
+#if defined(PHX_HAVE_GL)
+    (void)out;
+    return 0;                                                // the GL tier draws text with the GPU
+#else
+    if (!out || !g.win || !g.ren || g.fb.w <= 0) return 0;
+    const int w = g.fb.w * g_scale, h = g.fb.h * g_scale;
+    if (!g_ov.px || g_ov.w != w || g_ov.h != h) {            // first use, or a resize / scale change
+        overlay_free();
+        uint32_t* px = static_cast<uint32_t*>(std::calloc(size_t(w) * size_t(h), sizeof(uint32_t)));
+        SDL_Texture* tex = SDL_CreateTexture(g.ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, w, h);
+        if (!px || !tex) { std::free(px); if (tex) SDL_DestroyTexture(tex); return 0; }
+        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+        g_ov.px = px; g_ov.tex = tex; g_ov.w = w; g_ov.h = h;
+    } else {
+        std::memset(g_ov.px, 0, size_t(w) * size_t(h) * sizeof(uint32_t));
+    }
+    g_ov.live = true;
+    out->pixels = g_ov.px; out->w = w; out->h = h;
+    return 1;
+#endif
+}
+
 extern "C" void phx_desktop_set_title(const char* utf8) {
     if (g.win && utf8) SDL_SetWindowTitle(g.win, utf8);
 }
@@ -597,7 +653,9 @@ extern "C" phx_soft_fb phx_gfx_soft_lock(phx_gfx* gfx) {
 // so a headless harness can pixel-diff the real window/GPU output against the software golden
 // reference (the same way the PPU/GU backends are verified). Call right after the renderer's
 // end_frame(), before present(). Returns 0 on success. The window is g_scale× the logical size,
-// so we read the drawable and sample each logical pixel's block centre.
+// so we read the drawable and sample each logical pixel's block centre. Asking for lw x lh equal
+// to the window size (framebuffer * phx_desktop_scale()) is the identity: every window pixel, which
+// is how a tool captures its native-resolution overlay text.
 extern "C" int phx_sdl_readback(uint32_t* out, int lw, int lh) {
     if (!out || lw <= 0 || lh <= 0) return 1;
 #if defined(PHX_HAVE_GL)
@@ -626,6 +684,7 @@ extern "C" int phx_sdl_readback(uint32_t* out, int lw, int lh) {
     SDL_UpdateTexture(g.tex, nullptr, g.fb.pixels, g.fb.w * int(sizeof(uint32_t)));
     SDL_RenderClear(g.ren);
     SDL_RenderCopy(g.ren, g.tex, nullptr, nullptr);
+    overlay_draw();                                          // a tool's native-res layer (text) too
     uint32_t* tmp = static_cast<uint32_t*>(std::malloc(size_t(ow) * size_t(oh) * 4));
     if (!tmp) return 1;
     if (SDL_RenderReadPixels(g.ren, nullptr, SDL_PIXELFORMAT_ABGR8888, tmp, ow * 4) != 0) {

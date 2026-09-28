@@ -110,6 +110,25 @@ int  phx_desktop_scale(void);
 /* Current framebuffer (logical) size. Returns 0 on success. */
 int  phx_desktop_fb_size(int* w, int* h);
 
+/* Native-resolution overlay: an RGBA8 layer with ONE PIXEL PER WINDOW PIXEL over the framebuffer
+ * area (framebuffer size x the integer UI scale), alpha-blended over the upscaled framebuffer at
+ * present(). It lets a tool draw smooth, anti-aliased text (Phoenix Studio's TrueType text) on top
+ * of a canvas that is otherwise nearest-neighbour upscaled and alpha-tested. Pixels are straight
+ * (non-premultiplied) alpha, R | G<<8 | B<<16 | A<<24 like phx::Rgba.
+ *
+ * phx_desktop_overlay_begin() (call once per frame, before drawing into it) clears the layer to
+ * transparent, fills *out and returns 1; the layer is shown at the next present() and dropped after
+ * it, so a frame that does not call it has no overlay. It returns 0 when the backend has no such
+ * layer (the GL render tier, no window/framebuffer): the tool then draws its text with its bitmap
+ * font instead. The null backend keeps the layer in memory (never presented) so tests can read it
+ * back (phx_null_overlay_peek). Games never call it. */
+typedef struct phx_overlay {
+    uint32_t* pixels;   /* w*h, straight-alpha RGBA8, row-major, valid until the next begin/present */
+    int32_t   w;        /* framebuffer width  * phx_desktop_scale() */
+    int32_t   h;        /* framebuffer height * phx_desktop_scale() */
+} phx_overlay;
+int  phx_desktop_overlay_begin(phx_overlay* out);
+
 /* The usable area of the display the window is on (window pixels; 0 on failure/headless), and
  * a new window size in window pixels (re-centred; the framebuffer follows in resizable mode). */
 int  phx_desktop_display_size(int* w, int* h);
