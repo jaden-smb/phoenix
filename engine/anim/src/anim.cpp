@@ -2,7 +2,7 @@
 //
 // Per fixed step, per Animator: add dt to the timer; while the timer covers a whole frame
 // (1/fps seconds), step to the next frame — looping clips wrap, non-looping clips clamp on
-// the last frame and latch `finished`. Then write the current frame's source rect into the
+// the last frame and latch `finished` (and fire kAnimDone into the animator's edges). Then write the current frame's source rect into the
 // Animator for the renderer to blit. Frame duration is `scalar`, so fixed/float agree.
 #include "phx/anim/anim.h"
 #include "phx/core/hot.h"
@@ -26,7 +26,7 @@ PHX_HOT_CODE void AnimationSystem::tick(ecs::World& w, scalar dt) const {
         if (a.clip >= a.clips.size()) { apply_rect(a); return; }
         const AnimClip& c = a.clips[a.clip];
 
-        if (c.fps > 0 && c.count > 1 && !(a.finished && !c.loop)) {
+        if (c.fps > 0 && (c.count > 1 || !c.loop) && !(a.finished && !c.loop)) {
             if (a.dur_clip != a.clip) {       // scalar divide is expensive on GBA: cache 1/fps
                 a.frame_dur = s_from_int(1) / s_from_int(int(c.fps));
                 a.dur_clip  = a.clip;
@@ -43,6 +43,7 @@ PHX_HOT_CODE void AnimationSystem::tick(ecs::World& w, scalar dt) const {
                 } else {
                     a.finished = true;     // clamp on last frame; stop consuming
                     a.timer = scalar{};
+                    if (!a.edges.empty()) a.trigger(kAnimDone);   // may switch clips
                     break;
                 }
             }

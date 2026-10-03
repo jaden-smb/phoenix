@@ -77,15 +77,43 @@ voice count scales with `phx_caps::audio_channels`.
 namespace phx {
 class AudioMixer {
 public:
-    static Result<AudioMixer*> create(phx_audio*, ArenaAllocator&, const phx_caps&);
-    VoiceId play_sfx(SoundView, float vol=1, float pan=0, bool loop=false);
+    static Result<AudioMixer*> create(ArenaAllocator&, const Caps&, uint32_t out_rate = 44100);
+    VoiceId play_sfx(const SoundView&, float vol=1, float pan=0, bool loop=false);
     void    stop(VoiceId);
-    void    play_music(SoundView, bool loop=true);   // streamed where supported
+    void    play_music(const SoundView&, float vol=1, bool loop=true);
     void    set_music_volume(float);
-    void    mix(int16_t* out, uint32_t frames);      // called by platform callback
+    void    mix(int16_t* out, uint32_t frames);      // called by the device callback
 };
 } // namespace phx
 ```
+
+**What a game uses: `App::audio()`** (`phx/runtime/audio.h`, `GameAudio`). The engine owns the
+mixer, the lock-free `AudioCommandQueue` and the platform's device, so game code only states
+intents and never calls a platform function:
+
+```cpp
+jump = to_sound(res->sound("jump"_hash).unwrap());   // on_start: a baked sound, zero-copy
+app.audio().play(jump);                              // sfx (vol, pan, loop)
+app.audio().play_music(theme, 0.6f);                 // the music bus
+app.audio().stop_all();
+```
+
+Nothing is allocated or started until the first play. At that point the mixer and the queue
+come out of the persistent arena, and the platform's device (`phx_platform::audio()`, a
+`phx_audio { rate, start, stop }`) is started at the device's rate:
+
+| Platform | Device | Rate |
+|---|---|---|
+| SDL | audio thread | 44.1 kHz |
+| PSP | sceAudio thread | 44.1 kHz |
+| GBA | DirectSound, pumped by the VBlank IRQ | 18157 Hz (what the tier-0 bake resamples to) |
+
+The device's callback drains the queue into the mixer and mixes, so the mixer is only ever
+touched there. With no device (the null platform) the App mixes one frame's worth per rendered
+frame itself: voices advance deterministically, and `peak()`, `plays()` and `frames_mixed()` let
+tests check what would have been heard. A game that never plays anything pays nothing. A game
+that runs its own mixer and device (Emberwing, Phoenix Studio) is unaffected, because
+`GameAudio` never starts. `make game-audio-verify` checks the device path on a real SDL device.
 
 | Feature           | GBA                          | PSP                  | PC                |
 |-------------------|------------------------------|----------------------|-------------------|
@@ -217,25 +245,30 @@ baked by `phxsprite`.
 ```cpp
 namespace phx {
 struct AnimClip { uint16_t first, count; uint8_t fps; bool loop; };
+struct AnimEdge { uint8_t from, to; NameHash trigger; };   // from == kAnyClip: any clip
 struct Animator {                              // ECS component
-    SpriteSheetId sheet; uint16_t clip; uint16_t frame; scalar timer; uint8_t state;
-};
-struct AnimStateMachine {                      // data-driven transitions
-    struct Edge { uint8_t from, to; uint16_t trigger; };
-    Span<AnimClip> clips; Span<Edge> edges;
-    void set_trigger(Animator&, uint16_t trig);   // request state change
+    Span<const AnimClip> clips; Span<const AnimEdge> edges; SpriteSheet sheet;
+    uint16_t clip, frame; scalar timer; bool finished; /* + output rect */
+    void play(uint16_t clip);
+    bool trigger(NameHash trig);               // take a matching edge, if any
 };
 class AnimationSystem {
 public:
-    void tick(ecs::World&, scalar dt);         // advance timers, pick frame, set SpriteRef
+    void tick(ecs::World&, scalar dt) const;   // advance timers, pick frame, fire kAnimDone
 };
 } // namespace phx
 ```
 
 - `AnimationSystem` advances each `Animator`, computes the current frame, and writes the
   source rect into the entity's `SpriteRef` — so the render system stays dumb.
-- The **state machine** is data (clips + edges from the prefab/`phxsprite` sidecar), not
-  code: `idle ⇄ run ⇄ jump ⇄ fall` for the player is authored, not hardcoded.
+- The **state machine** is data (clips + edges: `trans <from|*> <to> <trigger>` lines in a
+  `.sprdef`, the Studio sprite editor's Transitions list), not code: `idle ⇄ run ⇄ jump ⇄ fall`
+  for the player is authored, not hardcoded. The bake resolves clip names to indices; `Level`
+  gives each spawned `Animator` its sprite's edges. An edge from the current clip beats a `*`
+  edge, and a `*` edge into the playing clip is a no-op, so triggers can be sent every step.
+- Triggers come from `PlatformerController` (`jump`, `fall`, `land`, `move`, `stop`, `hurt`), from
+  the anim system itself (`done`, when a non-looping clip ends), and from game code
+  (`phx::anim_trigger(world, e, "attack"_hash)`). A sprite without edges is played by clip name.
 - Frame timing uses `scalar` so fixed/float builds animate identically.
 
 ```
@@ -274,10 +307,26 @@ public:
 Supported surfaces:
 - **Menus** — focus-based navigation by D-pad/buttons (not just mouse), because
   consoles have no pointer. `button()` participates in a focus ring.
-- **Text rendering** — bitmap font atlas; fixed-width glyphs on GBA to save tiles.
+- **Text rendering** — bitmap font atlas. A `BitmapFont` is a fixed grid, optionally with a
+  glyph table (`FontGlyph`: rect, offset, advance per character) that makes it proportional.
+  `phx::load_font` (`phx/runtime/font.h`) builds one from a baked Font asset: a `.font` grid
+  sheet whose widths are measured at bake, or an imported BMFont `.fnt`.
+  `UI::text_width` / `glyph_advance` measure text, and `text()`, `button()` and the dialogue
+  wrap all lay out with them. Each glyph is one sprite on every tier, proportional or not.
 - **HUD** — `bar()`, `image()`, `text_fmt()` for score/health/lives; cheap, per-frame.
-- **Dialogue** — typewriter reveal driven by `reveal_t`, fed from `phxbin` dialogue
-  tables; portrait via `image()`.
+- **Dialogue** — `UI::dialogue()` is the box: a typewriter reveal driven by `reveal_t`,
+  word-wrapped, with a portrait. `phx::DialogueRunner` (`phx/runtime/dialogue.h`) plays
+  conversations authored as data: a `.dlg` baked to a Dialogue asset.
+  - A conversation is a list of lines (speaker, text, `next`) and choices.
+  - `if` conditions skip a line or hide a choice. `do` effects set, add to or subtract from
+    variables. The game flow's counter totals are the variables, so `coins` is the coins
+    collected.
+  - A shows the rest of a line, then goes on. Up/Down and A pick a choice.
+  - The state is integer, so the same conversation reveals the same character on the same tick
+    on every tier.
+  - The flow plays conversations on "talk" screens (cutscenes) and when the player presses Up at
+    a `Talk` component. Phoenix Studio's dialogue editor plays them the same way; the dialogue
+    suite checks its simulator against the runner.
 
 GBA constraints baked in: glyphs are 8×8 tiles drawn as BG/OBJ; the UI batches into the
 same ≤128 OBJ budget and warns (via `RenderStats`) if a HUD-heavy frame would overflow.

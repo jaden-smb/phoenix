@@ -71,7 +71,12 @@ set(_itests
   sprite:sprite_test
   tiled:tiled_test
   resource:resource_test
-  pipeline:pipeline_test)
+  pipeline:pipeline_test
+  editors:editors_test
+  level:level_test
+  behaviours:behaviours_test
+  flow:flow_test
+  dialogue:dialogue_test)
 
 foreach(spec ${_itests})
   string(REPLACE ":" ";" parts ${spec})
@@ -94,6 +99,10 @@ endforeach()
 # example's gameplay translation unit compiled in (the rest of the example is header-only).
 target_sources(it_platformer PRIVATE ${CMAKE_SOURCE_DIR}/examples/platformer/src/systems.cpp)
 target_include_directories(it_platformer PRIVATE ${CMAKE_SOURCE_DIR}/engine/resource/include)
+
+# The editors suite also covers the Studio's TrueType text (twk.h's native-resolution path over the
+# null backend's overlay), so it compiles in the rasterizer (stb_truetype + the embedded face).
+target_sources(it_editors PRIVATE ${CMAKE_SOURCE_DIR}/tools/common/ttf_text.cpp)
 
 # Same deal for Emberwing: the test drives the real EmberwingGame, so its systems/scenes TUs
 # (the rest of the example is header-only) must be compiled in too. Mirrors `EMBERWING_SRC` in

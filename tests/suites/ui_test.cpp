@@ -32,7 +32,8 @@ uint32_t g_script[FRAMES];
 
 struct UIGame final : Game {
     UI ui;
-    BitmapFont font;
+    BitmapFont font, prop;
+    FontGlyph  table[40] = {};              // a proportional font over the same atlas
     int activated = -1;
     bool ok = false; int checks = 0, fail = 0;
 
@@ -46,6 +47,12 @@ struct UIGame final : Game {
         font.tex = app.render().load_texture(d);
         font.glyph_w = font.glyph_h = 8; font.cols = 16; font.first_char = 32;
         font.advance = 8; font.line_h = 8;
+        // proportional: 'A' draws 2 px of a solid cell and advances 3, 'B' 4 and 5, space 2
+        prop = font;
+        prop.glyphs = table; prop.glyph_count = 40;
+        table[0].advance = 2;
+        table['A' - 32] = FontGlyph{ 8, 0, 2, 8, 3, 0, 0, 0 };
+        table['B' - 32] = FontGlyph{ 16, 0, 4, 8, 5, 0, 0, 0 };
     }
 
     void on_render(App& app, scalar) override {
@@ -55,6 +62,7 @@ struct UIGame final : Game {
         ui.begin(r, app.input());
 
         ui.text(vec2{ s_from_int(4), s_from_int(4) }, font, "A B", kRed);
+        ui.text(vec2{ s_from_int(4), s_from_int(72) }, prop, "AB A", kGreen);   // proportional
         ui.bar(UIRect{ vec2{ s_from_int(4), s_from_int(20) }, vec2{ s_from_int(40), s_from_int(6) } },
                s_from_int(1) / s_from_int(2), kGreen, kGray);
 
@@ -93,6 +101,13 @@ struct UIGame final : Game {
         ++checks; if (px(6, 6)   != kRed)   { ++fail; std::printf("    FAIL 'A' glyph not red (6,6)=%08X\n", px(6,6)); }
         ++checks; if (px(22, 6)  != kRed)   { ++fail; std::printf("    FAIL 'B' glyph not red (22,6)=%08X\n", px(22,6)); }
         ++checks; if (px(14, 6)  != kClear) { ++fail; std::printf("    FAIL space drew something (14,6)=%08X\n", px(14,6)); }
+        // proportional text: A at 4..5 (advance 3), B at 7..10 (advance 5), space 12..13 (2), A at 14..15
+        ++checks; if (px(5, 74) != kGreen || px(6, 74) != kClear || px(7, 74) != kGreen || px(10, 74) != kGreen ||
+                      px(11, 74) != kClear || px(13, 74) != kClear || px(14, 74) != kGreen || px(15, 74) != kGreen ||
+                      px(16, 74) != kClear) {
+            ++fail; std::printf("    FAIL proportional glyphs not at their advances\n");
+        }
+        ++checks; if (UI::text_width(prop, "AB A") != 13) { ++fail; std::printf("    FAIL text_width(prop)\n"); }
         ++checks; if (px(6, 22)  != kGreen) { ++fail; std::printf("    FAIL bar fg not green (6,22)=%08X\n", px(6,22)); }
         ++checks; if (px(40, 22) != kGray)  { ++fail; std::printf("    FAIL bar bg not gray (40,22)=%08X\n", px(40,22)); }
         ++checks; if (ui.focus() != 1)      { ++fail; std::printf("    FAIL focus=%d want 1\n", ui.focus()); }

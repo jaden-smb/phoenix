@@ -6,6 +6,8 @@
 #include "phx/core/crc32.h"
 #include "phx/core/log.h"
 
+#include <cstring>
+
 namespace phx {
 
 namespace {
@@ -152,10 +154,29 @@ const uint8_t* ResourceCache::resolve(const TocEntry* e) {
     return nullptr;
 }
 
+bool ResourceCache::has(NameHash name, AssetType type) const {
+    uint16_t other = 0;
+    bool saw = false;
+    return lookup(name, type, saw, other) != nullptr;
+}
+
 const TocEntry* ResourceCache::find(NameHash name, AssetType type) const {
-    // search mounts in order; TOC within a mount is sorted by name_hash -> binary search.
     uint16_t other_type = 0;   // a hash hit under a different asset type (kept for the miss log)
     bool     saw_other  = false;
+    if (const TocEntry* e = lookup(name, type, saw_other, other_type)) return e;
+    if (saw_other)
+        // The name exists but only as another type — almost always a call-site bug
+        // (texture("level") for a tilemap asset), so say so instead of a bare miss.
+        PHX_LOG_WARN("resource: asset 0x%08x exists but as type %u, not the requested %u",
+                     uint32_t(name), unsigned(other_type), unsigned(type));
+    else
+        PHX_LOG_DEBUG("resource: asset 0x%08x (type %u) not found in %u mounted bundle(s)",
+                      uint32_t(name), unsigned(type), mount_count_);
+    return nullptr;
+}
+
+const TocEntry* ResourceCache::lookup(NameHash name, AssetType type, bool& saw_other, uint16_t& other_type) const {
+    // search mounts in order; TOC within a mount is sorted by name_hash -> binary search.
     for (uint32_t mi = 0; mi < mount_count_; ++mi) {
         const Mounted& m = mounts_[mi];
         uint32_t lo = 0, hi = m.count;
@@ -177,15 +198,7 @@ const TocEntry* ResourceCache::find(NameHash name, AssetType type) const {
             }
         }
     }
-    if (saw_other)
-        // The name exists but only as another type — almost always a call-site bug
-        // (texture("level") for a tilemap asset), so say so instead of a bare miss.
-        PHX_LOG_WARN("resource: asset 0x%08x exists but as type %u, not the requested %u",
-                     uint32_t(name), unsigned(other_type), unsigned(type));
-    else
-        PHX_LOG_DEBUG("resource: asset 0x%08x (type %u) not found in %u mounted bundle(s)",
-                      uint32_t(name), unsigned(type), mount_count_);
-    return nullptr;
+    return nullptr;                                         // silent: find() reports the miss
 }
 
 Result<TextureView> ResourceCache::texture(NameHash name) {
@@ -245,7 +258,77 @@ Result<SpriteView> ResourceCache::sprite(NameHash name) {
     v.cols       = sh->cols;
     v.clip_count = sh->clip_count;
     v.clips      = reinterpret_cast<const SpriteClipDef*>(p + sizeof(SpriteBlobHeader));
+
+    // The optional transitions trailer (bundle.h), bounds-checked like the spawn extension.
+    const uint64_t end = sizeof(SpriteBlobHeader) + uint64_t(v.clip_count) * sizeof(SpriteClipDef);
+    if (end + 8u <= e->usize) {
+        uint32_t hdr[2];
+        std::memcpy(hdr, p + end, sizeof(hdr));
+        if (hdr[0] == kSpriteTransMagic && end + 8u + uint64_t(hdr[1]) * sizeof(SpriteTransDef) <= e->usize) {
+            v.trans_count = hdr[1];
+            v.trans       = reinterpret_cast<const SpriteTransDef*>(p + end + 8u);
+        }
+    }
     return Result<SpriteView>::good(v);
+}
+
+Result<FontView> ResourceCache::font(NameHash name) {
+    const TocEntry* e = find(name, AssetType::Font);
+    if (!e) return Result<FontView>::fail(Status::NotFound);
+    const uint8_t* p = resolve(e);
+    if (!p) return Result<FontView>::fail(Status::IoError);
+    if (e->usize < sizeof(FontBlobHeader)) return Result<FontView>::fail(Status::Corrupt);
+    FontBlobHeader h;
+    std::memcpy(&h, p, sizeof(h));
+    if (sizeof(FontBlobHeader) + uint64_t(h.glyph_count) * sizeof(FontGlyphDef) > e->usize)
+        return Result<FontView>::fail(Status::Corrupt);
+    FontView v;
+    v.texture = h.texture; v.glyph_count = h.glyph_count; v.first_char = h.first_char;
+    v.line_h = h.line_h; v.cell_w = h.cell_w; v.cell_h = h.cell_h; v.advance = h.advance; v.flags = h.flags;
+    v.glyphs = reinterpret_cast<const FontGlyphDef*>(p + sizeof(FontBlobHeader));
+    return Result<FontView>::good(v);
+}
+
+Result<DialogueData> ResourceCache::dialogue(NameHash name) {
+    const TocEntry* e = find(name, AssetType::Dialogue);
+    if (!e) return Result<DialogueData>::fail(Status::NotFound);
+    const uint8_t* p = resolve(e);
+    if (!p) return Result<DialogueData>::fail(Status::IoError);
+    if (e->usize < sizeof(DialogueHeader)) return Result<DialogueData>::fail(Status::Corrupt);
+    DialogueHeader h;
+    std::memcpy(&h, p, sizeof(h));
+    if (h.magic != kDialogueMagic) return Result<DialogueData>::fail(Status::Corrupt);
+    uint64_t at = sizeof(DialogueHeader);
+    DialogueData d;
+    d.convs    = reinterpret_cast<const DlgConvDef*>(p + at);    at += uint64_t(h.conv_count) * sizeof(DlgConvDef);
+    d.speakers = reinterpret_cast<const DlgSpeakerDef*>(p + at); at += uint64_t(h.speaker_count) * sizeof(DlgSpeakerDef);
+    d.nodes    = reinterpret_cast<const DlgNodeDef*>(p + at);    at += uint64_t(h.node_count) * sizeof(DlgNodeDef);
+    d.choices  = reinterpret_cast<const DlgChoiceDef*>(p + at);  at += uint64_t(h.choice_count) * sizeof(DlgChoiceDef);
+    d.ops      = reinterpret_cast<const DlgOp*>(p + at);         at += uint64_t(h.op_count) * sizeof(DlgOp);
+    d.strings  = reinterpret_cast<const char*>(p + at);          at += h.strings_size;
+    if (at > e->usize) return Result<DialogueData>::fail(Status::Corrupt);
+    d.conv_count = h.conv_count; d.speaker_count = h.speaker_count; d.node_count = h.node_count;
+    d.choice_count = h.choice_count; d.op_count = h.op_count; d.strings_size = h.strings_size;
+    // every index inside its section (a hand-edited or truncated asset never drives a bad read)
+    auto next_ok = [&](uint16_t n) { return n == kDlgEnd || n < d.node_count; };
+    for (uint16_t i = 0; i < d.conv_count; ++i)
+        if (d.convs[i].first_node >= d.node_count && d.convs[i].node_count) return Result<DialogueData>::fail(Status::Corrupt);
+    for (uint16_t i = 0; i < d.node_count; ++i) {
+        const DlgNodeDef& n = d.nodes[i];
+        if (!next_ok(n.next) || (n.speaker != kDlgNoSpeaker && n.speaker >= d.speaker_count) ||
+            uint32_t(n.first_choice) + n.choice_count > d.choice_count || uint32_t(n.first_op) + n.op_count > d.op_count ||
+            n.text >= d.strings_size)
+            return Result<DialogueData>::fail(Status::Corrupt);
+    }
+    for (uint16_t i = 0; i < d.choice_count; ++i) {
+        const DlgChoiceDef& c = d.choices[i];
+        if (!next_ok(c.next) || uint32_t(c.first_op) + c.op_count > d.op_count || c.text >= d.strings_size)
+            return Result<DialogueData>::fail(Status::Corrupt);
+    }
+    for (uint16_t i = 0; i < d.speaker_count; ++i)
+        if (d.speakers[i].name >= d.strings_size) return Result<DialogueData>::fail(Status::Corrupt);
+    if (d.strings_size && d.strings[d.strings_size - 1] != 0) return Result<DialogueData>::fail(Status::Corrupt);
+    return Result<DialogueData>::good(d);
 }
 
 Result<SpawnsView> ResourceCache::spawns(NameHash name) {
@@ -257,6 +340,25 @@ Result<SpawnsView> ResourceCache::spawns(NameHash name) {
     SpawnsView v;
     v.count  = sh->count;
     v.spawns = reinterpret_cast<const SpawnDef*>(p + sizeof(SpawnBlobHeader));
+
+    // The optional extension (bundle.h): names + per-instance properties, bounds-checked against
+    // the asset's size so a truncated or foreign trailer is simply ignored.
+    const uint64_t end = sizeof(SpawnBlobHeader) + uint64_t(v.count) * sizeof(SpawnDef);
+    const uint64_t ext = (end + 3u) & ~uint64_t(3);
+    if (ext + 12u <= e->usize) {
+        uint32_t hdr[3];
+        std::memcpy(hdr, p + ext, sizeof(hdr));
+        const uint64_t names_at = ext + 12u;
+        const uint64_t props_at = names_at + uint64_t(v.count) * 4u;
+        const uint64_t strs_at  = props_at + uint64_t(hdr[1]) * sizeof(SpawnPropDef);
+        if (hdr[0] == kSpawnExtMagic && strs_at + hdr[2] <= e->usize) {
+            v.names = p + names_at;
+            v.props = p + props_at;
+            v.prop_count = hdr[1];
+            v.strings = reinterpret_cast<const char*>(p + strs_at);
+            v.strings_size = hdr[2];
+        }
+    }
     return Result<SpawnsView>::good(v);
 }
 

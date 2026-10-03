@@ -13,6 +13,7 @@
 #include "phx/platform/gfx_soft.h"
 
 #include <cstdio>
+#include <string>
 
 extern "C" void phx_null_set_step_ns(uint64_t);
 extern "C" void phx_null_set_max_frames(uint64_t);
@@ -22,8 +23,12 @@ using namespace phx;
 using namespace game;
 
 namespace {
-const char* kBundle = "build/emberwing.phxp";
-const char* kSave   = "build/emberwing.sav";
+// The PPU build of this suite (phx_emberwing_ppu) bakes and saves to its own files: `make check -j`
+// runs the soft and PPU builds at once, and a shared save let one run clobber the other's. The soft
+// build keeps build/emberwing.phxp (Phoenix Studio and examples/emberwing/phxproject.json open it).
+std::string g_bundle = "build/emberwing.phxp", g_save = "build/emberwing.sav";
+const char* kBundle = nullptr;
+const char* kSave   = nullptr;
 int g_fail = 0;
 
 void CK(bool c, const char* m) { if (!c) { ++g_fail; std::printf("    FAIL %s\n", m); } }
@@ -104,7 +109,16 @@ struct LoadGame final : EmberwingGame {
 };
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 0 && argv[0]) {
+        std::string stem = argv[0];
+        const size_t sl = stem.find_last_of("/\\");
+        if (sl != std::string::npos) stem = stem.substr(sl + 1);
+        if (stem.size() > 4 && stem.compare(stem.size() - 4, 4, ".exe") == 0) stem.resize(stem.size() - 4);
+        if (stem.find("ppu") != std::string::npos) { g_bundle = "build/emberwing_ppu.phxp"; g_save = "build/emberwing_ppu.sav"; }
+    }
+    kBundle = g_bundle.c_str();
+    kSave = g_save.c_str();
     if (!bake_emberwing_assets(kBundle)) { std::printf("EMBERWING FAIL (bake)\n"); return 1; }
     std::remove(kSave);
 

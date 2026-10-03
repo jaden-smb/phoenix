@@ -77,9 +77,9 @@ add_subdirectory(examples/tinyllm)
 # ---- host-only tools (always built for the host, even when cross-compiling) -
 # The asset pipeline (docs/08): per-format CONVERTERS bake author sources into intermediate
 # .phx* files; the phxpack ASSEMBLER merges them into assets.phxp. They share one bake path
-# (tools/phxpack/builders.h). The phxtmap/phxentity GUI editors are Makefile-only for now
-# (`make tmap` / `make entity`): they need SDL2 + a display, which this tree doesn't probe for
-# (see PHX_USE_SDL on phx_platform) — wiring them into CMake is still open.
+# (tools/phxpack/builders.h). Phoenix Studio (tools/phxstudio): phxnew always; phxstudio and the
+# standalone phxtmap / phxentity editors when configured with -DPHX_USE_SDL=ON (they open a
+# window through the engine's SDL platform backend).
 if(NOT CMAKE_CROSSCOMPILING)
   add_subdirectory(tools/phxpack)     # assembler
   add_subdirectory(tools/phxsprite)   # PNG/sprdef/json -> .phxspr
@@ -87,6 +87,7 @@ if(NOT CMAKE_CROSSCOMPILING)
   add_subdirectory(tools/phxsnd)      # WAV             -> .phxsnd
   add_subdirectory(tools/phxbin)      # JSON            -> .phxbin (+ .gen.h)
   add_subdirectory(tools/phxviz)      # WAV             -> .phxviz (visualization track)
+  add_subdirectory(tools/phxstudio)   # phxnew (+ phxstudio / phxtmap / phxentity with PHX_USE_SDL)
   enable_testing()
   add_subdirectory(tests)
 endif()

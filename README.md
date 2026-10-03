@@ -73,11 +73,16 @@ make sanitize             # the full suite under ASan + UBSan
 Expected: `PASS 120336 checks across 101 cases`, a `... PASS` line per suite, and `depcheck: OK`.
 
 With SDL2 (and libGL) you also get windowed play and the desktop verifiers — `make sdl`, `make
-gl`, `make sdl-verify`, `make gl-verify`, `make audio-verify` — plus the two GUI editors, `make
-tmap` (tilemap) and `make entity` (record tables), and **Phoenix Studio**, `make studio && ./build/phxstudio`:
-one window that shows the module graph and capability tiers, previews every baked asset as each
-console would render it, and runs every game, editor, gate and suite with a click
-([instructions](tools/phxstudio/instructions.md)). Every suite is its own target (`make physics`,
+gl`, `make sdl-verify`, `make gl-verify`, `make audio-verify` — plus **Phoenix Studio**, `make
+studio && ./build/phxstudio`: the editor for the engine, built on the engine. It has a code editor, a
+sprite/pixel editor (GBA colour checks, frames, animated clips), a tilemap editor (real tileset art,
+collision, spawns, parallax) and a data-table editor. It also shows the module graph and capability
+tiers, previews every baked asset as each console would render it, and runs every game, gate and
+suite with a click ([instructions](tools/phxstudio/instructions.md)). It works on **game projects**
+(a folder with a `phxproject.json`; File > New project makes a playable one). A project can edit only
+its own folder and read the engine's public API, and it builds with `make play PROJECT=path`.
+`--engine-dev` opens the engine itself. The map and table editors also ship standalone:
+`make tmap`, `make entity`. Every suite is its own target (`make physics`,
 `make ppu`, `make resource`, …); see the [Makefile](Makefile), and the `instructions.md` in each
 tool folder. With doxygen installed, `make docs` generates the browsable API reference (public
 headers + this manual) into `build/docs/html`.

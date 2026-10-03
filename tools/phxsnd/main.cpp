@@ -1,8 +1,9 @@
 // tools/phxsnd/main.cpp — the audio converter (docs/08 §5). Host-only.
-//   phxsnd --out tone.phxsnd [--name tone] [--target 0|1|2] <tone.wav>
+//   phxsnd --out tone.phxsnd [--name tone] [--target 0|1|2] <tone.wav | coin.sfx | theme.song>
 // Decodes a RIFF/WAVE file (PCM 8/16-bit, mono/stereo) to mono 16-bit at the file rate and emits
 // a `.phxsnd` intermediate (a one-source bundle: the Sound asset) that `phxpack` merges into
-// assets.phxp. (Per-target codecs — GBA 8-bit, PSP ADPCM — are a future encoding step; the
+// assets.phxp. A `.sfx` (sound-effect parameters) or `.song` (tracker) is synthesized first
+// (tools/phxpack/synth.h) and baked the same way. (Per-target codecs — GBA 8-bit, PSP ADPCM — are a future encoding step; the
 // runtime mixer currently consumes mono16, so that is what is baked.)
 #include "builders.h"
 
@@ -19,14 +20,18 @@ int main(int argc, char** argv) {
         else if (a == "--name"   && i + 1 < argc) name   = argv[++i];
         else if (a == "--target" && i + 1 < argc) target = std::atoi(argv[++i]);
         else if (a == "--help" || a == "-h") {
-            std::printf("usage: phxsnd --out FILE.phxsnd [--name N] [--target 0|1|2] <sound.wav>\n");
+            std::printf("usage: phxsnd --out FILE.phxsnd [--name N] [--target 0|1|2] <sound.wav | .sfx | .song>\n");
             return 0;
         } else in = a;
     }
-    if (out.empty() || in.empty()) { std::fprintf(stderr, "phxsnd: need --out and a .wav input (try --help)\n"); return 2; }
+    if (out.empty() || in.empty()) { std::fprintf(stderr, "phxsnd: need --out and a .wav/.sfx/.song input (try --help)\n"); return 2; }
 
     phxtool::BundleWriter w{uint8_t(target)};
-    if (!phxtool::build_wav(w, in, name.empty() ? phxtool::stem(out) : name)) return 1;
+    const std::string nm = name.empty() ? phxtool::stem(out) : name;
+    const bool ok = phxtool::ends_with(in, ".sfx")  ? phxtool::build_sfx(w, in, nm)
+                  : phxtool::ends_with(in, ".song") ? phxtool::build_song(w, in, nm)
+                  :                                   phxtool::build_wav(w, in, nm);
+    if (!ok) return 1;
     if (!w.write(out)) { std::fprintf(stderr, "phxsnd: cannot write '%s'\n", out.c_str()); return 1; }
     std::printf("phxsnd: wrote %s\n", out.c_str());
     return 0;

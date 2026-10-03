@@ -124,19 +124,43 @@ public:
         push(name, phx::AssetType::Tilemap, std::move(blob));
     }
 
-    // Sprite-sheet metadata: a frame grid over a (separately added) texture + named clips.
+    // Sprite-sheet metadata: a frame grid over a (separately added) texture + named clips, and
+    // (optional) the clips' transitions.
     void add_sprite(const std::string& name, const std::string& texture,
                     uint16_t frame_w, uint16_t frame_h, uint16_t cols,
-                    const std::vector<phx::SpriteClipDef>& clips) {
+                    const std::vector<phx::SpriteClipDef>& clips,
+                    const std::vector<phx::SpriteTransDef>& trans = {}) {
         phx::SpriteBlobHeader sh{};
         sh.texture = phx::fnv1a(texture.c_str());
         sh.frame_w = frame_w; sh.frame_h = frame_h; sh.cols = cols;
         sh.clip_count = uint16_t(clips.size());
-        std::vector<uint8_t> blob(sizeof(sh) + clips.size() * sizeof(phx::SpriteClipDef));
+        const size_t clips_end = sizeof(sh) + clips.size() * sizeof(phx::SpriteClipDef);
+        const size_t trans_bytes = trans.empty() ? 0 : 8 + trans.size() * sizeof(phx::SpriteTransDef);
+        std::vector<uint8_t> blob(clips_end + trans_bytes);
         std::memcpy(blob.data(), &sh, sizeof(sh));
         if (!clips.empty())
             std::memcpy(blob.data() + sizeof(sh), clips.data(), clips.size() * sizeof(phx::SpriteClipDef));
+        if (!trans.empty()) {        // the transitions trailer (bundle.h); clips_end is 4-aligned
+            const uint32_t hdr[2] = { phx::kSpriteTransMagic, uint32_t(trans.size()) };
+            std::memcpy(blob.data() + clips_end, hdr, sizeof(hdr));
+            std::memcpy(blob.data() + clips_end + 8, trans.data(), trans.size() * sizeof(phx::SpriteTransDef));
+        }
         push(name, phx::AssetType::Sprite, std::move(blob));
+    }
+
+    // A compiled dialogue (tools/phxpack/dialogue.h DlgCompiled::blob()).
+    void add_dialogue(const std::string& name, std::vector<uint8_t> blob) {
+        push(name, phx::AssetType::Dialogue, std::move(blob));
+    }
+
+    // A font's glyph table over a (separately added) atlas texture (bundle.h FontBlobHeader).
+    void add_font(const std::string& name, const phx::FontBlobHeader& hdr, const std::vector<phx::FontGlyphDef>& glyphs) {
+        phx::FontBlobHeader h = hdr;
+        h.glyph_count = uint16_t(glyphs.size());
+        std::vector<uint8_t> blob(sizeof(h) + glyphs.size() * sizeof(phx::FontGlyphDef));
+        std::memcpy(blob.data(), &h, sizeof(h));
+        if (!glyphs.empty()) std::memcpy(blob.data() + sizeof(h), glyphs.data(), glyphs.size() * sizeof(phx::FontGlyphDef));
+        push(name, phx::AssetType::Font, std::move(blob));
     }
 
     // Mono 16-bit PCM sound at `rate` Hz (e.g. decoded from a WAV). PER-TARGET ENCODE
@@ -174,13 +198,19 @@ public:
         push(name, phx::AssetType::Sound, std::move(blob));
     }
 
-    // Object-layer spawn points (e.g. from a Tiled object group).
-    void add_spawns(const std::string& name, const std::vector<phx::SpawnDef>& spawns) {
+    // Object-layer spawn points (e.g. from a Tiled object group), plus the optional extension
+    // (names + per-instance properties, already laid out; see phx/resource/bundle.h).
+    void add_spawns(const std::string& name, const std::vector<phx::SpawnDef>& spawns,
+                    const std::vector<uint8_t>& ext = {}) {
         phx::SpawnBlobHeader sh{}; sh.count = uint32_t(spawns.size());
         std::vector<uint8_t> blob(sizeof(sh) + spawns.size() * sizeof(phx::SpawnDef));
         std::memcpy(blob.data(), &sh, sizeof(sh));
         if (!spawns.empty())
             std::memcpy(blob.data() + sizeof(sh), spawns.data(), spawns.size() * sizeof(phx::SpawnDef));
+        if (!ext.empty()) {
+            blob.resize((blob.size() + 3) & ~size_t(3), 0);
+            blob.insert(blob.end(), ext.begin(), ext.end());
+        }
         push(name, phx::AssetType::Spawns, std::move(blob));
     }
 

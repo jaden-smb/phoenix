@@ -16,16 +16,32 @@
 
 namespace phx {
 
+// One glyph of a proportional font: its source rect in the atlas, where it draws relative to the
+// pen (xoff, yoff) and how far the pen then moves. The layout is the baked Font asset's
+// FontGlyphDef (phx/resource/bundle.h), so a font's glyph table is used in place.
+struct FontGlyph {
+    uint16_t sx, sy;          // source rect in the atlas
+    uint8_t  w, h;            // 0 x 0 = nothing to draw (a space)
+    uint8_t  advance;         // pen step, px
+    int8_t   xoff, yoff;      // draw offset from the pen, px
+    uint8_t  pad;
+};
+
 // A bitmap font: an atlas of fixed-size glyph cells in a `cols`-wide grid. Cell 0 is ASCII
 // `first_char` (usually 32 = space). Fixed-width advance keeps GBA tile budgets predictable.
+// With a glyph table (`glyphs`, from a baked Font asset: phx/runtime/font.h) each character
+// has its own rect, offset and advance instead (proportional text); characters past the table
+// draw nothing and advance by `advance`.
 struct BitmapFont {
     TextureId tex        = kNoTexture;
     uint8_t   glyph_w    = 8;
     uint8_t   glyph_h    = 8;
     uint8_t   cols       = 16;
     uint8_t   first_char = 32;
-    uint8_t   advance    = 8;     // horizontal pixels per glyph
+    uint8_t   advance    = 8;     // horizontal pixels per glyph (the grid's; widest, with glyphs)
     uint8_t   line_h     = 8;     // vertical pixels per '\n'
+    const FontGlyph* glyphs = nullptr;   // optional per-character table from first_char
+    uint16_t  glyph_count = 0;
 };
 
 struct UIRect { vec2 pos; vec2 size; };
@@ -77,6 +93,22 @@ public:
 
     void end();
 
+    // The pen step of character `c`, and the width of `str` in pixels (its widest line). What
+    // text() / button() / dialogue() lay text out with; games centre and right-align with it.
+    static int glyph_advance(const BitmapFont& font, unsigned char c) {
+        if (font.glyphs && c >= font.first_char && c - font.first_char < font.glyph_count)
+            return font.glyphs[c - font.first_char].advance;
+        return font.advance;
+    }
+    static int text_width(const BitmapFont& font, const char* str) {
+        int w = 0, line = 0;
+        for (const char* p = str; p && *p; ++p) {
+            if (*p == '\n') { w = line > w ? line : w; line = 0; continue; }
+            line += glyph_advance(font, (unsigned char)*p);
+        }
+        return line > w ? line : w;
+    }
+
     int  focus() const     { return focus_; }
     void set_focus(int f)   { focus_ = f; }
 
@@ -97,6 +129,8 @@ private:
     Renderer*         r_   = nullptr;
     const InputState* in_  = nullptr;
     TextureId         white_ = kNoTexture;
+    void glyph(const BitmapFont&, unsigned char c, int x, int y, Rgba tint, uint8_t layer);
+
     int focus_          = 0;
     int btn_count_      = 0;   // buttons issued this frame
     int prev_btn_count_ = 0;   // last frame's count (for nav wrap)

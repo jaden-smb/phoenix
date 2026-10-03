@@ -7,6 +7,7 @@
 // (`make tools` / ctest `tools_cli`) can re-run the actual tool binaries over them.
 #include "phx/platform/platform.h"
 #include "phx/resource/cache.h"
+#include "phx/resource/table.h"
 #include "phx/core/caps.h"
 
 #include "builders.h"        // the converter bake logic
@@ -14,10 +15,16 @@
 #include "editor.h"                        // phxtmap's document model (load/edit/save .tmj)
 #include "../../tools/phxentity/editor.h"     // phxentity's document model (phxbin JSON tables)
 #include "../../tools/phxstudio/model.h"      // Phoenix Studio's headless model
+#include "../../tools/phxstudio/budget.h"     // ... and its Budget view
 
 #include "fixtures/png_fixtures.h"
+#include "ascii_font.h"                  // tools/common: the font sheet the font tests bake
+#include "png_write.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -55,7 +62,8 @@ const char* kTmj =
 "       { \"name\":\"p\", \"type\":\"player\", \"x\":8,  \"y\":16, \"width\":8, \"height\":8 },"
 "       { \"name\":\"c\", \"type\":\"coin\",   \"x\":16, \"y\":8,  \"width\":8, \"height\":8 } ] } ] }";
 
-const char* kSprdef = "sheet p_sheet.png 2 2\nclip walk 0 4 8 1\nclip idle 0 1 0 0\n";
+const char* kSprdef = "sheet p_sheet.png 2 2\nclip walk 0 4 8 1\nclip idle 0 1 0 0\n"
+                      "trans idle walk move\ntrans * idle stop\n";
 
 const char* kItems =
 "{ \"struct\":\"ItemRecord\","
@@ -127,7 +135,10 @@ int main() {
     check(spr.ok(), "sprite('hero') merged");
     if (spr.ok()) { SpriteView s = spr.unwrap();
         check(s.texture == "p_sheet"_hash && s.frame_w == 2 && s.frame_h == 2 && s.cols == 4, "sprite frame grid");
-        check(s.clip_count == 2 && s.clips && s.clips[0].name == "walk"_hash && s.clips[0].count == 4, "sprite clips"); }
+        check(s.clip_count == 2 && s.clips && s.clips[0].name == "walk"_hash && s.clips[0].count == 4, "sprite clips");
+        check(s.trans_count == 2 && s.trans && s.trans[0].from == 1 && s.trans[0].to == 0 &&
+              s.trans[0].trigger == "move"_hash && s.trans[1].from == kSpriteTransAny && s.trans[1].to == 1 &&
+              s.trans[1].trigger == "stop"_hash, "sprite transitions: clip names resolved to indices, '*' = any"); }
 
     // tilemap (+ spawns), from phxtile
     auto mv = cache->tilemap("level"_hash);
@@ -228,7 +239,14 @@ int main() {
         std::memcpy(&id0,    p + 8 + 0, 2);
         std::memcpy(&price0, p + 8 + 4, 4);
         std::memcpy(&atk1,   p + 8 + stride + 8, 2);
-        check(id0 == 1 && price0 == 100 && atk1 == -3, "table record fields"); }
+        check(id0 == 1 && price0 == 100 && atk1 == -3, "table record fields");
+        // the schema trailer: the same table read by COLUMN NAME (phx/resource/table.h)
+        TableView t;
+        check(t.parse(b) && t.has_schema() && t.count() == 2 && t.stride() == 12, "table schema trailer parses");
+        check(t.get_int(0, "price"_hash) == 100 && t.get_int(1, "atk"_hash) == -3 && t.get_int(1, "id"_hash) == 2,
+              "table columns read by name");
+        check(t.get_int(0, "nope"_hash, 7) == 7 && t.get_int(5, "id"_hash, -1) == -1 && !t.has("nope"_hash),
+              "absent column / row -> the default"); }
 
     // phxtmap editor document model: blank -> paint tiles + place spawns + a parallax layer
     // -> save .tmj -> the REAL importer parses it back identically (editors emit author
@@ -269,6 +287,60 @@ int main() {
         // The doc's spawn vocabulary is harvested for the GUI's placeable list.
         auto tys = r2.spawn_types();
         check(tys.size() == 1 && tys[0] == "player", "spawn_types harvests the doc's vocabulary");
+    }
+
+    // Per-spawn properties: the map editor's model -> .tmj (Tiled custom properties) -> the real
+    // importer -> the bake's spawn extension -> SpawnsView by name + key.
+    {
+        using phxtool::TmapDoc;
+        TmapDoc d = TmapDoc::blank(4, 2, 8, 8, "tiles");
+        d.add_spawn("door", 8, 0);
+        d.add_spawn("enemy", 16, 8);
+        d.add_spawn("coin", 24, 8);
+        d.spawns[0].name = "door_a";
+        d.spawns[2].name = "";                                        // an unnamed spawn
+        d.set_prop(0, "target", "string", "level2 \"b\"");            // quotes survive the JSON
+        d.set_prop(1, "range", "int", "-24");
+        d.set_prop(1, "speed", "float", "1.5");
+        d.set_prop(1, "angry", "bool", "yes");                        // normalised to true
+        d.set_prop(1, "range", "int", "32");                          // replaces, not appends
+        d.set_prop(1, "tmp", "int", "abc");                           // not a number -> 0
+        d.remove_prop(1, "tmp");
+        check(d.spawns[1].props.size() == 3 && d.spawns[1].props[0].value == "32" && d.spawns[1].props[2].value == "true",
+              "spawn props: set replaces by name, values normalise to their type, remove drops");
+        check(TmapDoc::normalise_prop("int", "-") == "0" && TmapDoc::normalise_prop("float", "2") == "2" &&
+              TmapDoc::normalise_prop("bool", "0") == "false", "prop values normalise per type");
+        TmapDoc r;
+        check(TmapDoc::load(d.save_tmj(), r) && r.spawns.size() == 3 && r.spawns[0].props.size() == 1 &&
+              r.spawns[0].props[0].value == "level2 \"b\"" && r.spawns[1].props == d.spawns[1].props,
+              "spawn props round-trip through the .tmj and the real importer");
+        check(d.save_file("build/p_props.tmj"), "write the props map");
+        phxtool::BundleWriter w(2);
+        check(phxtool::build_tmj(w, "build/p_props.tmj", "props") && w.write("build/p_props.phxp"), "bake the props map");
+        ResourceCache* cp = ResourceCache::create(arena).unwrap();
+        check(cp->mount(plat, "build/p_props.phxp") == Status::Ok, "mount the props map");
+        auto sp = cp->spawns("props"_hash);
+        check(sp.ok() && sp.unwrap().count == 3 && sp.unwrap().prop_count == 4, "the spawn extension is baked");
+        if (sp.ok()) {
+            const SpawnsView v = sp.unwrap();
+            check(v.name(0) == "door_a"_hash && v.name(2) == 0 && v.find_named("door_a"_hash) == 0 && v.find_named("x"_hash) == -1,
+                  "spawn names by index; an unnamed spawn is 0");
+            check(v.get_str(0, "target"_hash) && std::strcmp(v.get_str(0, "target"_hash), "level2 \"b\"") == 0 &&
+                  v.get_hash(0, "target"_hash) == phx::fnv1a("level2 \"b\""), "a string property");
+            check(v.get_int(1, "range"_hash) == 32 && v.get_int(1, "speed"_hash) == 1 && v.get_int(1, "angry"_hash) == 1,
+                  "int, float (truncated) and bool properties");
+            check(v.get_int(1, "nope"_hash, 7) == 7 && v.get_int(0, "range"_hash, 7) == 7 && v.get_str(1, "range"_hash) == nullptr,
+                  "absent keys / other spawns' keys / wrong type -> the default");
+        }
+        // a map whose spawns have no names and no properties bakes exactly as before (no extension)
+        TmapDoc plain = TmapDoc::blank(2, 2, 8, 8, "tiles");
+        plain.add_spawn("coin", 0, 0);
+        plain.spawns[0].name = "";
+        phxtool::BundleWriter wp(2);
+        check(plain.save_file("build/p_plain.tmj") && phxtool::build_tmj(wp, "build/p_plain.tmj", "plain") && wp.write("build/p_plain.phxp"),
+              "bake a map with bare spawns");
+        check(cp->mount(plat, "build/p_plain.phxp") == Status::Ok && cp->spawns("plain"_hash).ok() &&
+              cp->spawns("plain"_hash).unwrap().names == nullptr, "bare spawns carry no extension");
     }
 
     // phxtmap editor: per-GID collision flags author-edit + round-trip (saved as Tiled
@@ -478,6 +550,12 @@ int main() {
                   "overlong name truncates to N-1 chars + NUL");
             uint16_t hp0 = 0; std::memcpy(&hp0, p + 8 + 16, 2);
             check(hp0 == 3, "int field after the string column reads back");
+            TableView t;
+            check(t.parse(pb.unwrap()) && t.find("type"_hash, "player"_hash) == 0 && t.find("type"_hash, "ghost"_hash) == -1,
+                  "a prefab row is found by its type column");
+            check(t.get_int(0, "hp"_hash) == 3 && std::strcmp(t.get_str(0, "type"_hash), "player") == 0 &&
+                  t.get_hash(0, "type"_hash) == "player"_hash && t.get_str(0, "hp"_hash) == nullptr,
+                  "prefab columns by name: int, str, hash; an int column is not a str");
         }
         bool gen_str = false;
         if (FILE* h = std::fopen("build/p_prefabs.gen.h", "rb")) {
@@ -655,6 +733,8 @@ int main() {
         check(std::find(prereqs.begin(), prereqs.end(), "pipeline") != prereqs.end() &&
               std::find(prereqs.begin(), prereqs.end(), "depcheck") != prereqs.end(),
               "studio: `check:` prerequisites parsed");
+        const auto crlf = make_prereqs("x: y\r\ncheck: a b \\\r\n  c\r\nd: e\r\n", "check");
+        check(crlf.size() == 3 && crlf[1] == "b" && crlf[2] == "c", "studio: prerequisites of a CRLF Makefile");
         check(make_has_target(mk, "studio") && make_has_target(mk, "emberwing-sdl") && !make_has_target(mk, "CXXFLAGS"),
               "studio: make_has_target (rules, not variables)");
         const auto launches = default_launches(mk, "/nonexistent/devkitARM");
@@ -687,6 +767,47 @@ int main() {
         check(exit_code_from_status(0) == 0 && exit_code_from_status(3 << 8) == 3 && exit_code_from_status(15) == 143,
               "studio: wait status -> exit code (signals as 128+N)");
 
+        // tools on PATH + the Windows shell lookup (pure; the fake installs live under build/)
+        {
+            const std::vector<std::string> pl = split_path_list("C:\\a;;C:\\b c;", ';');
+            check(pl.size() == 2 && pl[0] == "C:\\a" && pl[1] == "C:\\b c", "studio: PATH list split, empties dropped");
+            check(split_path_list("/usr/bin::/bin", ':').size() == 2, "studio: POSIX PATH list split");
+            namespace sfs = std::filesystem;
+            std::error_code ec;
+            const std::string t = sfs::absolute("build/p_tools").generic_string();
+            sfs::remove_all(t, ec);
+            for (const char* d : { "/bin", "/msys/usr/bin", "/msys/ucrt64/bin", "/msys/opt/dk/bin", "/git/usr/bin" })
+                sfs::create_directories(t + d, ec);
+            for (const char* f : { "/bin/sdl2-config", "/bin/make.exe", "/msys/usr/bin/sh.exe", "/msys/usr/bin/make.exe",
+                                   "/msys/opt/dk/bin/arm-g++.exe", "/git/usr/bin/sh.exe" })
+                write_file((t + f).c_str(), "x", 1);
+            const std::vector<std::string> dirs = { t + "/bin" };
+            check(resolve_tool("sdl2-config", dirs, true) == t + "/bin/sdl2-config" &&
+                  resolve_tool("make", dirs, true) == t + "/bin/make.exe" && resolve_tool("make", dirs, false).empty(),
+                  "studio: tools resolve bare, and with .exe on Windows only");
+            check(resolve_tool("/opt/dk/bin/arm-g++", {}, true, t + "/msys") == t + "/msys/opt/dk/bin/arm-g++.exe" &&
+                  resolve_tool("/opt/dk/bin/arm-g++", {}, false, t + "/msys").empty(),
+                  "studio: a POSIX-absolute need resolves under the shell's root on Windows");
+            // sh.exe beside make wins; the toolchain folder and the shell's bin go in front of PATH
+            const PosixShell s1 = find_posix_shell({ t + "/msys/usr/bin" }, "", "", { t + "/git/usr/bin/sh.exe" });
+            check(s1.sh == t + "/msys/usr/bin/sh.exe" && s1.root == t + "/msys" && s1.add_path.size() == 1 &&
+                  s1.add_path[0] == t + "/msys/ucrt64/bin", "studio: MSYS2 shell beside make, ucrt64 added to PATH");
+            const PosixShell s2 = find_posix_shell({ t + "/bin" }, "", "UCRT64", { t + "/msys/usr/bin/sh.exe" });
+            check(s2.sh == t + "/msys/usr/bin/sh.exe" && s2.add_path.size() == 2 && s2.add_path[1] == t + "/msys/usr/bin",
+                  "studio: shell from the fallbacks, its bin added to PATH");
+            const PosixShell s3 = find_posix_shell({}, t + "/git/usr/bin/sh.exe", "", {});
+            check(s3.sh == t + "/git/usr/bin/sh.exe" && s3.root == t + "/git", "studio: PHX_SH overrides the search");
+            check(find_posix_shell({ t + "/bin" }, "", "", {}).sh.empty(), "studio: no shell found");
+            // launch needs name SDK variables; DEVKITPRO/DEVKITARM default like the Makefile's
+            auto no_env = [](const std::string&) { return std::string(); };
+            auto dkp_env = [](const std::string& k) { return std::string(k == "DEVKITPRO" ? "/c/dkp" : ""); };
+            check(expand_need_vars("$DEVKITARM/bin/arm-none-eabi-g++", no_env) == "/opt/devkitpro/devkitARM/bin/arm-none-eabi-g++" &&
+                  expand_need_vars("${DEVKITARM}/bin/x", dkp_env) == "/c/dkp/devkitARM/bin/x" &&
+                  expand_need_vars("$NOPE/x $", no_env) == "$NOPE/x $" && expand_need_vars("psp-g++", no_env) == "psp-g++",
+                  "studio: launch needs expand $VAR / ${VAR} with the SDK defaults");
+            sfs::remove_all(t, ec);
+        }
+
         // layout math
         const Rect f1 = fit_rect(16, 8, Rect{ 0, 0, 100, 100 });
         check(f1.w == 96 && f1.h == 48 && f1.x == 2 && f1.y == 26, "studio: fit_rect integer upscale, centered");
@@ -704,6 +825,237 @@ int main() {
         check(human_bytes(224 * 1024) == "224 KB" && human_bytes(1536) == "1.5 KB" && human_bytes(12) == "12 B",
               "studio: human_bytes");
         check(!find_repo_root(".").empty(), "studio: the repo root is found from the working directory");
+    }
+
+    // ---- synthesized audio: .sfx sound effects + .song tracker music (tools/phxpack/synth.h) ----
+    {
+        using namespace phxtool;
+        // sound effects: deterministic, length = attack + sustain + decay, round-trips through JSON
+        SfxParams p = sfx_preset("pickup", 7);
+        const std::vector<int16_t> a = render_sfx(p), b = render_sfx(p);
+        check(!a.empty() && a == b && a.size() == size_t(p.length() * kSynthRate),
+              "sfx: a render is deterministic and as long as its envelope");
+        int peak = 0;
+        for (int16_t v : a) peak = std::max(peak, v < 0 ? -int(v) : int(v));
+        check(peak > 4000, "sfx: the pickup preset is audible");
+        check(sfx_preset("pickup", 7) == p && sfx_preset("pickup", 8) != p && sfx_random(3) == sfx_random(3) &&
+              sfx_mutate(p, 5) == sfx_mutate(p, 5) && sfx_mutate(p, 5).wave == p.wave,
+              "sfx: presets / randomize / mutate are reproducible from their seed");
+        for (const std::string& n : sfx_preset_names()) {
+            const SfxParams q = sfx_preset(n, 1);
+            check(!render_sfx(q).empty(), ("sfx: preset '" + n + "' renders").c_str());
+        }
+        SfxParams r;
+        check(sfx_from_json(sfx_to_json(p), r) && r == p, "sfx: JSON round trip");
+        check(sfx_from_json("{ \"wave\": \"noise\", \"freq\": 200 }", r) && r.wave == Wave::Noise && r.freq == 200 &&
+              r.decay == SfxParams{}.decay, "sfx: missing keys keep their defaults");
+        std::string err;
+        check(!sfx_from_json("{ \"wave\": \"kazoo\" }", r, &err) && err.find("kazoo") != std::string::npos,
+              "sfx: an unknown wave is an error");
+        SfxParams fall; fall.freq = 800; fall.slide = -8; fall.freq_min = 200; fall.sustain = 1; fall.decay = 1;
+        check(render_sfx(fall).size() < size_t(0.3 * kSynthRate), "sfx: a falling slide stops at freq_min");
+
+        // notes and cells
+        check(note_from_text("A-4") == 57 && note_from_text("C#4") == 49 && note_from_text("c-0") == 0 &&
+              note_from_text("B-7") == 95 && note_from_text("H-4") < 0 && note_text(49) == "C#4" &&
+              std::fabs(note_freq(57) - 440.0) < 1e-9, "song: note names <-> numbers (A-4 = 440 Hz)");
+        Song s = song_starter();
+        SongCell c;
+        check(cell_from_text(s, "E-3 bass", c) && c.note == 40 && c.inst == 1 && cell_text(s, c) == "E-3 bass" &&
+              cell_from_text(s, "off", c) && c.note == kCellOff && cell_from_text(s, "", c) && c.note == kCellEmpty &&
+              !cell_from_text(s, "E-3 tuba", c, &err) && !cell_from_text(s, "X-9", c), "song: cell text");
+
+        // songs: length is rows x row frames; JSON round trip keeps every cell
+        const std::vector<int16_t> pcm = render_song(s);
+        check(s.total_rows() == 32 && pcm.size() == size_t(s.total_rows()) * s.row_frames() && pcm == render_song(s),
+              "song: the render is deterministic and exactly rows x row length");
+        int speak = 0;
+        for (int16_t v : pcm) speak = std::max(speak, v < 0 ? -int(v) : int(v));
+        check(speak > 3000 && speak < 20000, "song: audible, with headroom for the sound effects over it");
+        Song t;
+        check(song_from_json(song_to_json(s), t) && t.patterns.size() == 2 && t.order == s.order &&
+              t.patterns[0].rows == s.patterns[0].rows && t.instruments.size() == 4 && t.instruments[2] == s.instruments[2],
+              "song: JSON round trip");
+        check(!song_from_json("{ \"patterns\": [], \"order\": [\"Z\"] }", t, &err) && err.find("Z") != std::string::npos,
+              "song: the order naming an unknown pattern is an error");
+        int oi = -1, row = -1;
+        check(s.position_at(s.row_seconds() * 17.5, oi, row) && oi == 1 && row == 1 && !s.position_at(s.seconds() + 1, oi, row),
+              "song: position_at maps a time to the playing pattern row");
+
+        // editing keeps indices consistent
+        Song e = s;
+        const int d = e.duplicate_pattern(0);
+        e.order.push_back(d);
+        e.remove_pattern(0);
+        check(e.patterns.size() == 2 && e.patterns[0].name == "B" && e.order == std::vector<int>({ 0, 1 }),
+              "song: removing a pattern drops it from the order and renumbers the rest");
+        e.remove_instrument(0);                                    // "lead": its notes fall back
+        check(e.instruments.size() == 3 && e.patterns[1].rows[0][0].inst == -1 && e.patterns[1].rows[0][1].inst == 0,
+              "song: removing an instrument renumbers the cells that name later ones");
+        check(e.rename_instrument(0, "sub") && !e.rename_instrument(0, "kick") && !e.rename_instrument(0, "a b"),
+              "song: instrument names stay unique, without spaces");
+        e.set_channels(2);
+        check(e.channels == 2 && e.patterns[0].rows[0].size() == 2, "song: channel count resizes every row");
+        e.resize_pattern(0, 8);
+        check(e.patterns[0].rows.size() == 8 && e.add_pattern(4) == 2 && e.patterns[2].name == "A",
+              "song: resize a pattern, add one with a fresh name");
+        check(!render_note(s.instruments[0], 48).empty(), "song: a single instrument note renders (the editor's audition)");
+        check(song_problems(Song{}).size() == 2 && song_problems(s).empty(), "song: problems (no instruments, empty order)");
+
+        // the bake: .sfx / .song -> Sound assets, read back from a mounted bundle
+        write_file("build/p_coin.sfx", sfx_to_json(p).data(), sfx_to_json(p).size());
+        const std::string sj = song_to_json(s);
+        write_file("build/p_theme.song", sj.data(), sj.size());
+        BundleWriter w(2);
+        check(build_from_source(w, "build/p_coin.sfx") && build_from_source(w, "build/p_theme.song") &&
+              w.write("build/p_synth.phxp"), "sfx/song: the bake dispatches them to Sound assets");
+        ResourceCache* cs = ResourceCache::create(arena).unwrap();
+        check(cs->mount(plat, "build/p_synth.phxp") == Status::Ok, "sfx/song: mount");
+        auto cv = cs->sound("p_coin"_hash);
+        auto tv = cs->sound("p_theme"_hash);
+        check(cv.ok() && cv.unwrap().rate == kSynthRate && cv.unwrap().frames == a.size() &&
+              std::memcmp(cv.unwrap().samples, a.data(), a.size() * 2) == 0, "sfx: the baked sound is the editor's render");
+        check(tv.ok() && tv.unwrap().frames == pcm.size(), "song: the baked music is the whole song");
+        BundleWriter w0(0);                                        // tier 0: resampled to the GBA rate
+        check(build_song(w0, "build/p_theme.song", "theme") && w0.write("build/p_synth.t0.phxp"), "song: tier-0 bake");
+        ResourceCache* c0 = ResourceCache::create(arena).unwrap();
+        check(c0->mount(plat, "build/p_synth.t0.phxp") == Status::Ok && c0->sound("theme"_hash).ok() &&
+              c0->sound("theme"_hash).unwrap().rate == 18157, "song: the tier-0 bake is at the GBA device rate");
+        check(!build_sfx(w, "build/nope.sfx"), "sfx: a missing file fails the bake");
+    }
+
+    // ---- fonts: a .font grid sheet (proportional / fixed) and a BMFont .fnt -> Texture + Font ----
+    {
+        using namespace phxtool;
+        std::vector<uint32_t> atlas(size_t(kAsciiFontW) * kAsciiFontH);
+        build_ascii_font(atlas.data());
+        check(png_write_file("build/p_font.png", atlas.data(), kAsciiFontW, kAsciiFontH), "font: write the ASCII sheet");
+        const std::string fj = "{ \"font\": 1, \"image\": \"p_font.png\", \"cell_w\": 8, \"cell_h\": 8, \"space\": 3, \"line_h\": 9 }";
+        write_file("build/p_font.font", fj.data(), fj.size());
+        FontDef fd;
+        std::string err;
+        check(load_fontdef(fj, "build/p_font.font", fd, &err) && fd.proportional && fd.spacing == 1 && fd.image == "p_font.png" &&
+              font_image_path("build/p_font.font", fd.image) == "build/p_font.png", "font: .font defaults and the sheet path");
+        FontDef rt;
+        check(load_fontdef(fontdef_to_json(fd), "x.font", rt) && rt.space == 3 && rt.line_h == 9 && rt.cell_w == 8,
+              "font: .font JSON round trip");
+        phx::FontBlobHeader hdr{};
+        std::vector<phx::FontGlyphDef> gl;
+        check(font_glyphs_from_grid(fd, atlas, kAsciiFontW, kAsciiFontH, hdr, gl) && gl.size() == 96 && hdr.first_char == 32 &&
+              hdr.line_h == 9 && (hdr.flags & phx::kFontProportional), "font: 96 glyphs from the grid");
+        const auto& gi = gl['i' - 32]; const auto& gm = gl['M' - 32]; const auto& gs = gl[0];
+        check(gs.w == 0 && gs.advance == 3 && gi.w > 0 && gi.w < gm.w && gi.advance == gi.w + 1 && gm.advance == gm.w + 1 &&
+              gm.sx >= ('M' - 32) % 16 * 8 && gm.sx + gm.w <= ('M' - 32) % 16 * 8 + 8 && hdr.advance == gm.advance,
+              "font: proportional widths are measured from the pixels (i narrower than M, space = 3)");
+        FontDef fx = fd; fx.proportional = false; fx.advance = 6;
+        check(font_glyphs_from_grid(fx, atlas, kAsciiFontW, kAsciiFontH, hdr, gl) && gl['i' - 32].advance == 6 &&
+              gl['i' - 32].w == 8 && gl[0].w == 0 && !(hdr.flags & phx::kFontProportional) && hdr.advance == 6,
+              "font: fixed-width fonts keep whole cells and one advance");
+        FontDef few = fd; few.first = 65; few.count = 3;
+        check(font_glyphs_from_grid(few, atlas, kAsciiFontW, kAsciiFontH, hdr, gl) && gl.size() == 3 && hdr.first_char == 65,
+              "font: first / count pick a range");
+        FontDef bad;
+        check(!load_fontdef("{ \"font\": 1 }", "x.font", bad, &err) && err.find("image") != std::string::npos &&
+              !load_fontdef("{ \"image\": \"a.png\", \"cell_w\": 0 }", "x.font", bad), "font: a .font without a sheet or cells fails");
+
+        // a BMFont text export (two characters, one page)
+        const std::string fnt =
+            "info face=\"Tiny\" size=8\ncommon lineHeight=10 base=8 scaleW=128 scaleH=48 pages=1\n"
+            "page id=0 file=\"p_font.png\"\nchars count=2\n"
+            "char id=65 x=8 y=16 width=5 height=7 xoffset=1 yoffset=1 xadvance=7 page=0 chnl=15\n"
+            "char id=67 x=24 y=16 width=4 height=7 xoffset=0 yoffset=-1 xadvance=5 page=0 chnl=15\n";
+        write_file("build/p_bm.fnt", fnt.data(), fnt.size());
+        BmFont bm;
+        check(load_bmfont(fnt, "build/p_bm.fnt", bm) && bm.page == "p_font.png" && bm.line_h == 10 && bm.chars.size() == 2,
+              "font: BMFont text is parsed");
+        check(font_glyphs_from_bmfont(bm, hdr, gl) && hdr.first_char == 65 && gl.size() == 3 && gl[0].advance == 7 &&
+              gl[0].xoff == 1 && gl[2].yoff == -1 && gl[1].w == 0 && hdr.line_h == 10, "font: BMFont chars become the glyph table");
+        check(!load_bmfont("BMF\x03", "x.fnt", bm, &err), "font: a binary BMFont is refused with a reason");
+
+        // bake + mount: Texture (the sheet) + Font (the table), by the def's name
+        BundleWriter w(2);
+        check(build_from_source(w, "build/p_font.font") && build_font(w, "build/p_bm.fnt", "p_bm") &&
+              w.write("build/p_font.phxp"), "font: .font / .fnt bake");
+        ResourceCache* cf = ResourceCache::create(arena).unwrap();
+        check(cf->mount(plat, "build/p_font.phxp") == Status::Ok, "font: mount");
+        auto fv = cf->font("p_font"_hash);
+        check(fv.ok() && fv.unwrap().texture == "p_font"_hash && fv.unwrap().glyph_count == 96 && fv.unwrap().line_h == 9 &&
+              fv.unwrap().glyphs[0].advance == 3 && cf->texture("p_font"_hash).ok(),
+              "font: the Font asset names its sheet texture; glyphs read in place");
+        auto bv = cf->font("p_bm"_hash);
+        check(bv.ok() && bv.unwrap().first_char == 65 && bv.unwrap().glyphs[0].xoff == 1, "font: the BMFont import mounts");
+        const std::string oob = "common lineHeight=10\npage id=0 file=\"p_font.png\"\nchar id=65 x=200 y=0 width=8 height=8 xadvance=8\n";
+        write_file("build/p_oob.fnt", oob.data(), oob.size());
+        check(!build_font(w, "build/p_oob.fnt"), "font: a glyph outside the sheet fails the bake");
+    }
+
+    // ---- the Studio's Budget view model (tools/phxstudio/budget.h) ----
+    {
+        using namespace phxstudio;
+        const char* kRep =
+            "{ \"budget\": 1, \"target\": \"gba\", \"title\": \"T\", \"frames\": 900, \"width\": 240, \"height\": 160,\n"
+            "  \"arena\": { \"used\": 150000, \"capacity\": 160000 },\n"
+            "  \"frame_scratch\": { \"peak\": 0, \"capacity\": 4096 },\n"
+            "  \"entities\": { \"peak\": 300, \"max\": 256 },\n"
+            "  \"sprites\": { \"peak\": 40, \"max\": 128, \"dropped\": 0 },\n"
+            "  \"tiles_peak\": 118, \"batches_peak\": 1,\n"
+            "  \"audio\": { \"sounds\": 3, \"peak\": 9000, \"channels\": 2 },\n"
+            "  \"log\": { \"warnings\": 2, \"errors\": 0 } }\n";
+        BudgetReport r;
+        check(BudgetReport::parse(kRep, r) && r.target == "gba" && r.frames == 900 && r.arena_used == 150000 &&
+              r.ents_max == 256 && r.sprites_max == 128 && r.warnings == 2, "budget: a report parses");
+        check(!BudgetReport::parse("{ \"nope\": 1 }", r) && !BudgetReport::parse("not json", r), "budget: other JSON is refused");
+        BudgetReport ok_rep;
+        BudgetReport::parse(kRep, ok_rep);
+        // a tier-0 bundle with a texture the GBA cannot hold as 4bpp tiles (more than 15 colours in a tile)
+        std::vector<uint32_t> px(16 * 16);
+        for (size_t i = 0; i < px.size(); ++i) px[i] = 0xFF000000u | uint32_t(i * 2654435761u & 0x00FFFFFFu);
+        phxtool::BundleWriter w0(0);
+        w0.add_texture("noisy", px.data(), 16, 16);
+        check(w0.write("build/p_budget.t0.phxp"), "budget: write a tier-0 bundle");
+        BundleDoc bd;
+        check(BundleDoc::load("build/p_budget.t0.phxp", bd), "budget: load it");
+        const BundleFacts f = bundle_facts(bd);
+        check(f.ok && f.not_tiles.size() == 1 && f.biggest.size() == 1 && f.texture_bytes > 0,
+              "budget: bundle facts (a texture kept RGBA8 on tier 0 is flagged)");
+        const std::vector<BudgetLine> lines = budget_lines("gba", ok_rep, f);
+        auto find = [&](const char* w) -> const BudgetLine* {
+            for (const BudgetLine& l : lines) if (l.what.find(w) == 0) return &l;
+            return nullptr;
+        };
+        const BudgetLine* mem = find("memory");
+        const BudgetLine* ents = find("entities");
+        const BudgetLine* spr = find("sprites");
+        const BudgetLine* log = find("engine warnings");
+        const BudgetLine* rom = find("ROM");
+        const BudgetLine* tiles = find("textures not in GBA");
+        check(mem && mem->level == Level::Close && ents && ents->level == Level::Over && spr && spr->level == Level::Ok &&
+              log && log->level == Level::Close && rom && rom->level == Level::Ok && tiles && tiles->used == 1,
+              "budget: verdicts (94% memory close, entities over, sprites ok, warnings flagged, ROM ok, tile warning)");
+        BudgetReport dropped = ok_rep;
+        dropped.sprites_dropped = 5;
+        const auto dl = budget_lines("gba", dropped, BundleFacts{});
+        bool over = false;
+        for (const BudgetLine& l : dl) if (l.what == "sprites per frame") over = l.level == Level::Over;
+        check(over, "budget: dropped sprites are over budget");
+        check(budget_lines("psp", BudgetReport{}, BundleFacts{}).empty(), "budget: nothing measured, no bundle: no lines");
+
+        // the profiler's trace (PHX_TRACE): work = update + render judged against the step
+        const char* kTrace =
+            "frame,update_us,render_us,present_us,frame_us,budget_us,steps,entities,sprites\n"
+            "0,0,0,0,0,16666,0,0,0\n"
+            "1,100,200,16300,16600,16666,1,5,10\n"
+            "2,9000,9000,100,18100,16666,1,6,12\n"
+            "3,300,400,15900,16600,16666,1,7,11\n"
+            "4,50,60,16";                                        // cut short by a crash: skipped
+        FrameTrace ft;
+        check(FrameTrace::parse(kTrace, ft) && ft.rows.size() == 3 && ft.rows[1].update == 9000 && ft.rows[2].ents == 7,
+              "profiler: a trace parses (frame 0 and a torn last line skipped)");
+        check(ft.over_budget() == 1 && ft.worst(1).size() == 1 && ft.worst(1)[0] == 1,
+              "profiler: one frame's work overran the step; it is the worst");
+        const FrameTrace::Stat us = ft.stat(&FrameTrace::Row::update);
+        check(us.max == 9000 && us.avg == (100 + 9000 + 300) / 3 && us.p50 == 300, "profiler: per-phase avg / p50 / max");
+        check(!FrameTrace::parse("not,a,trace\n1,2,3\n", ft), "profiler: other CSV is refused");
     }
 
     plat->shutdown();

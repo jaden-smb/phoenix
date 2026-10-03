@@ -6,10 +6,12 @@
 // This is also the reference backend the conformance suite targets.
 #include "phx/platform/platform.h"
 #include "phx/platform/gfx_soft.h"
+#include "phx/platform/desktop.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace {
 
@@ -172,3 +174,80 @@ extern "C" void phx_null_set_buttons(uint32_t mask)   { g_buttons = mask; }
 extern "C" void phx_null_set_button_script(const uint32_t* masks, uint32_t n) {
     g_btn_script = masks; g_btn_script_n = n;
 }
+
+// --- desktop extension (phx/platform/desktop.h), SCRIPTED -------------------------------------
+// The headless stand-in for the SDL backend's event stream: a test pushes events with
+// phx_null_desktop_push() and sets the pointer with phx_null_desktop_set_mouse(); the tool under
+// test drains them through the same phx_desktop_* calls it uses in a real window. Window-only
+// calls (title, cursor, text-input toggle, resizable) are accepted and ignored.
+namespace {
+constexpr int kNullEvCap = 256;
+phx_desktop_event g_dev[kNullEvCap];
+int      g_dev_head = 0, g_dev_count = 0;
+int      g_dev_mx = -1, g_dev_my = -1;
+uint32_t g_dev_buttons = 0;
+uint16_t g_dev_mods = 0;
+int      g_dev_scale = 1;
+char     g_dev_clip[4096] = { 0 };
+} // namespace
+
+extern "C" void phx_null_desktop_push(const phx_desktop_event* e) {
+    if (!e) return;
+    if (g_dev_count == kNullEvCap) { g_dev_head = (g_dev_head + 1) % kNullEvCap; --g_dev_count; }
+    g_dev[(g_dev_head + g_dev_count) % kNullEvCap] = *e;
+    ++g_dev_count;
+}
+extern "C" void phx_null_desktop_set_mouse(int x, int y, uint32_t buttons, uint16_t mods) {
+    g_dev_mx = x; g_dev_my = y; g_dev_buttons = buttons; g_dev_mods = mods;
+}
+
+extern "C" int phx_desktop_available(void) { return 0; }
+extern "C" int phx_desktop_poll(phx_desktop_event* out) {
+    if (!out || g_dev_count == 0) return 0;
+    *out = g_dev[g_dev_head];
+    g_dev_head = (g_dev_head + 1) % kNullEvCap;
+    --g_dev_count;
+    return 1;
+}
+extern "C" void phx_desktop_mouse(int* x, int* y, uint32_t* buttons) {
+    if (x) *x = g_dev_mx;
+    if (y) *y = g_dev_my;
+    if (buttons) *buttons = g_dev_buttons;
+}
+extern "C" uint16_t phx_desktop_mods(void) { return g_dev_mods; }
+extern "C" void phx_desktop_set_quit_on_escape(int) {}
+extern "C" void phx_desktop_set_confirm_quit(int) {}
+extern "C" void phx_desktop_text_input(int) {}
+extern "C" void phx_desktop_set_resizable(int) {}
+extern "C" void phx_desktop_set_scale(int scale) { g_dev_scale = scale < 1 ? 1 : (scale > 6 ? 6 : scale); }
+extern "C" int  phx_desktop_scale(void) { return g_dev_scale; }
+extern "C" int  phx_desktop_fb_size(int* w, int* h) {
+    if (w) *w = g_gfx.fb.w;
+    if (h) *h = g_gfx.fb.h;
+    return g_gfx.fb.w > 0 ? 0 : 1;
+}
+extern "C" int  phx_desktop_display_size(int* w, int* h) { if (w) *w = 0; if (h) *h = 0; return 0; }
+extern "C" void phx_desktop_set_window_size(int, int) {}
+// The native-resolution overlay is real here too (a CPU buffer nobody presents), so a tool's text path
+// is testable headlessly: phx_null_overlay_peek() reads back what the last frame drew into it.
+namespace { std::vector<uint32_t> g_ov_px; int g_ov_w = 0, g_ov_h = 0; }
+extern "C" int phx_desktop_overlay_begin(phx_overlay* out) {
+    if (!out || g_gfx.fb.w <= 0) return 0;
+    g_ov_w = g_gfx.fb.w * g_dev_scale; g_ov_h = g_gfx.fb.h * g_dev_scale;
+    g_ov_px.assign(size_t(g_ov_w) * size_t(g_ov_h), 0u);
+    out->pixels = g_ov_px.data(); out->w = g_ov_w; out->h = g_ov_h;
+    return 1;
+}
+extern "C" const uint32_t* phx_null_overlay_peek(int* w, int* h) {
+    if (w) *w = g_ov_w;
+    if (h) *h = g_ov_h;
+    return g_ov_px.empty() ? nullptr : g_ov_px.data();
+}
+extern "C" void phx_desktop_set_title(const char*) {}
+extern "C" void phx_desktop_set_cursor(int) {}
+extern "C" const char* phx_desktop_clipboard_get(void) { return g_dev_clip; }
+extern "C" void phx_desktop_clipboard_set(const char* utf8) {
+    std::snprintf(g_dev_clip, sizeof(g_dev_clip), "%s", utf8 ? utf8 : "");
+}
+extern "C" const char* phx_desktop_drop_path(void) { return ""; }
+extern "C" int phx_desktop_use_exe_dir(const char*) { return 0; }

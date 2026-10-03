@@ -1,12 +1,16 @@
 // tools/phxstudio/jobs.h — runs the studio's launches (`make <target>`, a game binary, an
 // emulator) as child processes on ONE worker thread, one at a time from a FIFO queue, and hands
-// their combined stdout/stderr to the GUI thread for the console panel. Host-only (POSIX shell).
+// their combined stdout/stderr to the GUI thread for the console panel. Host-only. Commands are
+// POSIX shell on every host.
 //
-// Every job runs as `setsid sh -c '<command>'` from the repository root, so the whole process
-// tree (make -> g++ -> the test binary, or make -> a game window) sits in its own process group
-// and STOP can signal all of it at once. `stdbuf -oL` makes the children line-buffered, so test
-// output streams live instead of arriving in one block at exit. Both are optional: without
+// Linux/macOS: every job runs as `setsid sh -c '<command>'` from the repository root, so the whole
+// process tree (make -> g++ -> the test binary, or make -> a game window) sits in its own process
+// group and STOP can signal all of it at once. `stdbuf -oL` makes the children line-buffered, so
+// test output streams live instead of arriving in one block at exit. Both are optional: without
 // setsid STOP is unavailable, without stdbuf output simply arrives in bigger chunks.
+//
+// Windows: the job is written to a temp script and run by the sh.exe of MSYS2 or Git for Windows
+// (host_posix_shell, model.h) inside a Job Object (winjob.h), which is what STOP terminates.
 //
 // The engine's single-threaded contract is about ENGINE state; this worker touches none of it —
 // it only moves bytes into a mutex-guarded buffer the GUI thread drains once per frame.
@@ -14,6 +18,7 @@
 #define PHX_TOOLS_PHXSTUDIO_JOBS_H
 
 #include "model.h"
+#include "winjob.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -45,9 +50,13 @@ inline std::string shell_quote(const std::string& s) {
 class JobRunner {
 public:
     explicit JobRunner(std::string root)
-        : root_(std::move(root)),
-          has_setsid_(tool_available("setsid")),
-          has_stdbuf_(tool_available("stdbuf")) {
+        : root_(std::move(root)) {
+#ifdef _WIN32
+        has_shell_ = !host_posix_shell().sh.empty();
+#else
+        has_setsid_ = tool_available("setsid");
+        has_stdbuf_ = tool_available("stdbuf");
+#endif
         thread_ = std::thread([this] { worker(); });
     }
 
@@ -66,13 +75,17 @@ public:
         cv_.notify_one();
     }
 
-    // Signal the running job's whole process group (TERM). Queued jobs keep waiting.
+    // Signal the running job's whole process group (TERM; on Windows, terminate its Job Object).
+    // Queued jobs keep waiting.
     void stop_current() {
         long pg = 0;
         {
             std::lock_guard<std::mutex> lk(mu_);
             pg = pgid_;
             if (running_id_ >= 0) stop_requested_ = true;
+#ifdef _WIN32
+            if (proc_) winjob_kill(proc_);
+#endif
         }
         if (pg > 0) signal_group(pg, "TERM");
     }
@@ -107,7 +120,11 @@ public:
         if (running_id_ < 0) return 0.0;
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - started_).count();
     }
+#ifdef _WIN32
+    bool can_stop() const { return has_shell_; }
+#else
     bool can_stop() const { return has_setsid_; }
+#endif
 
     // Stop everything and join the worker (idempotent). A job that ignores TERM for ~2 s is
     // KILLed, so closing the studio never hangs on a stuck child.
@@ -123,10 +140,18 @@ public:
         for (int i = 0; i < 40 && running_id() >= 0; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         long pg = 0;
-        { std::lock_guard<std::mutex> lk(mu_); pg = pgid_; }
+        bool killable = false;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            pg = pgid_;
+            killable = pg > 0;
+#ifdef _WIN32
+            killable = proc_ != nullptr;   // already terminated by stop_current; the worker is exiting
+#endif
+        }
         if (pg > 0) signal_group(pg, "KILL");
         if (thread_.joinable()) {
-            if (running_id() >= 0 && pg <= 0) thread_.detach();   // no process group to kill
+            if (running_id() >= 0 && !killable) thread_.detach();   // nothing to kill
             else thread_.join();
         }
     }
@@ -164,6 +189,9 @@ private:
                 out_ += "$ " + job.command + "\n";
             }
 
+#ifdef _WIN32
+            const int code = run_windows(job);
+#else
             // cd root && [exec setsid [stdbuf -oL -eL]] sh -c 'echo @@PGID $$; <command>' 2>&1 </dev/null
             std::string inner = "echo @@PGID $$; " + job.command;
             std::string sh = "cd " + shell_quote(root_) + " && ";
@@ -192,6 +220,7 @@ private:
             }
 
             const int code = exit_code_from_status(status);
+#endif
             std::lock_guard<std::mutex> lk(mu_);
             const double secs =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - started_).count();
@@ -210,9 +239,57 @@ private:
         }
     }
 
+#ifdef _WIN32
+    // Run one job through the POSIX shell; returns its exit code. The command goes into a script
+    // file rather than onto the command line, so no Windows quoting rule can mangle it.
+    int run_windows(const Pending& job) {
+        const std::string& sh = host_posix_shell().sh;
+        if (sh.empty()) {
+            append("studio: launches need a POSIX shell (sh.exe) and none was found. Install MSYS2 "
+                   "(https://www.msys2.org) or Git for Windows, put its usr\\bin on PATH, or set PHX_SH "
+                   "to its sh.exe.\n");
+            return 127;
+        }
+        const std::string script = winjob_script_path(job.id);
+        const std::string text = "cd " + shell_quote(root_) + " || exit 1\n" + job.command + "\n";
+        FILE* f = std::fopen(script.c_str(), "wb");
+        if (!f || std::fwrite(text.data(), 1, text.size(), f) != text.size()) {
+            if (f) std::fclose(f);
+            append("studio: cannot write the job script " + script + "\n");
+            return -1;
+        }
+        std::fclose(f);
+        std::string err;
+        WinJob* p = winjob_start(sh, script, &err);
+        if (!p) {
+            append("studio: " + err + "\n");
+            std::remove(script.c_str());
+            return -1;
+        }
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            proc_ = p;
+            if (stop_requested_) winjob_kill(p);   // STOP arrived while it was starting
+        }
+        char buf[4096];
+        for (size_t n; (n = winjob_read(p, buf, sizeof(buf))) > 0;) append(std::string(buf, n));
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            proc_ = nullptr;
+        }
+        const int code = winjob_finish(p);
+        std::remove(script.c_str());
+        return code;
+    }
+#endif
+
     std::string root_;
     bool has_setsid_ = false;
     bool has_stdbuf_ = false;
+#ifdef _WIN32
+    bool has_shell_ = false;
+    WinJob* proc_ = nullptr;              // the running job's process tree (guarded by mu_)
+#endif
 
     mutable std::mutex mu_;
     std::condition_variable cv_;

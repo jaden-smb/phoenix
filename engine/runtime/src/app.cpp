@@ -72,6 +72,9 @@ int App::run(Game* game) {
     dt_ = fixed_dt(cfg_.sim_hz);
     prof_.budget_us = cfg_.sim_hz ? 1000000u / cfg_.sim_hz : 16667u;
 
+    // 5b. sound: nothing starts until the game first plays something (phx/runtime/audio.h)
+    audio_.attach(plat_->audio ? plat_->audio() : nullptr, &mem_->persistent(), caps(), cfg_.sim_hz);
+
     PHX_LOG_INFO("Phoenix boot: '%s'  ram=%uKB  sim=%uHz  ents=%u", cfg_.title,
                  cfg_.total_ram / 1024u, cfg_.sim_hz, max_ents);
 
@@ -92,6 +95,7 @@ int App::run(Game* game) {
 
         plat_->poll_input(&raw);
         input_.update(raw);        // raw -> semantic edges, once per frame
+        if (dev_.frame) steps = dev_.frame(dev_.user, *this, steps);   // developer pause / step
 
         // Phase profiling: stamp each phase with the platform clock (µs into prof_). Four
         // clock reads per frame — cheap enough to keep on unconditionally, even on GBA.
@@ -109,6 +113,21 @@ int App::run(Game* game) {
 
         const uint64_t t_ren = plat_->clock_ns();
         game->on_render(*this, acc_.alpha());
+        if (dev_.overlay) dev_.overlay(dev_.user, *this);                // developer overlay
+        if (audio_.pump_) audio_.pump_(audio_);   // no device: mix this frame's sound here
+
+        // high-water marks (a budget report's numbers)
+        if (world_->count() > peaks_.entities) peaks_.entities = world_->count();
+        if (render_) {
+            const RenderStats& rs = render_->stats();
+            if (rs.sprites_submitted > peaks_.sprites) peaks_.sprites = rs.sprites_submitted;
+            if (rs.tiles_drawn > peaks_.tiles) peaks_.tiles = rs.tiles_drawn;
+            if (rs.batches > peaks_.batches) peaks_.batches = rs.batches;
+            peaks_.sprites_dropped += rs.sprites_dropped;
+        }
+        if (mem_->frame_stack().used() > peaks_.frame_scratch) peaks_.frame_scratch = uint32_t(mem_->frame_stack().used());
+        peaks_.arena_used = mem_->used();
+        peaks_.arena_capacity = mem_->total_capacity();
 
         mem_->swap_frame();        // double-buffered transient reclaim, O(1)
         ++frame_;
@@ -117,12 +136,12 @@ int App::run(Game* game) {
         plat_->present();          // swap / vblank (no-op headless)
         const uint64_t t_end = plat_->clock_ns();
 
-        // ns -> µs via multiply-shift (4295/2^32 ≈ 1e-3, +8ppm), rounded UP so any nonzero
+        // ns -> µs via multiply-shift (4294967/2^32 ≈ 1e-3, -0.07ppm), rounded UP so any nonzero
         // phase stamps at least 1 µs (the null clock ticks 1 µs/read; a truncating convert
         // would report 0 for every phase there). Four u64 soft divisions per frame add up on
         // a 16 MHz ARM7 with no divider, and these only feed the profiler display.
         const auto ns_to_us = [](uint64_t ns) {
-            return uint32_t((ns * 4295u + 0xFFFFFFFFu) >> 32);
+            return uint32_t((ns * 4294967ull + 0xFFFFFFFFull) >> 32);   // (4295 was 1e-6: ms, not µs)
         };
         prof_.update_us  = ns_to_us(t_ren - t_upd);
         prof_.render_us  = ns_to_us(t_pre - t_ren);
@@ -131,7 +150,10 @@ int App::run(Game* game) {
     }
 
     // 6. teardown in reverse
+    if (dev_.stop) dev_.stop(dev_.user, *this);
     game->on_stop(*this);
+    if (audio_.stop_) audio_.stop_(audio_);   // silence the device before its state goes away
+    audio_.detach();
     plat_->shutdown();
     MemoryRoot::shutdown(mem_);
     PHX_LOG_INFO("Phoenix shutdown after %llu frames", (unsigned long long)frame_);

@@ -26,6 +26,7 @@
 #include "phx/resource/lz.h"
 
 #include "tex_encode.h"   // tools/phxpack: the bake's per-target texture encoders
+#include "twk_geom.h"     // tools/common: the widget kit's Rect + scroll math
 
 #include <algorithm>
 #include <cstdint>
@@ -531,6 +532,34 @@ private:
 
 // Harvest names from every source under examples/, tools/ and tests/, the stems of asset-ish
 // files, and every phxpack manifest in the root and build/.
+// Recover names from a GAME PROJECT only (project mode never reads the engine's sources): every
+// string literal in its code + data, every asset file stem, and any phxpack manifest in the project
+// folder, its build/ folder, or next to the extra bundles it lists.
+inline void scan_names_in(const std::string& dir, const std::vector<std::string>& bundle_paths, NameBook& book) {
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const fs::path& p = it->path();
+        const std::string ext = p.extension().string();
+        if (is_source_file(p) || ext == ".json" || ext == ".tmj" || ext == ".sprdef") {
+            std::string text;
+            if (read_text(p.string(), text)) book.add_literals(text);
+        }
+        if (ext == ".png" || ext == ".wav" || ext == ".sfx" || ext == ".song" || ext == ".font" || ext == ".fnt" || ext == ".dlg" || ext == ".tmj" || ext == ".json" || ext == ".sprdef")
+            book.add(p.stem().string());
+        const std::string n = p.filename().string();
+        if (n.size() > 13 && n.compare(n.size() - 13, 13, ".manifest.txt") == 0) {
+            std::string text;
+            if (read_text(p.string(), text)) book.add_manifest(text);
+        }
+    }
+    for (const std::string& b : bundle_paths) {
+        std::string text;
+        if (read_text(b + ".manifest.txt", text)) book.add_manifest(text);
+    }
+}
+
 inline void scan_names(const std::string& root, NameBook& book) {
     std::error_code ec;
     for (const char* sub : { "examples", "tools", "tests" }) {
@@ -545,7 +574,7 @@ inline void scan_names(const std::string& root, NameBook& book) {
                 std::string text;
                 if (read_text(p.string(), text)) book.add_literals(text);
             }
-            if (ext == ".png" || ext == ".wav" || ext == ".tmj" || ext == ".json" || ext == ".sprdef")
+            if (ext == ".png" || ext == ".wav" || ext == ".sfx" || ext == ".song" || ext == ".font" || ext == ".fnt" || ext == ".dlg" || ext == ".tmj" || ext == ".json" || ext == ".sprdef")
                 book.add(p.stem().string());
         }
     }
@@ -573,6 +602,7 @@ inline const char* type_name(phx::AssetType t) {
     case phx::AssetType::Blob:    return "blob";
     case phx::AssetType::Sprite:  return "sprite";
     case phx::AssetType::Spawns:  return "spawns";
+    case phx::AssetType::Dialogue: return "dialogue";
     }
     return "?";
 }
@@ -695,7 +725,7 @@ struct TexView {
 };
 
 inline bool view_texture(const AssetEntry& a, TexView& v) {
-    if (a.type != phx::AssetType::Texture && a.type != phx::AssetType::Font) return false;
+    if (a.type != phx::AssetType::Texture) return false;
     if (a.data.size() < sizeof(phx::TextureBlobHeader)) return false;
     phx::TextureBlobHeader th{};
     std::memcpy(&th, a.data.data(), sizeof(th));
@@ -801,6 +831,7 @@ struct SpriteInfo {
     phx::NameHash texture = 0;
     uint16_t frame_w = 0, frame_h = 0, cols = 0;
     std::vector<phx::SpriteClipDef> clips;
+    std::vector<phx::SpriteTransDef> trans;   // the transitions trailer (bundle.h), if any
 };
 
 inline bool view_sprite(const AssetEntry& a, SpriteInfo& v) {
@@ -813,7 +844,74 @@ inline bool view_sprite(const AssetEntry& a, SpriteInfo& v) {
     v.clips.resize(sh.clip_count);
     if (sh.clip_count)
         std::memcpy(v.clips.data(), a.data.data() + sizeof(sh), v.clips.size() * sizeof(phx::SpriteClipDef));
+    const size_t end = sizeof(sh) + v.clips.size() * sizeof(phx::SpriteClipDef);
+    if (end + 8 <= a.data.size()) {
+        uint32_t hdr[2];
+        std::memcpy(hdr, a.data.data() + end, sizeof(hdr));
+        if (hdr[0] == phx::kSpriteTransMagic && end + 8 + size_t(hdr[1]) * sizeof(phx::SpriteTransDef) <= a.data.size()) {
+            v.trans.resize(hdr[1]);
+            if (hdr[1]) std::memcpy(v.trans.data(), a.data.data() + end + 8, v.trans.size() * sizeof(phx::SpriteTransDef));
+        }
+    }
     return v.frame_w > 0 && v.frame_h > 0;
+}
+
+// A Font asset: the glyph table (bundle.h FontBlobHeader + FontGlyphDef) of its atlas texture.
+struct FontInfo {
+    phx::FontBlobHeader hdr{};
+    std::vector<phx::FontGlyphDef> glyphs;
+};
+inline bool view_font(const AssetEntry& a, FontInfo& v) {
+    if (a.type != phx::AssetType::Font || a.data.size() < sizeof(phx::FontBlobHeader)) return false;
+    v = FontInfo{};
+    std::memcpy(&v.hdr, a.data.data(), sizeof(v.hdr));
+    if (sizeof(v.hdr) + size_t(v.hdr.glyph_count) * sizeof(phx::FontGlyphDef) > a.data.size()) return false;
+    v.glyphs.resize(v.hdr.glyph_count);
+    if (v.hdr.glyph_count)
+        std::memcpy(v.glyphs.data(), a.data.data() + sizeof(v.hdr), v.glyphs.size() * sizeof(phx::FontGlyphDef));
+    return true;
+}
+// The pen width of `s` in font `f` (UI::text_width's rule: characters past the table use the header advance).
+inline int font_text_width(const FontInfo& f, const std::string& s) {
+    int w = 0;
+    for (unsigned char c : s) {
+        const int i = int(c) - int(f.hdr.first_char);
+        w += i >= 0 && i < int(f.glyphs.size()) ? f.glyphs[size_t(i)].advance : f.hdr.advance;
+    }
+    return w;
+}
+
+// A Dialogue asset's tables (bundle.h DialogueHeader ...), bounds-checked like the runtime's load.
+struct DialogueInfo {
+    phx::DialogueHeader hdr{};
+    std::vector<phx::DlgConvDef> convs;
+    std::vector<phx::DlgNodeDef> nodes;
+    std::vector<phx::DlgChoiceDef> choices;
+    std::string strings;
+    const char* str(uint32_t off) const { return off < strings.size() ? strings.c_str() + off : ""; }
+};
+inline bool view_dialogue(const AssetEntry& a, DialogueInfo& v) {
+    if (a.type != phx::AssetType::Dialogue || a.data.size() < sizeof(phx::DialogueHeader)) return false;
+    v = DialogueInfo{};
+    std::memcpy(&v.hdr, a.data.data(), sizeof(v.hdr));
+    if (v.hdr.magic != phx::kDialogueMagic) return false;
+    size_t at = sizeof(v.hdr);
+    const size_t need = at + v.hdr.conv_count * sizeof(phx::DlgConvDef) + v.hdr.speaker_count * sizeof(phx::DlgSpeakerDef) +
+                        v.hdr.node_count * sizeof(phx::DlgNodeDef) + v.hdr.choice_count * sizeof(phx::DlgChoiceDef) +
+                        v.hdr.op_count * sizeof(phx::DlgOp) + v.hdr.strings_size;
+    if (need > a.data.size()) return false;
+    auto take = [&](auto& vec, size_t n) {
+        vec.resize(n);
+        if (n) std::memcpy(vec.data(), a.data.data() + at, n * sizeof(vec[0]));
+        at += n * sizeof(vec[0]);
+    };
+    take(v.convs, v.hdr.conv_count);
+    at += v.hdr.speaker_count * sizeof(phx::DlgSpeakerDef);
+    take(v.nodes, v.hdr.node_count);
+    take(v.choices, v.hdr.choice_count);
+    at += v.hdr.op_count * sizeof(phx::DlgOp);
+    v.strings.assign(reinterpret_cast<const char*>(a.data.data() + at), v.hdr.strings_size);
+    return true;
 }
 
 struct SoundInfo {
@@ -846,8 +944,22 @@ inline bool view_spawns(const AssetEntry& a, std::vector<phx::SpawnDef>& out) {
 inline std::string describe(const AssetEntry& a) {
     char b[96];
     switch (a.type) {
-    case phx::AssetType::Texture:
+    case phx::AssetType::Dialogue: {
+        DialogueInfo d;
+        if (!view_dialogue(a, d)) return "malformed dialogue";
+        std::snprintf(b, sizeof(b), "%u conversation%s, %u lines, %u choices", unsigned(d.convs.size()),
+                      d.convs.size() == 1 ? "" : "s", unsigned(d.nodes.size()), unsigned(d.choices.size()));
+        return b;
+    }
     case phx::AssetType::Font: {
+        FontInfo f;
+        if (!view_font(a, f)) return "malformed font";
+        std::snprintf(b, sizeof(b), "%u glyphs from '%c', line %u, %s", unsigned(f.glyphs.size()),
+                      f.hdr.first_char >= 32 && f.hdr.first_char < 127 ? char(f.hdr.first_char) : '?',
+                      unsigned(f.hdr.line_h), (f.hdr.flags & phx::kFontProportional) ? "proportional" : "fixed");
+        return b;
+    }
+    case phx::AssetType::Texture: {
         TexView v;
         if (!view_texture(a, v)) return "malformed texture";
         std::snprintf(b, sizeof(b), "%ux%u %s", unsigned(v.w), unsigned(v.h), format_name(v.fmt));
@@ -863,9 +975,11 @@ inline std::string describe(const AssetEntry& a) {
     case phx::AssetType::Sprite: {
         SpriteInfo v;
         if (!view_sprite(a, v)) return "malformed sprite";
-        std::snprintf(b, sizeof(b), "%ux%u frames, %zu clip%s", unsigned(v.frame_w), unsigned(v.frame_h),
-                      v.clips.size(), v.clips.size() == 1 ? "" : "s");
-        return b;
+        std::snprintf(b, sizeof(b), "%ux%u frames, %u clip%s", unsigned(v.frame_w), unsigned(v.frame_h),
+                      unsigned(v.clips.size()), v.clips.size() == 1 ? "" : "s");
+        std::string d = b;
+        if (!v.trans.empty()) d += ", " + std::to_string(v.trans.size()) + " transition" + (v.trans.size() == 1 ? "" : "s");
+        return d;
     }
     case phx::AssetType::Sound: {
         SoundInfo v;
@@ -976,6 +1090,7 @@ inline std::vector<std::string> make_prereqs(const std::string& mk, const std::s
         size_t e = mk.find('\n', p);
         if (e == std::string::npos) e = mk.size();
         std::string line = mk.substr(p, e - p);
+        if (!line.empty() && line.back() == '\r') line.pop_back();   // a CRLF checkout (Windows)
         const bool cont = !line.empty() && line.back() == '\\';
         if (cont) line.pop_back();
         deps += ' ' + line;
@@ -995,11 +1110,13 @@ inline std::vector<std::string> make_prereqs(const std::string& mk, const std::s
     return out;
 }
 
-enum class Group : uint8_t { Play, Edit, Gate, Suite, Cross, Count };
+enum class Group : uint8_t { Play, Build, Test, Edit, Gate, Suite, Cross, Count };   // Build/Test: project launches
 
 inline const char* group_name(Group g) {
     switch (g) {
     case Group::Play:  return "PLAY";
+    case Group::Build: return "BUILD";
+    case Group::Test:  return "TEST";
     case Group::Edit:  return "EDIT";
     case Group::Gate:  return "GATES";
     case Group::Suite: return "TEST SUITES";
@@ -1095,42 +1212,217 @@ inline std::vector<Launch> default_launches(const std::string& mk, const std::st
     return v;
 }
 
-// Is `tool` available? Absolute/relative paths are checked directly; bare names are looked up
-// on PATH (the studio inherits the environment it was launched from).
-inline bool tool_available(const std::string& tool) {
-    std::error_code ec;
-    if (tool.find('/') != std::string::npos) return fs::exists(tool, ec);
-    const char* path = std::getenv("PATH");
-    if (!path) return false;
-    const std::string p = path;
+// ---- tools on PATH, and the shell the launches run in ----------------------------------------
+// Launch commands are POSIX shell. On Linux/macOS that is /bin/sh; on Windows it is the sh.exe of
+// MSYS2 or Git for Windows (never cmd.exe), found by find_posix_shell below.
+
+// A PATH-style list (':' on POSIX, ';' on Windows) -> its non-empty entries.
+inline std::vector<std::string> split_path_list(const std::string& s, char sep) {
+    std::vector<std::string> v;
     size_t i = 0;
-    while (i <= p.size()) {
-        size_t j = p.find(':', i);
-        if (j == std::string::npos) j = p.size();
-        if (j > i) {
-            const fs::path cand = fs::path(p.substr(i, j - i)) / tool;
-            if (fs::exists(cand, ec) && !fs::is_directory(cand, ec)) return true;
-        }
+    while (i <= s.size()) {
+        size_t j = s.find(sep, i);
+        if (j == std::string::npos) j = s.size();
+        if (j > i) v.push_back(s.substr(i, j - i));
         i = j + 1;
     }
-    return false;
+    return v;
 }
 
-// The first missing requirement of a launch, or "" when it can run.
-inline std::string missing_need(const Launch& l) {
-    for (const std::string& n : l.needs) if (!tool_available(n)) return n;
+inline bool is_file_at(const std::string& p) {
+    std::error_code ec;
+    return fs::exists(p, ec) && !fs::is_directory(p, ec);
+}
+
+// Where `tool` resolves on disk, or "". A bare name is looked up in `dirs`. A name with a '/' is a
+// path and is checked as is. With `windows`, a tool may also carry .exe/.cmd/.bat (shell scripts
+// such as sdl2-config have none, so the bare name is tried first), and a POSIX-absolute path
+// ("/opt/devkitpro/...") is also looked for under `posix_root`, the folder the shell calls "/".
+inline std::string resolve_tool(const std::string& tool, const std::vector<std::string>& dirs, bool windows,
+                                const std::string& posix_root = "") {
+    static const char* const kWinExts[] = { "", ".exe", ".cmd", ".bat" };
+    const size_t n_ext = windows ? 4 : 1;
+    auto try_exts = [&](const std::string& base) -> std::string {
+        for (size_t e = 0; e < n_ext; ++e)
+            if (is_file_at(base + kWinExts[e])) return base + kWinExts[e];
+        return "";
+    };
+    if (tool.empty()) return "";
+    if (tool.find('/') != std::string::npos) {
+        std::string hit = try_exts(tool);
+        if (hit.empty() && windows && !posix_root.empty() && tool[0] == '/' && tool.compare(0, 2, "//") != 0)
+            hit = try_exts(posix_root + tool);
+        return hit;
+    }
+    for (const std::string& d : dirs) {
+        std::string hit = try_exts((fs::path(d) / tool).generic_string());
+        if (!hit.empty()) return hit;
+    }
     return "";
 }
 
-// A process wait status (pclose) -> an exit code; signals map to 128+N like a shell.
+// The POSIX shell for Windows launches, and the folders to put in front of PATH so the shell finds
+// make and the compiler even when the Studio was started from Explorer rather than a terminal.
+struct PosixShell {
+    std::string sh;                         // sh.exe ("" = none found)
+    std::string root;                       // the folder the shell calls "/" (the MSYS2 or Git install)
+    std::vector<std::string> add_path;      // the toolchain's bin and the shell's bin, when not on PATH
+};
+
+// Search order: `override_sh` (PHX_SH), then the sh.exe beside the first make.exe on PATH (so the
+// shell and make share one MSYS runtime), then sh.exe on PATH, then the usual install folders
+// (`fallbacks`). `msystem` (MSYS2's MSYSTEM, e.g. UCRT64) picks the toolchain folder; without it
+// the first of ucrt64, mingw64, clang64 that exists is used.
+inline PosixShell find_posix_shell(const std::vector<std::string>& path, const std::string& override_sh,
+                                   const std::string& msystem, const std::vector<std::string>& fallbacks) {
+    auto norm = [](std::string s) {
+        for (char& c : s) {
+            if (c == '\\') c = '/';
+            else if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+        }
+        while (s.size() > 1 && s.back() == '/') s.pop_back();
+        return s;
+    };
+    auto slashes = [](std::string s) { for (char& c : s) if (c == '\\') c = '/'; return s; };
+    auto ends_with = [](const std::string& s, const char* t) {
+        const size_t n = std::strlen(t);
+        return s.size() >= n && s.compare(s.size() - n, n, t) == 0;
+    };
+    PosixShell r;
+    if (!override_sh.empty() && is_file_at(override_sh)) r.sh = slashes(override_sh);
+    if (r.sh.empty()) {
+        const std::string make = resolve_tool("make", path, true);
+        if (!make.empty()) {
+            const std::string beside = slashes(fs::path(make).parent_path().generic_string()) + "/sh.exe";
+            if (is_file_at(beside)) r.sh = beside;
+        }
+    }
+    if (r.sh.empty()) r.sh = slashes(resolve_tool("sh", path, true));
+    for (size_t i = 0; r.sh.empty() && i < fallbacks.size(); ++i)
+        if (is_file_at(fallbacks[i])) r.sh = slashes(fallbacks[i]);
+    if (r.sh.empty()) return r;
+
+    const std::string bin = r.sh.substr(0, r.sh.find_last_of('/'));
+    const std::string lbin = norm(bin);
+    if (ends_with(lbin, "/usr/bin")) r.root = bin.substr(0, bin.size() - 8);
+    else if (ends_with(lbin, "/bin")) r.root = bin.substr(0, bin.size() - 4);
+
+    std::vector<std::string> want;
+    if (!r.root.empty()) {
+        std::vector<std::string> envs;
+        if (!msystem.empty()) envs.push_back(norm(msystem));
+        else envs = { "ucrt64", "mingw64", "clang64" };
+        for (const std::string& e : envs) {
+            std::error_code ec;
+            const std::string tc = r.root + "/" + e + "/bin";
+            if (fs::is_directory(tc, ec)) { want.push_back(tc); break; }
+        }
+    }
+    want.push_back(bin);
+    for (const std::string& w : want) {
+        bool on_path = false;
+        for (const std::string& p : path) on_path = on_path || norm(p) == norm(w);
+        if (!on_path) r.add_path.push_back(w);
+    }
+    return r;
+}
+
+#ifdef _WIN32
+// This process's shell, found once. The first call also puts its folders in front of PATH, for
+// the Studio's own tool checks and for every child it starts (they inherit the environment).
+inline const PosixShell& host_posix_shell() {
+    static const PosixShell shell = [] {
+        auto env = [](const char* k) { const char* v = std::getenv(k); return std::string(v ? v : ""); };
+        const std::string path = env("PATH");
+        std::vector<std::string> fallbacks = { "C:/msys64/usr/bin/sh.exe" };
+        for (const char* base : { "ProgramFiles", "ProgramW6432" })
+            if (!env(base).empty()) {
+                fallbacks.push_back(env(base) + "/Git/usr/bin/sh.exe");
+                fallbacks.push_back(env(base) + "/Git/bin/sh.exe");
+            }
+        if (!env("LOCALAPPDATA").empty()) fallbacks.push_back(env("LOCALAPPDATA") + "/Programs/Git/usr/bin/sh.exe");
+        PosixShell s = find_posix_shell(split_path_list(path, ';'), env("PHX_SH"), env("MSYSTEM"), fallbacks);
+        if (!s.add_path.empty()) {
+            std::string np = "PATH=";
+            for (std::string d : s.add_path) {
+                for (char& c : d) if (c == '/') c = '\\';
+                np += d + ";";
+            }
+            _putenv((np + path).c_str());
+        }
+        return s;
+    }();
+    return shell;
+}
+#endif
+
+// Is `tool` available? Absolute/relative paths are checked directly; bare names are looked up
+// on PATH (the studio inherits the environment it was launched from; on Windows, extended by
+// host_posix_shell so the answer matches what a launch will see).
+inline bool tool_available(const std::string& tool) {
+#ifdef _WIN32
+    const PosixShell& sh = host_posix_shell();
+    const char* path = std::getenv("PATH");
+    return !resolve_tool(tool, split_path_list(path ? path : "", ';'), true, sh.root).empty();
+#else
+    const char* path = std::getenv("PATH");
+    return !resolve_tool(tool, split_path_list(path ? path : "", ':'), false).empty();
+#endif
+}
+
+// A launch need with its $VAR / ${VAR} references filled in by `env` (a lookup returning "" when
+// unset). The console SDK variables default the way the Makefile defaults them: DEVKITPRO to
+// /opt/devkitpro and DEVKITARM to $DEVKITPRO/devkitARM. Another unset variable stays as written.
+template <class Env>
+std::string expand_need_vars(const std::string& need, const Env& env) {
+    auto value = [&](const std::string& k) -> std::string {
+        std::string v = env(k);
+        if (!v.empty()) return v;
+        if (k == "DEVKITPRO") return "/opt/devkitpro";
+        if (k == "DEVKITARM") {
+            const std::string dkp = env("DEVKITPRO");
+            return (dkp.empty() ? std::string("/opt/devkitpro") : dkp) + "/devkitARM";
+        }
+        return "$" + k;
+    };
+    auto ident = [](char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; };
+    std::string o;
+    for (size_t i = 0; i < need.size();) {
+        if (need[i] != '$') { o += need[i++]; continue; }
+        size_t b = i + 1, e;
+        const bool braced = b < need.size() && need[b] == '{';
+        if (braced) {
+            e = need.find('}', b + 1);
+            if (e == std::string::npos) { o += need.substr(i); break; }
+            o += value(need.substr(b + 1, e - b - 1));
+            i = e + 1;
+        } else {
+            e = b;
+            while (e < need.size() && ident(need[e])) ++e;
+            if (e == b) { o += need[i++]; continue; }
+            o += value(need.substr(b, e - b));
+            i = e;
+        }
+    }
+    return o;
+}
+
+// The first missing requirement of a launch (with its variables filled in), or "" when it can run.
+inline std::string missing_need(const Launch& l) {
+    auto env = [](const std::string& k) { const char* v = std::getenv(k.c_str()); return std::string(v ? v : ""); };
+    for (const std::string& n : l.needs) {
+        const std::string need = expand_need_vars(n, env);
+        if (!tool_available(need)) return need;
+    }
+    return "";
+}
+
+// A POSIX process wait status (pclose) -> an exit code; signals map to 128+N like a shell.
+// (Windows jobs read the exit code directly; see winjob.h.)
 inline int exit_code_from_status(int status) {
     if (status == -1) return -1;
-#ifdef _WIN32
-    return status;                                   // _pclose returns the exit code itself
-#else
     if ((status & 0x7f) == 0) return (status >> 8) & 0xff;
     return 128 + (status & 0x7f);
-#endif
 }
 
 // ============================================================================================
@@ -1212,54 +1504,13 @@ private:
 // layout math (pure; the GUI shell only draws what these compute)
 // ============================================================================================
 
-struct Rect {
-    int x = 0, y = 0, w = 0, h = 0;
-    bool contains(int px, int py) const { return px >= x && py >= y && px < x + w && py < y + h; }
-    Rect inset(int d) const { return Rect{ x + d, y + d, std::max(0, w - 2 * d), std::max(0, h - 2 * d) }; }
-};
-
-// Largest integer upscale of (w,h) that fits the box (≥1), or a proportional DOWNscale when
-// even 1:1 overflows; the result is centered in the box.
-inline Rect fit_rect(int w, int h, const Rect& box, int max_scale = 8) {
-    if (w <= 0 || h <= 0 || box.w <= 0 || box.h <= 0) return Rect{ box.x, box.y, 0, 0 };
-    int dw, dh;
-    if (w <= box.w && h <= box.h) {
-        int k = std::min(box.w / w, box.h / h);
-        k = std::max(1, std::min(k, max_scale));
-        dw = w * k; dh = h * k;
-    } else {
-        // shrink: keep the aspect, limited by the tighter axis (integer math, never overflows)
-        if (int64_t(w) * box.h > int64_t(h) * box.w) { dw = box.w; dh = int(int64_t(h) * box.w / w); }
-        else                                         { dh = box.h; dw = int(int64_t(w) * box.h / h); }
-        dw = std::max(1, dw); dh = std::max(1, dh);
-    }
-    return Rect{ box.x + (box.w - dw) / 2, box.y + (box.h - dh) / 2, dw, dh };
-}
-
-// Clamp a list's first-visible row so the last page is full (and ≥ 0).
-inline int clamp_scroll(int scroll, int count, int visible) {
-    const int max_first = std::max(0, count - std::max(1, visible));
-    return std::max(0, std::min(scroll, max_first));
-}
-
-// Scrollbar thumb geometry along a track of `track` pixels.
-inline void scroll_thumb(int count, int visible, int scroll, int track, int& pos, int& len) {
-    if (count <= visible || count <= 0) { pos = 0; len = track; return; }
-    len = std::max(6, int(int64_t(track) * visible / count));
-    const int span = track - len;
-    const int max_first = count - visible;
-    pos = max_first > 0 ? int(int64_t(span) * clamp_scroll(scroll, count, visible) / max_first) : 0;
-}
-
-// The first-visible row for a click/drag at `offset` pixels along the track (thumb centered).
-inline int scroll_from_track(int count, int visible, int track, int offset) {
-    if (count <= visible || track <= 0) return 0;
-    int pos = 0, len = 0;
-    scroll_thumb(count, visible, 0, track, pos, len);
-    const int span = std::max(1, track - len);
-    const int p = std::max(0, std::min(span, offset - len / 2));
-    return clamp_scroll(int((int64_t(p) * (count - visible) + span / 2) / span), count, visible);
-}
+// The Rect / fit / scroll math is the widget kit's (tools/common/twk_geom.h), so the model and the
+// GUI agree on one geometry type.
+using twk::Rect;
+using twk::fit_rect;
+using twk::clamp_scroll;
+using twk::scroll_thumb;
+using twk::scroll_from_track;
 
 // Waveform columns: per-column min/max sample (for a peak display `cols` pixels wide).
 inline void waveform(const int16_t* s, uint32_t frames, int cols,
@@ -1300,7 +1551,7 @@ inline std::vector<std::string> find_bundles(const std::string& root) {
         std::vector<std::string> here;
         for (const auto& e : fs::directory_iterator(dir, ec))
             if (e.is_regular_file(ec) && e.path().extension() == ".phxp")
-                here.push_back(fs::relative(e.path(), root, ec).string());
+                here.push_back(fs::relative(e.path(), root, ec).generic_string());
         std::sort(here.begin(), here.end());
         out.insert(out.end(), here.begin(), here.end());
     }

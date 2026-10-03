@@ -15,6 +15,9 @@ using LogSink = void (*)(LogLevel, const char* msg);
 void log_set_sink(LogSink sink);     // wired to the platform's log function at boot
 void log_set_level(LogLevel level);  // runtime floor (in addition to the compile floor)
 void log_emit(LogLevel level, const char* fmt, ...);   // formats into a fixed stack buffer
+// Warnings / errors emitted since boot (whatever the level floor shows): what a budget report
+// counts (phx/runtime/budget.h).
+uint32_t log_count(LogLevel level);
 
 } // namespace phx
 

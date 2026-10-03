@@ -86,7 +86,9 @@ bool obj_shape_size(uint8_t w, uint8_t h, uint16_t& shape, uint16_t& size) {
 
 class GbaPpuBackend final : public IRenderBackend {
 public:
-    void init(phx_gfx* gfx, ArenaAllocator& a, const Caps& caps) {
+    // False when the arena can't hold the backend's stores (Config::total_ram too small): the
+    // renderer then fails to create with an error instead of writing through a null store.
+    bool init(phx_gfx* gfx, ArenaAllocator& a, const Caps& caps) {
         gfx_       = gfx;
         tiles_     = a.alloc_array<PpuTile>(kTileCap);
         tile_bank_ = a.alloc_array<uint8_t>(kTileCap);
@@ -99,7 +101,11 @@ public:
         oam_       = a.alloc_array<PpuObj>(kObjMax);
 #if !defined(PHX_GBA_HW)
         scratch_ = a.alloc_array<uint32_t>(kScreenW * kScreenH);   // compose target (host/sw tier)
+        if (!scratch_) return false;
 #endif
+        if (!tiles_ || !tile_bank_ || !obj_tiles_ || !tex_ || !free_ || !maps_ || !oam_) return false;
+        for (int s = 0; s < kBgSlots; ++s)
+            if (!win_[s]) return false;
 
         // Tile 0 is the reserved fully-transparent tile (BG "empty" cells point here).
         for (auto& r : tiles_[0].row) r = 0;
@@ -117,6 +123,7 @@ public:
 #if defined(PHX_GBA_HW)
         phx_gba_set_direct(1);   // we own the display; the platform must not Mode-3-blit over VRAM
 #endif
+        return true;
     }
 
     // Accepts the PPU's two texture encodings and fails (kNoTexture) on the honest GBA
@@ -709,8 +716,7 @@ private:
 
 IRenderBackend* phx_make_render_backend(phx_gfx* gfx, ArenaAllocator& arena, const Caps& caps) {
     GbaPpuBackend* be = arena.make<GbaPpuBackend>();
-    if (!be) return nullptr;
-    be->init(gfx, arena, caps);
+    if (!be || !be->init(gfx, arena, caps)) return nullptr;
     return be;
 }
 

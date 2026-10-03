@@ -2,6 +2,36 @@
 
 > **Status:** analysis + implementation plan (2026-09-11), written against the tree at
 > `v0.1.0` + the unreleased `tinyllm` work.
+>
+> **Implementation status (2026-09-23).** The plan was followed. What exists today:
+>
+> - **Phase 1**: `phx/platform/desktop.h`, implemented by `sdl` and a scripted `null` queue.
+> - **Phase 2**: `tools/common/twk.h`.
+> - **Phase 4**: the Studio Editor workspace with code, sprite/pixel, tilemap and data-table
+>   panels. `phxtmap` / `phxentity` are now those panels in a one-document shell.
+> - **Phase 7**: the Run view.
+> - **Test gate**: the `editors` suite on `make check`.
+>
+> Also built (2026-09-23, **Phase 3 in part**): `phxproject.json` projects with a hard access
+> boundary (a project writes only its own folder; the engine's public API is read-only),
+> New-project templates, and generic `make game | game-assets | play PROJECT=` rules.
+>
+> What is not done:
+>
+> - **The rest of Phase 3**: no in-process bake (projects bake through `make game-assets`) and no
+>   sources glob list.
+> - **Phase 5**: per-tier previews exist in the Assets view, but the editors paint RGBA.
+> - **Phase 6**: no in-process play mode. Games launch as child processes, and the map editor can
+>   **play from here**. Pause, single-step and a live entity inspector live in the running game
+>   instead (`phx/runtime/devtools.h`). There is no input replay yet. (Phase 5's spawn art is
+>   done: the map editor draws spawns as their prefab sprites.)
+> - **Phase 8** is done differently from this plan. `PHX_COMPONENT` (`phx/ecs/reflect.h`)
+>   registers a game's components; `make game` exports them to `build/components.json`; the
+>   table editor ticks them onto prefab records; and the level loader builds them from those
+>   columns. There is no live entity inspector during play (that needs Phase 6's in-process play).
+> - **The CI / CMake part of Phase 9**: the editors are Makefile-only.
+>
+> Usage: `tools/phxstudio/instructions.md`.
 > **Question answered:** *Is it feasible to build a graphical interface for this engine, and if
 > so, how — step by step?*
 > **Short answer:** **Yes.** It is not only feasible, the repository already contains two working

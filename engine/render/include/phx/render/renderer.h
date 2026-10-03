@@ -116,6 +116,7 @@ public:
     void      unload_texture(TextureId);
     uint16_t  live_textures() const { return live_tex_; }   // outstanding uploaded textures
     const RenderStats& stats() const { return stats_; }
+    const Camera2D&    camera() const { return cam_; }   // the camera of the last begin_frame
 
 private:
     Renderer() = default;

@@ -1,0 +1,24 @@
+{
+  "name": "Emberwing",
+  "description": "Cinder Hollow: the engine's showcase platformer (GBA, PSP, PC)",
+  "source": ["src"],
+  "assets": [],
+  "bundles": ["../../emberwing.phxp", "../../build/emberwing.phxp"],
+  "launches": [
+    { "label": "Play", "group": "play",
+      "command": "cd \"$PHX_ROOT\" && make emberwing-sdl && ./build/emberwing_sdl",
+      "blurb": "Software renderer + the real audio device", "needs": ["sdl2-config"], "windowed": true },
+    { "label": "Play (OpenGL)", "group": "play",
+      "command": "cd \"$PHX_ROOT\" && make emberwing-gl && ./build/emberwing_gl",
+      "blurb": "The same game through the OpenGL backend", "needs": ["sdl2-config"], "windowed": true },
+    { "label": "Playthrough test", "group": "test",
+      "command": "make -C \"$PHX_ROOT\" emberwing emberwing-ppu",
+      "blurb": "The headless verified playthrough, on the software and the GBA-PPU renderers" },
+    { "label": "GBA ROM", "group": "console",
+      "command": "cd \"$PHX_ROOT\" && make gba-emberwing-ppu && (command -v mgba-qt >/dev/null && mgba-qt build/gba/phx-emberwing-ppu.gba || echo 'ROM built: build/gba/phx-emberwing-ppu.gba')",
+      "blurb": "devkitARM -> the shipping GBA ROM (native PPU), opened in mGBA", "needs": ["/opt/devkitpro/devkitARM/bin/arm-none-eabi-g++"], "windowed": true },
+    { "label": "PSP EBOOT", "group": "console",
+      "command": "make -C \"$PHX_ROOT\" psp-emberwing",
+      "blurb": "pspsdk -> build/psp/emberwing/EBOOT.PBP (run it in PPSSPP)", "needs": ["psp-g++"] }
+  ]
+}

@@ -36,7 +36,11 @@ changes get a line under `[Unreleased]` in `CHANGELOG.md`. `CONTRIBUTING.md` is 
 contributor guide.
 
 `make check` runs many separate suite binaries (`smoke render ppu gu playable physics anim scene ui
-platformer emberwing emberwing-ppu audio texcache png sprite tiled resource phxpack pipeline tools`). Each is its own Make
+platformer emberwing emberwing-ppu audio texcache png sprite tiled resource phxpack pipeline tools`,
+plus `level`: the engine level loader over baked map/prefabs/sprite, `behaviours`: the stock
+behaviours played from prefab data alone, `flow`: the data-driven game flow, `dialogue`: .dlg conversations (the
+runtime vs the Studio's simulator, a talk screen, a Talk NPC), and `project-check`: the Studio's
+new-project template baked and run headlessly on the PC, GBA and PSP profiles). Each is its own Make
 target that builds and runs one binary — e.g. `make physics`, `make ppu`, `make pipeline`. **To run
 a single suite, run its target.** There is no per-test-case filter; the unit harness
 (`tests/phx_test.h`) runs every `PHX_TEST` registered in the binary. Expected output:
@@ -79,6 +83,7 @@ make sdl / make gl              # build the windowed SW / OpenGL example (opens 
 make sdl-verify / make gl-verify  # render through real SDL/GL, read back, diff vs software golden
 make audio-verify               # open a real SDL audio device, confirm non-silent mixer output
 make tmap / make entity         # the GUI editors (phxtmap tilemap / phxentity table editor)
+# CMake: -DPHX_USE_SDL=ON also builds phxstudio / phxtmap / phxentity (phxnew always)
 ```
 
 `PHX_MAX_FRAMES=N ./build/<binary>` gives any windowed binary a bounded, clean-exit smoke run.
@@ -96,7 +101,19 @@ make win                  # MinGW-w64 -> build/win/*.exe: EVERY host binary as s
 make win-verify           # run the Windows unit-suite exe under Wine (native or flatpak)
 make size-gate            # GBA ROM/IWRAM/EWRAM budget gate (MVP gate; CI job)
 make gba-save / psp-save  # console save-path smoke ROM/EBOOT (verify on mGBA / PPSSPP)
+make game-gba | game-psp PROJECT=path   # a game project (PHX_GAME, no main()) -> .gba / EBOOT.PBP
+make game-export PROJECT=path EXPORT=pc|gba|psp   # -> <project>/dist/<name>-<target>/ + .zip for players
+make project-budget PROJECT=path        # run it headlessly as PC/GBA/PSP -> build/budget-*.json (Studio: Budget)
+make game-debug PROJECT=path            # play it under gdb: a crash prints every thread's backtrace
 ```
+
+Game projects (folders with `phxproject.json`) name their Game with `PHX_GAME` (`phx/runtime/main.h`);
+the engine owns `main()` per target (`engine/runtime/src/entry/{desktop,gba,psp}_main.cpp`, linked only
+by the project rules) and applies each target's profile (GBA: 160 KB arena, 240x160; PSP: 4 MB).
+`phx::Level` (`phx/runtime/level.h`) builds entities from a map's spawns + the `prefabs` table (columns
+read by name via phxbin's schema trailer, `phx/resource/table.h`); per-spawn properties override columns;
+`PHX_COMPONENT` (`phx/ecs/reflect.h`) makes a game's components data-buildable and exportable to the Studio;
+the engine's stock behaviours (`phx/runtime/behaviours.h`) are such components, run by one `Behaviours` system.
 
 GBA has no filesystem: `gba-platformer` bakes the `.phxp` bundle on the host (tier 0 — sounds are
 resampled to the GBA device rate at bake time) and links it into the ROM with `bin2s`. Canonical
@@ -158,13 +175,20 @@ compile-time capability tier and render tier via `cmake/caps_select.cmake` → `
   rate at bake time). Two-stage pipeline (docs/08): per-format **converters** (`phxsprite`/
   `phxtile`/`phxsnd`/`phxbin`) bake author sources into intermediate `.phx*` files, which the
   **`phxpack` assembler** merges (it can also bake sources directly). All share one bake path,
-  `tools/phxpack/builders.h`. Tools are **host-only** (STL allowed); engine code is not.
+  `tools/phxpack/builders.h`. Sound effects (`.sfx`) and music (`.song`, a pattern tracker) are
+  synthesized to PCM at bake time (`tools/phxpack/synth.h`), never at runtime; fonts (`.font` grid
+  sheets, BMFont `.fnt`) bake to a glyph table (`tools/phxpack/font.h`) that `phx/runtime/font.h`
+  loads into a proportional ui `BitmapFont`. Tools are
+  **host-only** (STL allowed); engine code is not.
 - **GUI editors** (`phxtmap` tilemap, `phxentity` record tables) **dogfood the engine** — same App
   loop / SDL window / soft renderer / UI as the games, no separate UI toolkit. They emit **author
   formats the converters bake** (`.tmj`, phxbin JSON), never engine blobs, and each splits a
   headlessly unit-tested document model (`tools/<editor>/editor.h`, covered in the pipeline suite)
   from a thin GUI shell (`main.cpp`). Every tool folder has an `instructions.md` with usage,
   formats, and controls.
+  Phoenix Studio's text is JetBrains Mono, rasterized with stb_truetype and drawn at window
+  resolution through the desktop seam's overlay (`phx_desktop_overlay_begin`) on the same 6px/10px
+  canvas grid as the 5x7 bitmap font it falls back to (`tools/common/instructions.md`).
 - **The platformer** (`examples/platformer/`) is the MVP gate: a full game slice using **only**
   engine systems. Nothing gameplay-relevant is hardcoded — level/spawns come from a Tiled map
   (incl. per-layer parallax factors), hero anim from a Sprite asset, SFX from baked WAVs.
