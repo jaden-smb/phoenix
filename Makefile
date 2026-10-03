@@ -472,12 +472,15 @@ check: test smoke render ppu gu playable physics anim scene ui platformer emberw
 # Determinism gate: the SAME suites under scalar=float (pc) and scalar=fixed16 (gba_sim) must
 # print identical outcomes AND render the byte-identical frame. Cheap to run: the per-tier
 # object dirs mean the second tier is mostly relinks. This is a named release gate (docs/09 §5).
-DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test
+# Under `make -jN` the suites run concurrently and finish in any order: --output-sync (GNU make
+# >= 4.0) keeps each suite's output in one piece, and sorting makes the logs order-independent.
+DET_SUITES := test render ppu gu physics anim scene ui platformer emberwing emberwing-ppu miracle-test tinyllm-test level behaviours flow dialogue
+DET_SYNC   := $(if $(filter output-sync,$(.FEATURES)),--output-sync=target)
 determinism:
 	@echo "determinism gate: pc (scalar=float) vs gba_sim (scalar=fixed16)"
-	@$(MAKE) -s $(DET_SUITES) TIER=pc      | grep -aE "PASS|FAIL" > $(BUILD)/det-pc.log
+	@$(MAKE) -s $(DET_SYNC) $(DET_SUITES) TIER=pc      | grep -aE "PASS|FAIL" | LC_ALL=C sort > $(BUILD)/det-pc.log
 	@cp $(BUILD)/render_out.ppm $(BUILD)/det-pc.ppm
-	@$(MAKE) -s $(DET_SUITES) TIER=gba_sim | grep -aE "PASS|FAIL" > $(BUILD)/det-gba.log
+	@$(MAKE) -s $(DET_SYNC) $(DET_SUITES) TIER=gba_sim | grep -aE "PASS|FAIL" | LC_ALL=C sort > $(BUILD)/det-gba.log
 	@cp $(BUILD)/render_out.ppm $(BUILD)/det-gba.ppm
 	@diff $(BUILD)/det-pc.log $(BUILD)/det-gba.log >/dev/null \
 	  && cmp -s $(BUILD)/det-pc.ppm $(BUILD)/det-gba.ppm \

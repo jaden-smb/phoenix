@@ -39,6 +39,11 @@ All notable changes to Phoenix are documented here. The format follows
   Previously only `phx_gba_audio_start()` did, so a compute-heavy silent ROM had its sim clock
   dilate (one step per loop iteration regardless of how many vblanks really passed).
 
+### Fixed
+- **`make -j determinism` failing on suite completion order.** The gate diffed the two tiers'
+  outcome lines in print order, which varies when suites run concurrently; it now compares them
+  sorted, with each suite's output kept whole via `--output-sync` (GNU make >= 4.0).
+
 ## [0.1.0] - 2026-08-02
 
 First tagged release: the complete engine slice proven on all four targets.
