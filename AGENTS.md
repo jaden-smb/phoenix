@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file provides guidance to AI coding agents (Claude Code, Codex) when working with code in this repository.
 
 ## What this is
 
@@ -36,11 +36,12 @@ changes get a line under `[Unreleased]` in `CHANGELOG.md`. `CONTRIBUTING.md` is 
 contributor guide.
 
 `make check` runs many separate suite binaries (`smoke render ppu gu playable physics anim scene ui
-platformer emberwing emberwing-ppu audio texcache png sprite tiled resource phxpack pipeline tools`,
+platformer emberwing emberwing-ppu audio texcache png sprite tiled resource phxpack pipeline editors tools`,
 plus `level`: the engine level loader over baked map/prefabs/sprite, `behaviours`: the stock
 behaviours played from prefab data alone, `flow`: the data-driven game flow, `dialogue`: .dlg conversations (the
-runtime vs the Studio's simulator, a talk screen, a Talk NPC), and `project-check`: the Studio's
-new-project template baked and run headlessly on the PC, GBA and PSP profiles). Each is its own Make
+runtime vs the Studio's simulator, a talk screen, a Talk NPC), `project-check`: the Studio's
+new-project template baked and run headlessly on the PC, GBA and PSP profiles, and the example
+projects' own `miracle-test` and `tinyllm-test`). Each is its own Make
 target that builds and runs one binary — e.g. `make physics`, `make ppu`, `make pipeline`. **To run
 a single suite, run its target.** There is no per-test-case filter; the unit harness
 (`tests/phx_test.h`) runs every `PHX_TEST` registered in the binary. Expected output:
@@ -82,7 +83,9 @@ host/Windows builds pick it up for free from `-DCMAKE_BUILD_TYPE=Release` (which
 make sdl / make gl              # build the windowed SW / OpenGL example (opens a window)
 make sdl-verify / make gl-verify  # render through real SDL/GL, read back, diff vs software golden
 make audio-verify               # open a real SDL audio device, confirm non-silent mixer output
-make tmap / make entity         # the GUI editors (phxtmap tilemap / phxentity table editor)
+make studio                     # Phoenix Studio (build/phxstudio): a GAME PROJECT editor (--project DIR); --engine-dev = the whole checkout
+make play PROJECT=dir           # build + bake + run a game project (make game / game-assets [TIER=0|1|2] = one step each)
+make tmap / make entity         # the Studio's map / table editors as standalone windows (phxtmap / phxentity)
 # CMake: -DPHX_USE_SDL=ON also builds phxstudio / phxtmap / phxentity (phxnew always)
 ```
 
@@ -180,15 +183,27 @@ compile-time capability tier and render tier via `cmake/caps_select.cmake` → `
   sheets, BMFont `.fnt`) bake to a glyph table (`tools/phxpack/font.h`) that `phx/runtime/font.h`
   loads into a proportional ui `BitmapFont`. Tools are
   **host-only** (STL allowed); engine code is not.
-- **GUI editors** (`phxtmap` tilemap, `phxentity` record tables) **dogfood the engine** — same App
-  loop / SDL window / soft renderer / UI as the games, no separate UI toolkit. They emit **author
-  formats the converters bake** (`.tmj`, phxbin JSON), never engine blobs, and each splits a
-  headlessly unit-tested document model (`tools/<editor>/editor.h`, covered in the pipeline suite)
-  from a thin GUI shell (`main.cpp`). Every tool folder has an `instructions.md` with usage,
-  formats, and controls.
-  Phoenix Studio's text is JetBrains Mono, rasterized with stb_truetype and drawn at window
-  resolution through the desktop seam's overlay (`phx_desktop_overlay_begin`) on the same 6px/10px
-  canvas grid as the 5x7 bitmap font it falls back to (`tools/common/instructions.md`).
+- **Phoenix Studio + the GUI editors dogfood the engine** — same App loop / SDL window / soft
+  renderer as the games, with the tool widget kit (`tools/common/twk.h`, an immediate-mode GUI over
+  `phx::UI` rect/image) on top; no separate UI toolkit. Editor panels (`tools/phxstudio/ed_*.cpp`:
+  code, sprite/pixel, tilemap, data table) sit behind a `Host` interface (`host.h`); the Studio
+  hosts them in tabs, and `phxtmap` / `phxentity` are the map / table panels in a one-document
+  shell (`solo.h`). Tools reach desktop-only input (keys, text, right/middle/wheel, clipboard,
+  resize, confirm-quit) through **`phx/platform/desktop.h`**, implemented ONLY by the `sdl`
+  backend and a scripted `null` queue — never extend `phx_input_raw`/`phx_platform` for tools.
+  Editors **emit author formats the converters bake** (`.png`, `.sprdef`, `.tmj`, phxbin JSON),
+  never engine blobs. Every document model is headless and unit-tested (`make editors`, `make
+  pipeline`), and each saved form is re-read by the bake's own loaders there. **Project mode is
+  a hard boundary**: with a `phxproject.json` project open, the Studio may WRITE only inside that
+  folder and READ only the engine's public headers (`engine/*/include`) + docs. Every open, save and
+  New-file target goes through `Host::access()` (`projectdoc.h: AccessPolicy`, tested in `make
+  editors`), so a new code path that loads a file must check it too. `--engine-dev` lifts it. Every
+  tool folder has an `instructions.md` with usage, formats, and controls. The soft renderer
+  alpha-TESTS (no blending) and sorts sprites by (layer, z, texture) — see
+  `tools/phxstudio/instructions.md` for the consequences (stippled overlays, one sub-layer per
+  stacked texture). The Studio's text is JetBrains Mono, rasterized with stb_truetype and drawn at
+  window resolution through the desktop seam's overlay (`phx_desktop_overlay_begin`) on the same
+  6px/10px canvas grid as the 5x7 bitmap font it falls back to (`tools/common/instructions.md`).
 - **The platformer** (`examples/platformer/`) is the MVP gate: a full game slice using **only**
   engine systems. Nothing gameplay-relevant is hardcoded — level/spawns come from a Tiled map
   (incl. per-layer parallax factors), hero anim from a Sprite asset, SFX from baked WAVs.
@@ -215,6 +230,8 @@ compile-time capability tier and render tier via `cmake/caps_select.cmake` → `
 - The **null platform's virtual clock** advances one sim step per `pump_events()` (frame) plus 1 µs
   per `clock_ns()` read — frame pacing is independent of how often the loop reads the clock. Tests
   asserting exact fixed-step counts rely on this; don't switch it back to per-read stepping.
-- `STATUS.md` is the detailed running engineering log (numbered entries); consult it for context on
-  past hardware-verification work and gotchas (e.g. mGBA/PPSSPP verification recipes, the
-  `__cxa_guard` GBA deadlock, the PSP `sceIo` NOCWD save-path fix).
+- Console gotchas that already bit once: a function-local `static` with a runtime initializer
+  deadlocks on GBA because GCC's `__cxa_guard_acquire` hits devkitARM's newlib lock stubs — hence
+  `-fno-threadsafe-statics` in the cross-build flags (see the comment above `GBA_FLAGS` in the
+  `Makefile`); and PSP `sceIoOpen` on a relative save path fails with `SCE_KERNEL_ERROR_NOCWD` under
+  PPSSPP, so a bare save key is anchored at `ms0:/PSP/SAVEDATA/PHX/` (`engine/platform/src/psp/psp_platform.cpp`).
